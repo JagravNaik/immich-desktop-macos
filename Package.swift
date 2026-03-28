@@ -38,5 +38,9 @@ let package = Package(
       name: "ImmichMacApp",
       dependencies: ["ImmichCore", "ImmichAPI", "ImmichPersistence", "ImmichMedia", "ImmichSync"]
     ),
+    .testTarget(
+      name: "ImmichAPITests",
+      dependencies: ["ImmichAPI", "ImmichCore"]
+    ),
   ]
 )

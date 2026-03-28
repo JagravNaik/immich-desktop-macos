@@ -19,4 +19,20 @@ cd desktop-macos
 swift run ImmichMacApp
 ```
 
-The starter app currently supports basic server connectivity against `/api/server-info` and serves as a foundation for timeline and upload milestones.
+The starter app now opens with a server verification screen, then a password login screen that uses Immich's `/api/auth/login` flow. After sign-in it shows the authenticated macOS scaffold, which is still a foundation for timeline and upload milestones rather than a full remote library implementation.
+
+## Build a macOS `.app` bundle
+
+```bash
+./desktop-macos/scripts/build-app.sh
+```
+
+The bundle is created at `desktop-macos/.build/app/ImmichMacApp.app`.
+
+Useful options:
+
+```bash
+./desktop-macos/scripts/build-app.sh --open
+./desktop-macos/scripts/build-app.sh --debug
+./desktop-macos/scripts/build-app.sh --output /tmp/immich-macos
+```
