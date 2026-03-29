@@ -54,8 +54,11 @@ final class ContentViewModel: ObservableObject {
     let isVideo: Bool
     let isImported: Bool
     let livePhotoVideoID: String?
+    let latitude: Double?
+    let longitude: Double?
     let durationText: String?
-    let locationText: String?
+    let city: String?
+    let country: String?
     let stackCount: Int?
     let timeBucketKey: String
 
@@ -109,8 +112,58 @@ final class ContentViewModel: ObservableObject {
   @Published var selectedItemID: String?
   @Published var isViewingPhoto = false
   @Published var isViewingLivePhoto = false
+  @Published var isPeeking = false
+  @Published var showInfoPopover = false
   @Published var uploadRows: [UploadRow] = []
   @Published var libraryItems: [PhotoItem] = []
+  @Published var hoveredItemID: String?
+
+  func handlePressureChange(stage: Int, pressure: Double) {
+    // Detailed logging for debugging
+    if pressure > 0.05 {
+        immichLog("[Pressure] Stage: \(stage), Pressure: \(String(format: "%.2f", pressure)), Hovered: \(self.hoveredItemID ?? "none"), Viewing: \(self.isViewingPhoto)")
+    }
+
+    // Thresholds: Stage 2 is "Deep Press", but we can also use raw pressure for sensitivity
+    let isDeepPress = stage == 2 || pressure > 0.65
+    
+    if isDeepPress {
+      if !self.isViewingLivePhoto {
+        // Determine which item is being targeted
+        if self.isViewingPhoto {
+          // Already in viewer, just start playback
+          immichLog("[Pressure] Deep press ACTIVATED while in viewer")
+          withAnimation(.easeInOut(duration: 0.15)) {
+            self.isViewingLivePhoto = true
+            self.isPeeking = false
+          }
+        } else if let hoveredID = self.hoveredItemID,
+                  let item = self.libraryItems.first(where: { $0.id == hoveredID }),
+                  item.livePhotoVideoID != nil {
+          // In grid, start peek
+          immichLog("[Pressure] Deep press ACTIVATED from grid on \(hoveredID)")
+          self.selectedItemID = hoveredID
+          withAnimation(.easeInOut(duration: 0.15)) {
+            self.isViewingLivePhoto = true
+            self.isViewingPhoto = true
+            self.isPeeking = true
+          }
+        }
+      }
+    } else if pressure < 0.15 {
+      // Released or returning to normal click stage
+      if self.isViewingLivePhoto {
+        immichLog("[Pressure] Deep press RELEASED. isPeeking: \(self.isPeeking)")
+        withAnimation(.easeInOut(duration: 0.2)) {
+          self.isViewingLivePhoto = false
+          if self.isPeeking {
+            self.isViewingPhoto = false
+            self.isPeeking = false
+          }
+        }
+      }
+    }
+  }
 
   func selectNextItem() {
     guard let selectedItemID, let currentIndex = filteredItems.firstIndex(where: { $0.id == selectedItemID }) else {
@@ -451,8 +504,11 @@ final class ContentViewModel: ObservableObject {
         isVideo: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()),
         isImported: true,
         livePhotoVideoID: nil,
+        latitude: nil,
+        longitude: nil,
         durationText: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? "Ready to upload" : nil,
-        locationText: nil,
+        city: nil,
+        country: nil,
         stackCount: nil,
         timeBucketKey: Self.timelineBucketKey(for: .now)
       )
@@ -591,6 +647,9 @@ final class ContentViewModel: ObservableObject {
           timeBucket: bucket.timeBucket
         )
         immichLog("[Timeline] Bucket \(bucket.timeBucket): got \(assets.count) assets, \(assets.filter { !$0.isTrashed }.count) non-trashed")
+        
+        let livePhotos = assets.filter { $0.livePhotoVideoID != nil }
+        immichLog("[Timeline] Found \(livePhotos.count) Live Photos in bucket \(bucket.timeBucket)")
 
         let timelineItems = assets
           .filter { !$0.isTrashed }
@@ -665,8 +724,11 @@ final class ContentViewModel: ObservableObject {
       isVideo: !asset.isImage,
       isImported: false,
       livePhotoVideoID: asset.livePhotoVideoID,
+      latitude: asset.latitude,
+      longitude: asset.longitude,
       durationText: asset.duration,
-      locationText: locationText.isEmpty ? nil : locationText,
+      city: asset.city,
+      country: asset.country,
       stackCount: asset.stackChildrenCount,
       timeBucketKey: timeBucket
     )

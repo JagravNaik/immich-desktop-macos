@@ -14,22 +14,31 @@ struct PhotoViewerOverlay: View {
 
   var body: some View {
     ZStack {
-      Color.black.opacity(0.9)
-        .ignoresSafeArea()
-        .onTapGesture {
-          withAnimation(.easeInOut(duration: 0.2)) {
-            viewModel.isViewingPhoto = false
+      if let videoURL = self.playbackURL(for: item) {
+        ZStack(alignment: .topLeading) {
+          AuthenticatedVideoPlayer(
+            url: videoURL,
+            accessToken: viewModel.thumbnailContext?.accessToken ?? "",
+            showControls: !viewModel.isViewingLivePhoto
+          )
+          
+          if item.livePhotoVideoID != nil {
+            liveBadge
           }
         }
-
-      if let videoURL = self.playbackURL(for: item) {
-        AuthenticatedVideoPlayer(url: videoURL, accessToken: viewModel.thumbnailContext?.accessToken ?? "")
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else if let image {
-        Image(nsImage: image)
-          .resizable()
-          .scaledToFit()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ZStack(alignment: .topLeading) {
+          Image(nsImage: image)
+            .resizable()
+            .scaledToFit()
+          
+          if item.livePhotoVideoID != nil {
+            liveBadge
+              .padding(12)
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         if isLoading {
           ProgressView()
@@ -80,6 +89,28 @@ struct PhotoViewerOverlay: View {
         self.isLoading = false
       }
     }
+  }
+
+  private var liveBadge: some View {
+    Button {
+      withAnimation(.easeInOut(duration: 0.2)) {
+        viewModel.isViewingLivePhoto.toggle()
+        viewModel.isPeeking = false
+      }
+    } label: {
+      HStack(spacing: 4) {
+        Image(systemName: "livephoto")
+        if viewModel.isViewingLivePhoto {
+          Text("LIVE")
+            .font(.system(size: 10, weight: .bold))
+        }
+      }
+      .foregroundStyle(viewModel.isViewingLivePhoto ? Color.accentColor : .white)
+      .padding(6)
+      .background(.black.opacity(0.3))
+      .clipShape(Capsule())
+    }
+    .buttonStyle(.plain)
   }
 
   private func playbackURL(for item: ContentViewModel.PhotoItem) -> URL? {

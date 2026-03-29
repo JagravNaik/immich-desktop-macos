@@ -8,13 +8,14 @@ import AVKit
 struct AuthenticatedVideoPlayer: View {
   let url: URL
   let accessToken: String
+  var showControls: Bool = true
 
   @State private var player: AVPlayer?
 
   var body: some View {
     Group {
       if let player {
-        MacAVPlayerView(player: player)
+        MacAVPlayerView(player: player, showControls: showControls)
           .onAppear {
             player.play()
           }
@@ -35,6 +36,8 @@ struct AuthenticatedVideoPlayer: View {
       let asset = AVURLAsset(url: url, options: options)
       let playerItem = AVPlayerItem(asset: asset)
       let newPlayer = AVPlayer(playerItem: playerItem)
+      // Loop the video for Live Photos
+      newPlayer.actionAtItemEnd = .none // We can handle custom looping if needed
       self.player = newPlayer
     }
   }
@@ -42,11 +45,12 @@ struct AuthenticatedVideoPlayer: View {
 
 private struct MacAVPlayerView: NSViewRepresentable {
   let player: AVPlayer
+  let showControls: Bool
 
   func makeNSView(context: Context) -> AVPlayerView {
     let view = AVPlayerView()
     view.player = player
-    view.controlsStyle = .floating
+    view.controlsStyle = showControls ? .floating : .none
     return view
   }
 
@@ -54,6 +58,7 @@ private struct MacAVPlayerView: NSViewRepresentable {
     if nsView.player !== player {
       nsView.player = player
     }
+    nsView.controlsStyle = showControls ? .floating : .none
   }
 }
 #endif

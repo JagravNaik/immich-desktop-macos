@@ -34,10 +34,12 @@ struct ContentView: View {
         libraryShell
       }
 
-      if viewModel.isViewingPhoto, let item = viewModel.selectedItem {
-        PhotoViewerOverlay(viewModel: viewModel, store: thumbnailStore, item: item)
-          .transition(.opacity)
-      }
+
+    }
+    .overlay {
+        ForceTouchOverlay(onPressureChange: viewModel.handlePressureChange)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .allowsHitTesting(false) // Let clicks pass through, but NSView catches pressure
     }
     .onAppear {
       viewModel.autoSignInIfNeeded()
@@ -109,18 +111,88 @@ struct ContentView: View {
   }
 
   private var detail: some View {
-    VStack(spacing: 0) {
-      header
-      photoGrid
+    ZStack {
+      if viewModel.isViewingPhoto, let selectedItem = viewModel.selectedItem {
+        PhotoViewerOverlay(viewModel: viewModel, store: thumbnailStore, item: selectedItem)
+          .background(Color(white: 0.08)) // Dark charcoal gray like Apple Photos
+      } else {
+        VStack(spacing: 0) {
+          header
+          photoGrid
 
-      if let selectedItem = viewModel.selectedItem {
-        Divider()
-        metadataPanel(for: selectedItem)
+        }
+        .background(.background)
       }
     }
-    .background(.background)
     .searchable(text: $viewModel.searchText, placement: .toolbar, prompt: "Search")
-    .toolbar { primaryToolbar }
+    .toolbar {
+      if viewModel.isViewingPhoto {
+        viewingToolbar
+      } else {
+        primaryToolbar
+      }
+    }
+  }
+
+  private var viewingToolbar: some ToolbarContent {
+    Group {
+      ToolbarItem(placement: .navigation) {
+        Button {
+          withAnimation(.easeInOut(duration: 0.2)) {
+            viewModel.isViewingPhoto = false
+            viewModel.isViewingLivePhoto = false
+          }
+        } label: {
+          Image(systemName: "chevron.left")
+            .font(.system(size: 16, weight: .medium))
+        }
+        .help("Back to Library")
+      }
+
+      ToolbarItem(placement: .principal) {
+        if let item = viewModel.selectedItem {
+          VStack(spacing: 0) {
+            Text(item.date, style: .date)
+              .font(.headline)
+            Text(item.date, style: .time)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
+      }
+
+      ToolbarItemGroup(placement: .primaryAction) {
+        if let item = viewModel.selectedItem {
+          Button {
+            // Share
+          } label: {
+            Image(systemName: "square.and.arrow.up")
+          }
+
+          Button {
+            // Favorite toggle logic here
+          } label: {
+            Image(systemName: item.isFavorite ? "heart.fill" : "heart")
+              .foregroundColor(item.isFavorite ? .red : nil)
+          }
+
+          Button {
+            viewModel.showInfoPopover.toggle()
+          } label: {
+            Image(systemName: "info.circle")
+          }
+          .popover(isPresented: $viewModel.showInfoPopover, arrowEdge: .bottom) {
+            AssetInfoPopover(item: item)
+          }
+
+          Button {
+            // Delete
+          } label: {
+            Image(systemName: "trash")
+          }
+        }
+      }
+    }
   }
 
   // MARK: - Photo Grid (Sectioned Timeline)
@@ -176,13 +248,11 @@ struct ContentView: View {
                   },
                   onFavoriteToggle: { viewModel.toggleFavorite(for: item.id) }
                 )
-                .onForcePress { isPressed in
-                  if item.livePhotoVideoID != nil {
-                     viewModel.selectedItemID = item.id
-                     withAnimation(.easeInOut(duration: 0.2)) {
-                       viewModel.isViewingLivePhoto = isPressed
-                       viewModel.isViewingPhoto = isPressed
-                     }
+                .onHover { isHovering in
+                  if isHovering {
+                    viewModel.hoveredItemID = item.id
+                  } else if viewModel.hoveredItemID == item.id {
+                    viewModel.hoveredItemID = nil
                   }
                 }
               }
@@ -238,13 +308,11 @@ struct ContentView: View {
             },
             onFavoriteToggle: { viewModel.toggleFavorite(for: item.id) }
           )
-          .onForcePress { isPressed in
-            if item.livePhotoVideoID != nil {
-               viewModel.selectedItemID = item.id
-               withAnimation(.easeInOut(duration: 0.2)) {
-                 viewModel.isViewingLivePhoto = isPressed
-                 viewModel.isViewingPhoto = isPressed
-               }
+          .onHover { isHovering in
+            if isHovering {
+              viewModel.hoveredItemID = item.id
+            } else if viewModel.hoveredItemID == item.id {
+              viewModel.hoveredItemID = nil
             }
           }
         }
@@ -549,8 +617,9 @@ struct ContentView: View {
       if item.isImported {
         Label("Imported", systemImage: "square.and.arrow.down")
       }
-      if let locationText = item.locationText {
-        Label(locationText, systemImage: "location")
+      let location = [item.city, item.country].compactMap { $0 }.joined(separator: ", ")
+      if !location.isEmpty {
+        Label(location, systemImage: "location")
       }
       if let stackCount = item.stackCount, stackCount > 0 {
         Label("+\(stackCount)", systemImage: "square.stack")
@@ -608,6 +677,8 @@ private struct PhotoCard: View {
             Image(systemName: "video.fill")
             Text(item.timeLabel)
               .font(.caption2)
+          } else if item.livePhotoVideoID != nil {
+            Image(systemName: "livephoto")
           }
 
           if let stackCount = item.stackCount, stackCount > 0 {
@@ -620,7 +691,7 @@ private struct PhotoCard: View {
         .font(.caption)
         .foregroundStyle(.white)
         .padding(8)
-        .shadow(radius: 3)
+        .shadow(color: .black.opacity(0.8), radius: 3, x: 0, y: 1)
       }
 
       HStack(spacing: 8) {

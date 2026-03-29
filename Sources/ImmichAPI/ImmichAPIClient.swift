@@ -299,6 +299,8 @@ private enum TimelineBucketMapper {
         isFavorite: isFavorite,
         isImage: isImage,
         isTrashed: isTrashed,
+        latitude: response.latitude?[safe: index] ?? nil,
+        longitude: response.longitude?[safe: index] ?? nil,
         livePhotoVideoID: response.livePhotoVideoId[safe: index] ?? nil,
         ownerID: ownerID,
         projectionType: response.projectionType[safe: index] ?? nil,

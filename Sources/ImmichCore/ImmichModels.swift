@@ -105,6 +105,8 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
   public let isFavorite: Bool
   public let isImage: Bool
   public let isTrashed: Bool
+  public let latitude: Double?
+  public let longitude: Double?
   public let livePhotoVideoID: String?
   public let ownerID: String
   public let projectionType: String?
@@ -122,6 +124,8 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
     isFavorite: Bool,
     isImage: Bool,
     isTrashed: Bool,
+    latitude: Double?,
+    longitude: Double?,
     livePhotoVideoID: String?,
     ownerID: String,
     projectionType: String?,
@@ -138,6 +142,8 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
     self.isFavorite = isFavorite
     self.isImage = isImage
     self.isTrashed = isTrashed
+    self.latitude = latitude
+    self.longitude = longitude
     self.livePhotoVideoID = livePhotoVideoID
     self.ownerID = ownerID
     self.projectionType = projectionType
