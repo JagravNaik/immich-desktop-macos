@@ -9,6 +9,7 @@ import SwiftUI
 @MainActor
 final class ContentViewModel: ObservableObject {
   enum AppPhase {
+    case launching
     case serverSetup
     case login
     case library
@@ -40,17 +41,37 @@ final class ContentViewModel: ObservableObject {
   }
 
   struct PhotoItem: Identifiable {
-    let id: UUID
+    enum Source: Hashable {
+      case localFile(URL)
+      case remoteAsset(id: String)
+    }
+
+    let id: String
+    let source: Source
     var title: String
     var date: Date
     var isFavorite: Bool
     let isVideo: Bool
     let isImported: Bool
+    let livePhotoVideoID: String?
+    let durationText: String?
+    let locationText: String?
+    let stackCount: Int?
+    let timeBucketKey: String
 
     var timeLabel: String {
-      if isVideo { return "0:24" }
+      if let durationText, isVideo {
+        return durationText
+      }
       return ""
     }
+  }
+
+  struct LibrarySection: Identifiable {
+    let id: String
+    let title: String
+    let itemCount: Int
+    let items: [PhotoItem]
   }
 
   struct UploadRow: Identifiable {
@@ -60,10 +81,17 @@ final class ContentViewModel: ObservableObject {
     var state: UploadState
   }
 
-  @Published var appPhase: AppPhase = .serverSetup
-  @Published var serverURLText = "http://localhost:2283"
-  @Published var emailText = ""
-  @Published var passwordText = ""
+  @Published var appPhase: AppPhase = {
+    if UserDefaults.standard.string(forKey: "immich.serverURL") != nil,
+       UserDefaults.standard.string(forKey: "immich.email") != nil,
+       let pass = UserDefaults.standard.string(forKey: "immich.password"), !pass.isEmpty {
+      return .launching
+    }
+    return .serverSetup
+  }()
+  @Published var serverURLText = UserDefaults.standard.string(forKey: "immich.serverURL") ?? ""
+  @Published var emailText = UserDefaults.standard.string(forKey: "immich.email") ?? ""
+  @Published var passwordText = UserDefaults.standard.string(forKey: "immich.password") ?? ""
   @Published var statusText = "Enter your Immich server URL to continue."
   @Published var isConnecting = false
   @Published var isSigningIn = false
@@ -74,12 +102,35 @@ final class ContentViewModel: ObservableObject {
   @Published var connectedServerVersion: String?
   @Published var connectedServerDisplayURL: String?
   @Published var currentSession: UserSession?
+  @Published var isLoadingTimeline = false
 
   @Published var searchText = ""
   @Published var selectedSidebarItem: SidebarItem = .library
-  @Published var selectedItemID: UUID?
+  @Published var selectedItemID: String?
+  @Published var isViewingPhoto = false
+  @Published var isViewingLivePhoto = false
   @Published var uploadRows: [UploadRow] = []
   @Published var libraryItems: [PhotoItem] = []
+
+  func selectNextItem() {
+    guard let selectedItemID, let currentIndex = filteredItems.firstIndex(where: { $0.id == selectedItemID }) else {
+      selectedItemID = filteredItems.first?.id
+      return
+    }
+    if currentIndex < filteredItems.count - 1 {
+      self.selectedItemID = filteredItems[currentIndex + 1].id
+    }
+  }
+
+  func selectPreviousItem() {
+    guard let selectedItemID, let currentIndex = filteredItems.firstIndex(where: { $0.id == selectedItemID }) else {
+      selectedItemID = filteredItems.first?.id
+      return
+    }
+    if currentIndex > 0 {
+      self.selectedItemID = filteredItems[currentIndex - 1].id
+    }
+  }
 
   var filteredItems: [PhotoItem] {
     let sectionFiltered: [PhotoItem] = switch selectedSidebarItem {
@@ -104,31 +155,102 @@ final class ContentViewModel: ObservableObject {
     }
   }
 
+  var librarySections: [LibrarySection] {
+    guard selectedSidebarItem == .library else {
+      return []
+    }
+
+    let groupedItems = Dictionary(grouping: filteredItems, by: \.timeBucketKey)
+    return groupedItems
+      .keys
+      .sorted(by: >)
+      .compactMap { bucketKey in
+        guard let items = groupedItems[bucketKey]?.sorted(by: { $0.date > $1.date }) else {
+          return nil
+        }
+
+        return LibrarySection(
+          id: bucketKey,
+          title: Self.date(forTimelineBucket: bucketKey).map(Self.timelineSectionFormatter.string(from:)) ?? bucketKey,
+          itemCount: items.count,
+          items: items
+        )
+      }
+  }
+
   var selectedItem: PhotoItem? {
     guard let selectedItemID else { return nil }
     return libraryItems.first(where: { $0.id == selectedItemID })
   }
 
+  var itemCountText: String {
+    if selectedSidebarItem == .library, totalTimelineItemCount > loadedRemoteTimelineItemCount, searchText.isEmpty {
+      return "\(loadedRemoteTimelineItemCount) of \(totalTimelineItemCount) items loaded"
+    }
+
+    return "\(filteredItems.count) items"
+  }
+
+  var canLoadMoreTimeline: Bool {
+    loadedTimelineBucketKeys.count < timelineBuckets.count
+  }
+
+  var timelineFooterMessage: String? {
+    guard selectedSidebarItem == .library, searchText.isEmpty else {
+      return nil
+    }
+
+    if isLoadingTimeline, libraryItems.isEmpty == false {
+      return "Loading more photos…"
+    }
+
+    if canLoadMoreTimeline {
+      return "Load more"
+    }
+
+    return nil
+  }
+
+  var thumbnailContext: ThumbnailContext? {
+    guard let connectedServer, let currentSession else {
+      return nil
+    }
+
+    return ThumbnailContext(baseURL: connectedServer.baseURL, accessToken: currentSession.accessToken)
+  }
+
   var emptyStateTitle: String {
     switch selectedSidebarItem {
     case .library:
-      "Connected successfully"
+      if isLoadingTimeline {
+        return "Loading timeline"
+      }
+
+      return "Library is empty"
     case .favorites:
-      "No favorites yet"
+      return "No favorites yet"
     case .recents:
-      "No recent items"
+      return "No recent items"
     case .videos:
-      "No videos yet"
+      return "No videos yet"
     case .imports:
-      "No imports yet"
+      return "No imports yet"
     }
   }
 
   var emptyStateMessage: String {
     switch selectedSidebarItem {
     case .library:
+      if isLoadingTimeline {
+        return "We’re fetching the latest months from your Immich library."
+      }
+
+      if let timelineErrorMessage {
+        return timelineErrorMessage
+      }
+
       if let session = currentSession {
-        return "Signed in as \(session.userEmail). Remote timeline browsing is not implemented in the macOS scaffold yet."
+        return "Signed in as \(session.userEmail), but this timeline does not have any assets yet."
       }
 
       return "Sign in to an Immich server to continue."
@@ -142,6 +264,31 @@ final class ContentViewModel: ObservableObject {
   private let apiClient: any ImmichAPIClient
   private let uploadQueue = UploadQueue()
   private var connectedServer: ImmichServer?
+  private var timelineBuckets: [TimelineBucketSummary] = []
+  private var loadedTimelineBucketKeys: [String] = []
+  private var totalTimelineItemCount = 0
+  private var timelineErrorMessage: String?
+
+  struct ThumbnailContext {
+    let baseURL: URL
+    let accessToken: String
+  }
+
+  private var loadedRemoteTimelineItemCount: Int {
+    libraryItems.filter { !$0.isImported }.count
+  }
+
+  private static let timelinePageSize = 6
+  private static let timelineBucketFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withFullDate]
+    return formatter
+  }()
+  private static let timelineSectionFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "LLLL yyyy"
+    return formatter
+  }()
 
   init(apiClient: any ImmichAPIClient = URLSessionImmichAPIClient()) {
     self.apiClient = apiClient
@@ -173,7 +320,9 @@ final class ContentViewModel: ObservableObject {
       passwordLoginEnabled = loginConfiguration.passwordLoginEnabled
       oauthEnabled = loginConfiguration.oauthEnabled
       oauthButtonText = loginConfiguration.oauthButtonText.isEmpty ? "OAuth" : loginConfiguration.oauthButtonText
-      passwordText = ""
+      
+      UserDefaults.standard.set(trimmedServerURL, forKey: "immich.serverURL")
+      
       appPhase = .login
       statusText = "Connected • Immich \(info.version)"
     } catch {
@@ -206,12 +355,36 @@ final class ContentViewModel: ObservableObject {
     do {
       let session = try await apiClient.login(server: connectedServer, email: trimmedEmail, password: passwordText)
       emailText = trimmedEmail
+      UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
+      UserDefaults.standard.set(passwordText, forKey: "immich.password")
       currentSession = session
       selectedSidebarItem = .library
+      libraryItems = []
+      selectedItemID = nil
+      timelineBuckets = []
+      loadedTimelineBucketKeys = []
+      totalTimelineItemCount = 0
+      timelineErrorMessage = nil
       appPhase = .library
-      statusText = "Signed in as \(session.userName) • Immich \(connectedServerVersion ?? "")"
+      statusText = "Signed in as \(session.userName) • Loading timeline…"
+      immichLog("[Auth] Signed in as \(session.userName), calling loadRemoteTimeline...")
+      await loadRemoteTimeline(reset: true)
+      immichLog("[Auth] loadRemoteTimeline returned, libraryItems.count = \(libraryItems.count)")
     } catch {
       statusText = "Sign in failed: \(error.localizedDescription)"
+    }
+  }
+
+  func autoSignInIfNeeded() {
+    guard appPhase == .launching else { return }
+    
+    Task {
+      await connect()
+      if appPhase == .login {
+        await signIn()
+      } else {
+        appPhase = .serverSetup
+      }
     }
   }
 
@@ -229,8 +402,13 @@ final class ContentViewModel: ObservableObject {
     searchText = ""
     uploadRows = []
     libraryItems = []
+    isLoadingTimeline = false
     selectedItemID = nil
     selectedSidebarItem = .library
+    timelineBuckets = []
+    loadedTimelineBucketKeys = []
+    totalTimelineItemCount = 0
+    timelineErrorMessage = nil
     appPhase = .serverSetup
     statusText = "Enter your Immich server URL to continue."
   }
@@ -241,13 +419,18 @@ final class ContentViewModel: ObservableObject {
     searchText = ""
     selectedItemID = nil
     libraryItems = []
+    isLoadingTimeline = false
     uploadRows = []
     selectedSidebarItem = .library
+    timelineBuckets = []
+    loadedTimelineBucketKeys = []
+    totalTimelineItemCount = 0
+    timelineErrorMessage = nil
     appPhase = .login
     statusText = "Connected • Immich \(connectedServerVersion ?? "")"
   }
 
-  func toggleFavorite(for itemID: UUID) {
+  func toggleFavorite(for itemID: String) {
     guard let index = libraryItems.firstIndex(where: { $0.id == itemID }) else { return }
     var updatedItems = libraryItems
     updatedItems[index].isFavorite.toggle()
@@ -260,12 +443,18 @@ final class ContentViewModel: ObservableObject {
     for url in urls {
       let uploadItem = UploadItem(fileURL: url)
       let importedItem = PhotoItem(
-        id: UUID(),
+        id: UUID().uuidString,
+        source: .localFile(url),
         title: url.deletingPathExtension().lastPathComponent,
         date: .now,
         isFavorite: false,
         isVideo: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()),
-        isImported: true
+        isImported: true,
+        livePhotoVideoID: nil,
+        durationText: ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? "Ready to upload" : nil,
+        locationText: nil,
+        stackCount: nil,
+        timeBucketKey: Self.timelineBucketKey(for: .now)
       )
 
       var updatedUploadRows = uploadRows
@@ -287,13 +476,39 @@ final class ContentViewModel: ObservableObject {
     }
   }
 
+  func loadMoreTimelineIfNeeded(after sectionID: String) {
+    guard
+      appPhase == .library,
+      selectedSidebarItem == .library,
+      searchText.isEmpty,
+      canLoadMoreTimeline,
+      isLoadingTimeline == false,
+      loadedTimelineBucketKeys.last == sectionID
+    else {
+      return
+    }
+
+    Task {
+      await loadNextTimelinePage()
+    }
+  }
+
+  func loadMoreTimeline() async {
+    await loadNextTimelinePage()
+  }
+
   private func markUploading(_ item: UploadItem) async {
     for progressStep in stride(from: 0.1, through: 1.0, by: 0.1) {
+      guard Task.isCancelled == false else { return }
       await uploadQueue.markUploading(item, progress: progressStep)
       await MainActor.run {
         updateUploadRow(id: item.id, progress: progressStep, state: .uploading(progress: progressStep))
       }
-      try? await Task.sleep(for: .milliseconds(120))
+      do {
+        try await Task.sleep(for: .milliseconds(120))
+      } catch {
+        return
+      }
     }
 
     await uploadQueue.markDone(item)
@@ -308,6 +523,164 @@ final class ContentViewModel: ObservableObject {
     updatedUploadRows[index].progress = progress
     updatedUploadRows[index].state = state
     uploadRows = updatedUploadRows
+  }
+
+  private func loadRemoteTimeline(reset: Bool) async {
+    guard let connectedServer, let currentSession else {
+      immichLog("[Timeline] loadRemoteTimeline: no server or session")
+      return
+    }
+
+    if reset {
+      isLoadingTimeline = true
+      timelineErrorMessage = nil
+
+      do {
+        let buckets = try await apiClient.fetchTimelineBuckets(server: connectedServer, session: currentSession)
+        timelineBuckets = buckets.filter { $0.count > 0 }
+        loadedTimelineBucketKeys = []
+        totalTimelineItemCount = timelineBuckets.reduce(0) { $0 + $1.count }
+        immichLog("[Timeline] Fetched \(timelineBuckets.count) buckets, total \(totalTimelineItemCount) items")
+        if let first = timelineBuckets.first {
+          immichLog("[Timeline] First bucket: \(first.timeBucket) (\(first.count) items)")
+        }
+      } catch {
+        immichLog("[Timeline] Bucket fetch failed: \(error)")
+        timelineErrorMessage = "We signed in successfully, but the timeline could not be loaded: \(error.localizedDescription)"
+        statusText = "Signed in • Timeline failed to load"
+        isLoadingTimeline = false
+        return
+      }
+    }
+
+    await loadNextTimelinePage()
+  }
+
+  private func loadNextTimelinePage() async {
+    guard let connectedServer, let currentSession else {
+      return
+    }
+
+    guard isLoadingTimeline == false || loadedTimelineBucketKeys.isEmpty else {
+      return
+    }
+
+    let nextBuckets = timelineBuckets.dropFirst(loadedTimelineBucketKeys.count).prefix(Self.timelinePageSize)
+    guard nextBuckets.isEmpty == false else {
+      isLoadingTimeline = false
+      updateTimelineStatus()
+      return
+    }
+
+    isLoadingTimeline = true
+    timelineErrorMessage = nil
+    defer {
+      isLoadingTimeline = false
+      updateTimelineStatus()
+    }
+
+    do {
+      var newItems: [PhotoItem] = []
+      var fetchedBucketKeys: [String] = []
+
+      for bucket in nextBuckets {
+        immichLog("[Timeline] Fetching bucket \(bucket.timeBucket) (expected \(bucket.count) items)...")
+        let assets = try await apiClient.fetchTimelineBucket(
+          server: connectedServer,
+          session: currentSession,
+          timeBucket: bucket.timeBucket
+        )
+        immichLog("[Timeline] Bucket \(bucket.timeBucket): got \(assets.count) assets, \(assets.filter { !$0.isTrashed }.count) non-trashed")
+
+        let timelineItems = assets
+          .filter { !$0.isTrashed }
+          .map { asset in
+            Self.makePhotoItem(from: asset, timeBucket: bucket.timeBucket)
+          }
+
+        newItems.append(contentsOf: timelineItems)
+        fetchedBucketKeys.append(bucket.timeBucket)
+      }
+
+      immichLog("[Timeline] Page loaded: \(newItems.count) new items total")
+      let allItems = libraryItems + newItems
+      let deduplicatedItems = Dictionary(uniqueKeysWithValues: allItems.map { ($0.id, $0) })
+      loadedTimelineBucketKeys.append(contentsOf: fetchedBucketKeys)
+      libraryItems = deduplicatedItems.values.sorted { $0.date > $1.date }
+      immichLog("[Timeline] Library now has \(libraryItems.count) items")
+
+      if selectedItemID == nil {
+        selectedItemID = libraryItems.first?.id
+      }
+    } catch {
+      immichLog("[Timeline] Page fetch FAILED: \(error)")
+      timelineErrorMessage = "We couldn't load more photos from the timeline: \(error.localizedDescription)"
+    }
+  }
+
+  private func updateTimelineStatus() {
+    guard let session = currentSession else {
+      return
+    }
+
+    if let timelineErrorMessage {
+      statusText = timelineErrorMessage
+      return
+    }
+
+    if totalTimelineItemCount == 0 {
+      statusText = "Signed in as \(session.userName) • No timeline assets found"
+      return
+    }
+
+    if canLoadMoreTimeline {
+      statusText = "Signed in as \(session.userName) • Loaded \(loadedRemoteTimelineItemCount) of \(totalTimelineItemCount) items"
+      return
+    }
+
+    statusText = "Signed in as \(session.userName) • Loaded \(loadedRemoteTimelineItemCount) items"
+  }
+
+  private static func makePhotoItem(from asset: RemoteTimelineAsset, timeBucket: String) -> PhotoItem {
+    let locationText = [asset.city, asset.country]
+      .compactMap { $0 }
+      .filter { !$0.isEmpty }
+      .joined(separator: ", ")
+
+    let title: String
+    if locationText.isEmpty == false {
+      title = locationText
+    } else if asset.isImage {
+      title = "Photo"
+    } else {
+      title = "Video"
+    }
+
+    return PhotoItem(
+      id: asset.id,
+      source: .remoteAsset(id: asset.id),
+      title: title,
+      date: asset.createdAt,
+      isFavorite: asset.isFavorite,
+      isVideo: !asset.isImage,
+      isImported: false,
+      livePhotoVideoID: asset.livePhotoVideoID,
+      durationText: asset.duration,
+      locationText: locationText.isEmpty ? nil : locationText,
+      stackCount: asset.stackChildrenCount,
+      timeBucketKey: timeBucket
+    )
+  }
+
+  private static func timelineBucketKey(for date: Date) -> String {
+    let components = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: date)
+    let year = components.year ?? 1970
+    let month = components.month ?? 1
+    return String(format: "%04d-%02d-01", year, month)
+  }
+
+  private static func date(forTimelineBucket value: String) -> Date? {
+    timelineBucketFormatter.date(from: value)
   }
 }
 #endif

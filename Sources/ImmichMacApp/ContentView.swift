@@ -6,6 +6,7 @@ import AppKit
 
 struct ContentView: View {
   @StateObject var viewModel: ContentViewModel
+  @StateObject private var thumbnailStore = ThumbnailStore()
 
   private let gridColumns = [
     GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 12),
@@ -13,17 +14,50 @@ struct ContentView: View {
 
   @ViewBuilder
   var body: some View {
-    switch viewModel.appPhase {
-    case .serverSetup:
-      authShell {
-        serverSetupCard
+    ZStack {
+      switch viewModel.appPhase {
+      case .launching:
+        authShell {
+          ProgressView("Connecting...")
+            .controlSize(.large)
+            .padding(32)
+        }
+      case .serverSetup:
+        authShell {
+          serverSetupCard
+        }
+      case .login:
+        authShell {
+          loginCard
+        }
+      case .library:
+        libraryShell
       }
-    case .login:
-      authShell {
-        loginCard
+
+      if viewModel.isViewingPhoto, let item = viewModel.selectedItem {
+        PhotoViewerOverlay(viewModel: viewModel, store: thumbnailStore, item: item)
+          .transition(.opacity)
       }
-    case .library:
-      libraryShell
+    }
+    .onAppear {
+      viewModel.autoSignInIfNeeded()
+      NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        if event.keyCode == 49 { // Spacebar
+          if let firstResponder = NSApp.keyWindow?.firstResponder, NSStringFromClass(type(of: firstResponder)).contains("NSTextView") {
+            return event
+          }
+          if viewModel.appPhase == .library, viewModel.selectedItem != nil {
+            withAnimation(.easeInOut(duration: 0.2)) {
+              if !viewModel.isViewingPhoto {
+                viewModel.isViewingLivePhoto = false
+              }
+              viewModel.isViewingPhoto.toggle()
+            }
+            return nil // Consume the event to prevent ScrollView jumping
+          }
+        }
+        return event
+      }
     }
   }
 
@@ -89,24 +123,20 @@ struct ContentView: View {
     .toolbar { primaryToolbar }
   }
 
+  // MARK: - Photo Grid (Sectioned Timeline)
+
   private var photoGrid: some View {
     Group {
       if viewModel.filteredItems.isEmpty {
-        emptyState
-      } else {
-        ScrollView {
-          LazyVGrid(columns: gridColumns, spacing: 12) {
-            ForEach(viewModel.filteredItems) { item in
-              PhotoCard(
-                item: item,
-                isSelected: item.id == viewModel.selectedItemID,
-                onSelect: { viewModel.selectedItemID = item.id },
-                onFavoriteToggle: { viewModel.toggleFavorite(for: item.id) }
-              )
-            }
-          }
-          .padding(16)
+        if viewModel.isLoadingTimeline {
+          loadingState
+        } else {
+          emptyState
         }
+      } else if viewModel.selectedSidebarItem == .library && viewModel.searchText.isEmpty {
+        sectionedTimeline
+      } else {
+        flatGrid
       }
     }
     .dropDestination(for: URL.self) { items, _ in
@@ -114,6 +144,128 @@ struct ContentView: View {
       return true
     }
   }
+
+  private var sectionedTimeline: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 24) {
+        ForEach(viewModel.librarySections) { section in
+          VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .lastTextBaseline) {
+              Text(section.title)
+                .font(.title3.weight(.semibold))
+              Text("\(section.itemCount)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+
+            LazyVGrid(columns: gridColumns, spacing: 12) {
+              ForEach(section.items) { item in
+                PhotoCard(
+                  item: item,
+                  isSelected: item.id == viewModel.selectedItemID,
+                  context: viewModel.thumbnailContext,
+                  thumbnailStore: thumbnailStore,
+                  onSelect: { viewModel.selectedItemID = item.id },
+                  onDoubleTap: {
+                    viewModel.selectedItemID = item.id
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                      viewModel.isViewingLivePhoto = false
+                      viewModel.isViewingPhoto = true
+                    }
+                  },
+                  onFavoriteToggle: { viewModel.toggleFavorite(for: item.id) }
+                )
+                .onForcePress { isPressed in
+                  if item.livePhotoVideoID != nil {
+                     viewModel.selectedItemID = item.id
+                     withAnimation(.easeInOut(duration: 0.2)) {
+                       viewModel.isViewingLivePhoto = isPressed
+                       viewModel.isViewingPhoto = isPressed
+                     }
+                  }
+                }
+              }
+            }
+          }
+          .onAppear {
+            viewModel.loadMoreTimelineIfNeeded(after: section.id)
+          }
+        }
+
+        // Load-more footer
+        if let footerMessage = viewModel.timelineFooterMessage {
+          HStack {
+            Spacer()
+            if viewModel.isLoadingTimeline {
+              ProgressView()
+                .controlSize(.small)
+              Text(footerMessage)
+                .foregroundStyle(.secondary)
+            } else {
+              Button(footerMessage) {
+                Task {
+                  await viewModel.loadMoreTimeline()
+                }
+              }
+              .buttonStyle(.bordered)
+            }
+            Spacer()
+          }
+          .padding(.vertical, 16)
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var flatGrid: some View {
+    ScrollView {
+      LazyVGrid(columns: gridColumns, spacing: 12) {
+        ForEach(viewModel.filteredItems) { item in
+          PhotoCard(
+            item: item,
+            isSelected: item.id == viewModel.selectedItemID,
+            context: viewModel.thumbnailContext,
+            thumbnailStore: thumbnailStore,
+            onSelect: { viewModel.selectedItemID = item.id },
+            onDoubleTap: {
+              viewModel.selectedItemID = item.id
+              withAnimation(.easeInOut(duration: 0.2)) {
+                viewModel.isViewingLivePhoto = false
+                viewModel.isViewingPhoto = true
+              }
+            },
+            onFavoriteToggle: { viewModel.toggleFavorite(for: item.id) }
+          )
+          .onForcePress { isPressed in
+            if item.livePhotoVideoID != nil {
+               viewModel.selectedItemID = item.id
+               withAnimation(.easeInOut(duration: 0.2)) {
+                 viewModel.isViewingLivePhoto = isPressed
+                 viewModel.isViewingPhoto = isPressed
+               }
+            }
+          }
+        }
+      }
+      .padding(16)
+    }
+  }
+
+  private var loadingState: some View {
+    VStack(spacing: 16) {
+      ProgressView()
+        .controlSize(.large)
+      Text("Loading your library…")
+        .font(.title3.weight(.medium))
+        .foregroundStyle(.secondary)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .padding(32)
+  }
+
+  // MARK: - Sidebar Sections
 
   private var accountSection: some View {
     Section("Account") {
@@ -164,6 +316,8 @@ struct ContentView: View {
     }
   }
 
+  // MARK: - Toolbar
+
   @ToolbarContentBuilder
   private var primaryToolbar: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
@@ -177,6 +331,8 @@ struct ContentView: View {
       } label: {
         Image(systemName: "square.and.arrow.up")
       }
+      .disabled(true)
+      .help("Share (coming soon)")
 
       Menu {
         Button("Date Captured") {}
@@ -187,6 +343,8 @@ struct ContentView: View {
     }
   }
 
+  // MARK: - Header
+
   private var header: some View {
     VStack(alignment: .leading, spacing: 6) {
       Text(viewModel.selectedSidebarItem.rawValue)
@@ -194,7 +352,7 @@ struct ContentView: View {
         .fontWeight(.semibold)
 
       HStack {
-        Text("\(viewModel.filteredItems.count) items")
+        Text(viewModel.itemCountText)
           .foregroundStyle(.secondary)
 
         Spacer()
@@ -208,6 +366,8 @@ struct ContentView: View {
     .padding(.vertical, 12)
     .background(.bar)
   }
+
+  // MARK: - Auth Screens
 
   private var authHero: some View {
     VStack(spacing: 14) {
@@ -389,6 +549,12 @@ struct ContentView: View {
       if item.isImported {
         Label("Imported", systemImage: "square.and.arrow.down")
       }
+      if let locationText = item.locationText {
+        Label(locationText, systemImage: "location")
+      }
+      if let stackCount = item.stackCount, stackCount > 0 {
+        Label("+\(stackCount)", systemImage: "square.stack")
+      }
       Spacer()
     }
     .font(.caption)
@@ -411,23 +577,27 @@ struct ContentView: View {
   }
 }
 
+// MARK: - PhotoCard
+
 private struct PhotoCard: View {
   let item: ContentViewModel.PhotoItem
   let isSelected: Bool
+  let context: ContentViewModel.ThumbnailContext?
+  @ObservedObject var thumbnailStore: ThumbnailStore
   let onSelect: () -> Void
+  let onDoubleTap: () -> Void
   let onFavoriteToggle: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       ZStack(alignment: .bottomLeading) {
-        RoundedRectangle(cornerRadius: 10)
-          .fill(.quaternary)
-          .aspectRatio(1, contentMode: .fit)
-          .overlay {
-            Image(systemName: item.isVideo ? "video" : "photo")
-              .font(.system(size: 22, weight: .medium))
-              .foregroundStyle(.secondary)
-          }
+        AssetThumbnailView(
+          item: item,
+          context: context,
+          store: thumbnailStore
+        )
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
 
         HStack(spacing: 6) {
           if item.isFavorite {
@@ -437,6 +607,13 @@ private struct PhotoCard: View {
           if item.isVideo {
             Image(systemName: "video.fill")
             Text(item.timeLabel)
+              .font(.caption2)
+          }
+
+          if let stackCount = item.stackCount, stackCount > 0 {
+            Image(systemName: "square.stack")
+              .font(.caption2)
+            Text("+\(stackCount)")
               .font(.caption2)
           }
         }
@@ -470,7 +647,13 @@ private struct PhotoCard: View {
       RoundedRectangle(cornerRadius: 12)
         .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
     }
-    .onTapGesture(perform: onSelect)
+    .onTapGesture(count: 2) {
+      onSelect()
+      onDoubleTap()
+    }
+    .onTapGesture(count: 1) {
+      onSelect()
+    }
   }
 }
 #endif

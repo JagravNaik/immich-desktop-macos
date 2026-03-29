@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
+import AVKit
 
 @main
 struct ImmichMacApp: App {

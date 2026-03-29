@@ -86,6 +86,68 @@ public struct UserSession: Sendable {
   }
 }
 
+public struct TimelineBucketSummary: Decodable, Hashable, Sendable {
+  public let timeBucket: String
+  public let count: Int
+
+  public init(timeBucket: String, count: Int) {
+    self.timeBucket = timeBucket
+    self.count = count
+  }
+}
+
+public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let city: String?
+  public let country: String?
+  public let createdAt: Date
+  public let duration: String?
+  public let isFavorite: Bool
+  public let isImage: Bool
+  public let isTrashed: Bool
+  public let livePhotoVideoID: String?
+  public let ownerID: String
+  public let projectionType: String?
+  public let ratio: Double
+  public let stackChildrenCount: Int?
+  public let thumbhash: String?
+  public let visibility: String
+
+  public init(
+    id: String,
+    city: String?,
+    country: String?,
+    createdAt: Date,
+    duration: String?,
+    isFavorite: Bool,
+    isImage: Bool,
+    isTrashed: Bool,
+    livePhotoVideoID: String?,
+    ownerID: String,
+    projectionType: String?,
+    ratio: Double,
+    stackChildrenCount: Int?,
+    thumbhash: String?,
+    visibility: String
+  ) {
+    self.id = id
+    self.city = city
+    self.country = country
+    self.createdAt = createdAt
+    self.duration = duration
+    self.isFavorite = isFavorite
+    self.isImage = isImage
+    self.isTrashed = isTrashed
+    self.livePhotoVideoID = livePhotoVideoID
+    self.ownerID = ownerID
+    self.projectionType = projectionType
+    self.ratio = ratio
+    self.stackChildrenCount = stackChildrenCount
+    self.thumbhash = thumbhash
+    self.visibility = visibility
+  }
+}
+
 public struct UploadItem: Identifiable, Equatable, Sendable {
   public let id: UUID
   public let fileURL: URL
