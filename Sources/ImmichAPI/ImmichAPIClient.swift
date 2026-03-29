@@ -468,25 +468,20 @@ private enum TimelineBucketMapper {
     }
   }
 
-  static let dateFormatters: [DateFormatter] = {
-    let formats = [
-      "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
-      "yyyy-MM-dd'T'HH:mm:ssZ",
-      "yyyy-MM-dd'T'HH:mm:ss.SSS",
-      "yyyy-MM-dd'T'HH:mm:ss"
-    ]
-    return formats.map { format in
+  private static let dateFormats = [
+    "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+    "yyyy-MM-dd'T'HH:mm:ssZ",
+    "yyyy-MM-dd'T'HH:mm:ss.SSS",
+    "yyyy-MM-dd'T'HH:mm:ss"
+  ]
+
+  static func parseDate(_ value: String) -> Date? {
+    for format in dateFormats {
       let formatter = DateFormatter()
       formatter.calendar = Calendar(identifier: .iso8601)
       formatter.locale = Locale(identifier: "en_US_POSIX")
       formatter.timeZone = TimeZone(secondsFromGMT: 0)
       formatter.dateFormat = format
-      return formatter
-    }
-  }()
-
-  private static func parseDate(_ value: String) -> Date? {
-    for formatter in dateFormatters {
       if let date = formatter.date(from: value) {
         return date
       }
@@ -552,8 +547,8 @@ private struct AlbumResponse: Decodable {
       description: description ?? "",
       assetCount: assetCount ?? 0,
       albumThumbnailAssetId: albumThumbnailAssetId,
-      createdAt: createdAt.flatMap { s in TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first } ?? Date(),
-      updatedAt: updatedAt.flatMap { s in TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first } ?? Date(),
+      createdAt: createdAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date(),
+      updatedAt: updatedAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date(),
       isActivityEnabled: isActivityEnabled ?? false,
       shared: shared ?? false,
       hasSharedLink: hasSharedLink ?? false,
@@ -585,8 +580,8 @@ private struct AlbumDetailResponse: Decodable {
       description: description ?? "",
       assetCount: assetCount,
       albumThumbnailAssetId: albumThumbnailAssetId,
-      createdAt: TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: createdAt) }.first ?? Date(),
-      updatedAt: TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: updatedAt) }.first ?? Date(),
+      createdAt: TimelineBucketMapper.parseDate(createdAt) ?? Date(),
+      updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? Date(),
       isActivityEnabled: isActivityEnabled ?? false,
       shared: shared ?? false,
       hasSharedLink: hasSharedLink ?? false,
@@ -614,8 +609,8 @@ private struct AlbumAssetResponse: Decodable {
   let stack: AlbumAssetStackResponse?
 
   func toModel() -> RemoteTimelineAsset? {
-    guard let createdAtStr = fileCreatedAt,
-          let createdAt = TimelineBucketMapper.dateFormatters.lazy.compactMap({ $0.date(from: createdAtStr) }).first else {
+        guard let createdAtStr = fileCreatedAt,
+          let createdAt = TimelineBucketMapper.parseDate(createdAtStr) else {
       return nil
     }
     let isImage = (type ?? "IMAGE") == "IMAGE"
@@ -669,9 +664,7 @@ private struct PersonResponse: Decodable {
   let updatedAt: String?
 
   func toModel() -> Person {
-    let birthDateParsed: Date? = birthDate.flatMap { dateStr in
-      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: dateStr) }.first
-    }
+    let birthDateParsed: Date? = birthDate.flatMap { TimelineBucketMapper.parseDate($0) }
     return Person(
       id: id,
       name: name,
@@ -726,21 +719,15 @@ private struct AssetDetailResponse: Decodable {
         city: e.city, state: e.state, country: e.country,
         latitude: e.latitude, longitude: e.longitude,
         description: e.description, rating: e.rating,
-        dateTimeOriginal: e.dateTimeOriginal.flatMap { s in
-          TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-        }
+        dateTimeOriginal: e.dateTimeOriginal.flatMap { TimelineBucketMapper.parseDate($0) }
       )
     }
     return AssetDetail(
       id: id,
       type: type ?? "IMAGE",
       originalFileName: originalFileName ?? "",
-      localDateTime: localDateTime.flatMap { s in
-        TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-      },
-      fileCreatedAt: fileCreatedAt.flatMap { s in
-        TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-      },
+      localDateTime: localDateTime.flatMap { TimelineBucketMapper.parseDate($0) },
+      fileCreatedAt: fileCreatedAt.flatMap { TimelineBucketMapper.parseDate($0) },
       width: exifInfo?.exifImageWidth,
       height: exifInfo?.exifImageHeight,
       fileSizeInByte: exifInfo?.fileSizeInByte,
@@ -752,9 +739,7 @@ private struct AssetDetailResponse: Decodable {
   }
 
   func toTimelineAsset() -> RemoteTimelineAsset? {
-    guard let createdAt = fileCreatedAt.flatMap({ s in
-      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-    }) else { return nil }
+    guard let createdAt = fileCreatedAt.flatMap({ TimelineBucketMapper.parseDate($0) }) else { return nil }
 
     return RemoteTimelineAsset(
       id: id,
@@ -844,9 +829,7 @@ private struct MemoryResponse: Decodable {
   }
 
   func toModel() -> Memory {
-    let parsedDate = memoryAt.flatMap { s in
-      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-    } ?? Date()
+    let parsedDate = memoryAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date()
     let yearText = data?.year.map { "On This Day (\($0))" } ?? "Memory"
     let assetModels = (assets ?? []).compactMap { $0.toTimelineAsset() }
     return Memory(
@@ -875,12 +858,8 @@ private struct SharedLinkResponse: Decodable {
   let createdAt: String?
 
   func toModel() -> SharedLink {
-    let parsedExpiry = expiresAt.flatMap { s in
-      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-    }
-    let parsedCreated = createdAt.flatMap { s in
-      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
-    } ?? Date()
+    let parsedExpiry = expiresAt.flatMap { TimelineBucketMapper.parseDate($0) }
+    let parsedCreated = createdAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date()
     return SharedLink(
       id: id,
       type: type ?? "INDIVIDUAL",

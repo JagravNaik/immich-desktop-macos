@@ -48,13 +48,17 @@ struct PhotoDetailView: View {
         currentItemID = item.id
         isLoading = true
         loadedSize = .thumbnail
+        defer {
+          if currentItemID == item.id {
+            isLoading = false
+          }
+        }
 
         // Step 1: Show cached thumbnail immediately (already loaded from grid)
         let thumb = await thumbnailStore.loadImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
         guard currentItemID == item.id else { return }
         if let thumb {
           self.image = thumb
-          self.isLoading = false
         }
 
         // Step 2: Load preview (~1440px) for quick high-quality display
@@ -62,7 +66,6 @@ struct PhotoDetailView: View {
           guard currentItemID == item.id else { return }
           self.image = preview
           self.loadedSize = .preview
-          self.isLoading = false
         }
 
         // Step 3: Load original full-resolution (only for photos, not videos)

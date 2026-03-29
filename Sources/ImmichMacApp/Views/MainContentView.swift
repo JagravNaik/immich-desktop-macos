@@ -7,6 +7,7 @@ import AppKit
 struct MainContentView: View {
   @StateObject var appState: AppState
   @StateObject private var thumbnailStore = ThumbnailStore()
+  @State private var spacebarMonitor: Any?
 
   var body: some View {
     ZStack {
@@ -33,6 +34,9 @@ struct MainContentView: View {
     .onAppear {
       appState.autoSignInIfNeeded()
       installSpacebarHandler()
+    }
+    .onDisappear {
+      removeSpacebarHandler()
     }
   }
 
@@ -273,7 +277,8 @@ struct MainContentView: View {
   }
 
   private func installSpacebarHandler() {
-    NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    guard spacebarMonitor == nil else { return }
+    spacebarMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
       if event.keyCode == 49 { // Spacebar
         if let firstResponder = NSApp.keyWindow?.firstResponder,
            NSStringFromClass(type(of: firstResponder)).contains("NSTextView") {
@@ -294,6 +299,12 @@ struct MainContentView: View {
       }
       return event
     }
+  }
+
+  private func removeSpacebarHandler() {
+    guard let spacebarMonitor else { return }
+    NSEvent.removeMonitor(spacebarMonitor)
+    self.spacebarMonitor = nil
   }
 }
 
@@ -346,7 +357,7 @@ struct SharedLinksView: View {
                 .frame(width: 24)
 
               VStack(alignment: .leading, spacing: 2) {
-                Text(link.description ?? link.key.prefix(12) + "…")
+                Text(link.description ?? String(link.key.prefix(12)) + "…")
                   .font(.subheadline)
                 Text("\(link.assetCount) items")
                   .font(.caption)

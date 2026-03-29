@@ -160,12 +160,12 @@ struct AssetInfoInspector: View {
 
   private func loadDetail() async {
     guard case .remoteAsset(let id) = item.source,
-          let server = appState.thumbnailContext else { return }
+          let server = appState.thumbnailContext,
+          let session = appState.currentSession else { return }
     isLoading = true
     defer { isLoading = false }
     // Build server/session from context
     let serverObj = ImmichServer(baseURL: server.baseURL)
-    let session = appState.currentSession!
     do {
       detail = try await URLSessionImmichAPIClient().fetchAssetDetail(
         server: serverObj, session: session, assetId: id

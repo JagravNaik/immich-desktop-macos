@@ -247,7 +247,7 @@ final class AppState: ObservableObject {
   @Published private(set) var librarySections: [LibrarySection] = []
 
   func rebuildLibrarySections() {
-    let items = filteredItems
+    let items = libraryItems
     let groupedItems = Dictionary(grouping: items, by: \.timeBucketKey)
     librarySections = groupedItems.keys.sorted(by: >).compactMap { bucketKey in
       guard let items = groupedItems[bucketKey]?.sorted(by: { $0.date > $1.date }) else { return nil }
@@ -423,7 +423,11 @@ final class AppState: ObservableObject {
     activeSharedLinkItems = []
     assetStatistics = nil
     isViewingPhoto = false
+    isViewingLivePhoto = false
+    isPeeking = false
     isEditing = false
+    showInfoPopover = false
+    hoveredItemID = nil
     librarySections = []
   }
 
@@ -553,9 +557,41 @@ final class AppState: ObservableObject {
   // MARK: - Item Actions
 
   func toggleFavorite(for itemID: String) {
-    guard let index = libraryItems.firstIndex(where: { $0.id == itemID }) else { return }
-    libraryItems[index].isFavorite.toggle()
-    let newVal = libraryItems[index].isFavorite
+    var newVal: Bool?
+
+    if let index = libraryItems.firstIndex(where: { $0.id == itemID }) {
+      libraryItems[index].isFavorite.toggle()
+      newVal = libraryItems[index].isFavorite
+    }
+
+    if let index = activeAlbumItems.firstIndex(where: { $0.id == itemID }) {
+      if let newVal {
+        activeAlbumItems[index].isFavorite = newVal
+      } else {
+        activeAlbumItems[index].isFavorite.toggle()
+        newVal = activeAlbumItems[index].isFavorite
+      }
+    }
+
+    if let index = activePersonItems.firstIndex(where: { $0.id == itemID }) {
+      if let newVal {
+        activePersonItems[index].isFavorite = newVal
+      } else {
+        activePersonItems[index].isFavorite.toggle()
+        newVal = activePersonItems[index].isFavorite
+      }
+    }
+
+    if let index = activeSharedLinkItems.firstIndex(where: { $0.id == itemID }) {
+      if let newVal {
+        activeSharedLinkItems[index].isFavorite = newVal
+      } else {
+        activeSharedLinkItems[index].isFavorite.toggle()
+        newVal = activeSharedLinkItems[index].isFavorite
+      }
+    }
+
+    guard let newVal else { return }
 
     // Sync with server
     guard let connectedServer, let currentSession else { return }
@@ -567,6 +603,15 @@ final class AppState: ObservableObject {
         if let idx = libraryItems.firstIndex(where: { $0.id == itemID }) {
           libraryItems[idx].isFavorite = !newVal
         }
+        if let idx = activeAlbumItems.firstIndex(where: { $0.id == itemID }) {
+          activeAlbumItems[idx].isFavorite = !newVal
+        }
+        if let idx = activePersonItems.firstIndex(where: { $0.id == itemID }) {
+          activePersonItems[idx].isFavorite = !newVal
+        }
+        if let idx = activeSharedLinkItems.firstIndex(where: { $0.id == itemID }) {
+          activeSharedLinkItems[idx].isFavorite = !newVal
+        }
         immichLog("[Favorite] Sync failed: \(error)")
       }
     }
@@ -576,6 +621,8 @@ final class AppState: ObservableObject {
     guard let connectedServer, let currentSession else { return }
     libraryItems.removeAll { $0.id == itemID }
     activeAlbumItems.removeAll { $0.id == itemID }
+    activePersonItems.removeAll { $0.id == itemID }
+    activeSharedLinkItems.removeAll { $0.id == itemID }
     rebuildLibrarySections()
     if selectedItemID == itemID {
       selectedItemID = filteredItems.first?.id
