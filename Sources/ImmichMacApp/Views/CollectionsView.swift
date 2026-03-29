@@ -81,6 +81,9 @@ struct CollectionsView: View {
         LazyHStack(spacing: 16) {
           ForEach(appState.memories.prefix(10)) { memory in
             MemoryCard(memory: memory, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
+              .onTapGesture {
+                appState.sidebarSelection = .memory(id: memory.id)
+              }
           }
         }
         .padding(.horizontal, 4)
@@ -199,18 +202,36 @@ struct MemoryCard: View {
   let context: AppState.ThumbnailContext?
   @ObservedObject var thumbnailStore: ThumbnailStore
 
+  @State private var coverImage: NSImage?
+
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       ZStack(alignment: .bottomLeading) {
-        RoundedRectangle(cornerRadius: 12)
-          .fill(
-            LinearGradient(
-              colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing
+        if let coverImage {
+          Image(nsImage: coverImage)
+            .resizable()
+            .scaledToFill()
+            .frame(width: 200, height: 140)
+            .clipped()
+        } else {
+          RoundedRectangle(cornerRadius: 12)
+            .fill(
+              LinearGradient(
+                colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+              )
             )
-          )
-          .frame(width: 200, height: 140)
+            .frame(width: 200, height: 140)
+        }
+
+        // Gradient scrim for text readability
+        LinearGradient(
+          colors: [.clear, .black.opacity(0.6)],
+          startPoint: .center,
+          endPoint: .bottom
+        )
+        .frame(width: 200, height: 140)
 
         VStack(alignment: .leading, spacing: 2) {
           Text(memory.title)
@@ -223,6 +244,29 @@ struct MemoryCard: View {
         .padding(12)
       }
       .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    .contentShape(RoundedRectangle(cornerRadius: 12))
+    .task {
+      guard let firstAsset = memory.assets.first, let context else { return }
+      let item = AppState.PhotoItem(
+        id: firstAsset.id,
+        source: .remoteAsset(id: firstAsset.id),
+        title: "",
+        date: firstAsset.createdAt,
+        isFavorite: false,
+        isVideo: false,
+        isImported: false,
+        livePhotoVideoID: nil,
+        latitude: nil,
+        longitude: nil,
+        durationText: nil,
+        city: nil,
+        country: nil,
+        stackCount: nil,
+        timeBucketKey: "",
+        projectionType: nil
+      )
+      coverImage = await thumbnailStore.loadImage(for: item, context: context, size: .thumbnail)
     }
   }
 }

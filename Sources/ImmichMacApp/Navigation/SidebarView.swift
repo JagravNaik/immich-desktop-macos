@@ -33,6 +33,9 @@ enum SidebarDestination: Hashable {
   case sharedLinks
   case sharedLink(id: String)
 
+  // Memories
+  case memory(id: String)
+
   var label: String {
     switch self {
     case .library: "Library"
@@ -50,6 +53,7 @@ enum SidebarDestination: Hashable {
     case .favorites: "Favorites"
     case .sharedLinks: "Shared Links"
     case .sharedLink: "Shared Link"
+    case .memory: "Memory"
     }
   }
 
@@ -70,6 +74,7 @@ enum SidebarDestination: Hashable {
     case .favorites: "heart"
     case .sharedLinks: "link"
     case .sharedLink: "link"
+    case .memory: "memories"
     }
   }
 }

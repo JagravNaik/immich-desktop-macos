@@ -115,6 +115,10 @@ final class AppState: ObservableObject {
   @Published var activeSharedLinkItems: [PhotoItem] = []
   var sharedLinkAssets: [String: [RemoteTimelineAsset]] = [:]
 
+  // Memory detail
+  @Published var activeMemoryID: String?
+  @Published var activeMemoryItems: [PhotoItem] = []
+
   // Trash
   @Published var trashedItems: [PhotoItem] = []
   @Published var isLoadingTrash = false
@@ -234,6 +238,8 @@ final class AppState: ObservableObject {
         return activePersonItems
       case .sharedLink:
         return activeSharedLinkItems
+      case .memory:
+        return activeMemoryItems
       case .recentlyDeleted:
         return trashedItems
       case .allAlbums, .collections, .sharedLinks:
@@ -700,6 +706,22 @@ final class AppState: ObservableObject {
       rebuildLibrarySections()
     } catch {
       immichLog("[Person] Failed to load person \(personID): \(error)")
+    }
+  }
+
+  // MARK: - Memory Loading
+
+  func loadMemory(_ memoryID: String) {
+    guard activeMemoryID != memoryID else { return }
+    activeMemoryID = memoryID
+
+    guard let memory = memories.first(where: { $0.id == memoryID }) else {
+      activeMemoryItems = []
+      return
+    }
+
+    activeMemoryItems = memory.assets.filter { !$0.isTrashed }.map {
+      Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
     }
   }
 

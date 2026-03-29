@@ -138,6 +138,7 @@ struct MainContentView: View {
     case .person(let id): appState.people.first(where: { $0.id == id })?.name ?? "Person"
     case .sharedLinks: "Shared Links"
     case .sharedLink(let id): appState.sharedLinks.first(where: { $0.id == id })?.description ?? "Shared Link"
+    case .memory(let id): appState.memories.first(where: { $0.id == id })?.title ?? "Memory"
     case .none: "Library"
     }
   }
@@ -162,6 +163,9 @@ struct MainContentView: View {
     case .sharedLink(let id):
       LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
         .task(id: id) { appState.loadSharedLink(id) }
+    case .memory(let id):
+      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+        .task(id: id) { appState.loadMemory(id) }
     case .recentlyDeleted:
       RecentlyDeletedView(appState: appState, thumbnailStore: thumbnailStore)
     default:
