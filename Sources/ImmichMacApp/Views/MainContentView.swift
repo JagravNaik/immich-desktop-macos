@@ -44,7 +44,7 @@ struct MainContentView: View {
 
   private var libraryLayout: some View {
     NavigationSplitView {
-      SidebarView(selection: $appState.sidebarSelection, appState: appState, onDismissViewer: dismissViewer)
+      SidebarView(selection: $appState.sidebarSelection, appState: appState)
         .navigationTitle("Immich")
         .navigationSplitViewColumnWidth(min: 160, ideal: 220, max: 400)
     } detail: {

@@ -89,7 +89,6 @@ struct SidebarSectionState {
 struct SidebarView: View {
   @Binding var selection: SidebarDestination?
   @ObservedObject var appState: AppState
-  var onDismissViewer: (() -> Void)?
   @State private var sectionState = SidebarSectionState()
 
   var body: some View {
@@ -130,16 +129,10 @@ struct SidebarView: View {
       Label("Library", systemImage: "photo.on.rectangle.angled")
         .tag(SidebarDestination.library)
         .fontWeight(selection == .library ? .semibold : .regular)
-        .simultaneousGesture(TapGesture().onEnded {
-          onDismissViewer?()
-        })
 
       Label("Collections", systemImage: "square.grid.2x2")
         .tag(SidebarDestination.collections)
         .fontWeight(selection == .collections ? .semibold : .regular)
-        .simultaneousGesture(TapGesture().onEnded {
-          onDismissViewer?()
-        })
     }
   }
 
