@@ -206,6 +206,7 @@ final class AppState: ObservableObject {
     return activeAlbumItems.first { $0.id == selectedItemID }
       ?? activePersonItems.first { $0.id == selectedItemID }
       ?? activeSharedLinkItems.first { $0.id == selectedItemID }
+      ?? activeMemoryItems.first { $0.id == selectedItemID }
       ?? libraryItems.first { $0.id == selectedItemID }
       ?? trashedItems.first { $0.id == selectedItemID }
   }
