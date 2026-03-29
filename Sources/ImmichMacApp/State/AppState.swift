@@ -73,14 +73,14 @@ final class AppState: ObservableObject {
   @Published var appPhase: AppPhase = {
     if UserDefaults.standard.string(forKey: "immich.serverURL") != nil,
        UserDefaults.standard.string(forKey: "immich.email") != nil,
-       let pass = UserDefaults.standard.string(forKey: "immich.password"), !pass.isEmpty {
+       let pass = KeychainHelper.load(account: "immich.password"), !pass.isEmpty {
       return .launching
     }
     return .serverSetup
   }()
   @Published var serverURLText = UserDefaults.standard.string(forKey: "immich.serverURL") ?? ""
   @Published var emailText = UserDefaults.standard.string(forKey: "immich.email") ?? ""
-  @Published var passwordText = UserDefaults.standard.string(forKey: "immich.password") ?? ""
+  @Published var passwordText = KeychainHelper.load(account: "immich.password") ?? ""
   @Published var statusText = "Enter your Immich server URL to continue."
   @Published var isConnecting = false
   @Published var isSigningIn = false
@@ -133,6 +133,9 @@ final class AppState: ObservableObject {
   @Published var memories: [Memory] = []
   @Published var sharedLinks: [SharedLink] = []
   @Published var assetStatistics: AssetStatistics?
+  @Published var favoritesCount = 0
+  @Published var videosCount = 0
+  @Published var livePhotosCount = 0
 
   // Uploads
   @Published var uploadRows: [UploadRow] = []
@@ -260,6 +263,18 @@ final class AppState: ObservableObject {
     }
   }
 
+  private func updateMediaCounts() {
+    var fav = 0, vid = 0, live = 0
+    for item in libraryItems {
+      if item.isFavorite { fav += 1 }
+      if item.isVideo { vid += 1 }
+      if item.isLivePhoto { live += 1 }
+    }
+    favoritesCount = fav
+    videosCount = vid
+    livePhotosCount = live
+  }
+
   var canLoadMoreTimeline: Bool {
     loadedTimelineBucketKeys.count < timelineBuckets.count
   }
@@ -356,7 +371,7 @@ final class AppState: ObservableObject {
       let session = try await apiClient.login(server: connectedServer, email: trimmedEmail, password: passwordText)
       emailText = trimmedEmail
       UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
-      UserDefaults.standard.set(passwordText, forKey: "immich.password")
+      KeychainHelper.save(account: "immich.password", password: passwordText)
       currentSession = session
       resetLibraryState()
       appPhase = .library
@@ -402,6 +417,9 @@ final class AppState: ObservableObject {
     searchText = ""
     selectedItemID = nil
     libraryItems = []
+    favoritesCount = 0
+    videosCount = 0
+    livePhotosCount = 0
     isLoadingTimeline = false
     activeAlbumID = nil
     activeAlbumItems = []
@@ -541,6 +559,7 @@ final class AppState: ObservableObject {
       let dedup = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
       loadedTimelineBucketKeys.append(contentsOf: fetchedKeys)
       libraryItems = dedup.values.sorted { $0.date > $1.date }
+      updateMediaCounts()
       if selectedItemID == nil { selectedItemID = libraryItems.first?.id }
       rebuildLibrarySections()
     } catch {

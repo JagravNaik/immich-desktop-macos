@@ -61,6 +61,7 @@ struct MainContentView: View {
     if appState.isViewingPhoto {
       appState.isViewingPhoto = false
       appState.isViewingLivePhoto = false
+      appState.isEditing = false
     }
   }
 
@@ -160,7 +161,7 @@ struct MainContentView: View {
         .task(id: id) { await appState.loadPerson(id) }
     case .sharedLink(let id):
       LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
-        .onAppear { appState.loadSharedLink(id) }
+        .task(id: id) { appState.loadSharedLink(id) }
     case .recentlyDeleted:
       RecentlyDeletedView(appState: appState, thumbnailStore: thumbnailStore)
     default:
@@ -508,7 +509,7 @@ private struct SplitViewDividerConfigurator: NSViewRepresentable {
 
   private func configureSplitView(from view: NSView) {
     guard let splitView = findSplitView(from: view) else { return }
-    splitView.setValue(6, forKey: "dividerThickness")
+    splitView.dividerStyle = .thick
   }
 
   private func findSplitView(from view: NSView) -> NSSplitView? {

@@ -129,13 +129,13 @@ struct CollectionsView: View {
         .font(.title2.weight(.semibold))
 
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 12)], spacing: 12) {
-        MediaTypeCard(title: "Favorites", icon: "heart.fill", count: appState.libraryItems.filter(\.isFavorite).count, color: .red) {
+        MediaTypeCard(title: "Favorites", icon: "heart.fill", count: appState.favoritesCount, color: .red) {
           appState.sidebarSelection = .favorites
         }
-        MediaTypeCard(title: "Videos", icon: "video.fill", count: appState.libraryItems.filter(\.isVideo).count, color: .blue) {
+        MediaTypeCard(title: "Videos", icon: "video.fill", count: appState.videosCount, color: .blue) {
           appState.sidebarSelection = .videos
         }
-        MediaTypeCard(title: "Live Photos", icon: "livephoto", count: appState.libraryItems.filter(\.isLivePhoto).count, color: .orange) {
+        MediaTypeCard(title: "Live Photos", icon: "livephoto", count: appState.livePhotosCount, color: .orange) {
           appState.sidebarSelection = .livePhotos
         }
         MediaTypeCard(title: "Recently Deleted", icon: "trash", count: nil, color: .gray) {

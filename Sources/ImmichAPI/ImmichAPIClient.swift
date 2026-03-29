@@ -475,13 +475,19 @@ private enum TimelineBucketMapper {
     "yyyy-MM-dd'T'HH:mm:ss"
   ]
 
+  private static let dateFormatters: [DateFormatter] = dateFormats.map { format in
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .iso8601)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = format
+    return formatter
+  }
+
+  // Cached formatters — safe to share because DateFormatter.date(from:) is read-only on these
+  // pre-configured instances, and static let initialization is thread-safe in Swift.
   static func parseDate(_ value: String) -> Date? {
-    for format in dateFormats {
-      let formatter = DateFormatter()
-      formatter.calendar = Calendar(identifier: .iso8601)
-      formatter.locale = Locale(identifier: "en_US_POSIX")
-      formatter.timeZone = TimeZone(secondsFromGMT: 0)
-      formatter.dateFormat = format
+    for formatter in dateFormatters {
       if let date = formatter.date(from: value) {
         return date
       }

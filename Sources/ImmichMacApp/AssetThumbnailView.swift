@@ -58,7 +58,8 @@ final class ThumbnailStore: ObservableObject {
     }
 
     if let image {
-      cache.setObject(image, forKey: cacheKey as NSString)
+      let cost = Int(image.size.width * image.size.height * 4)
+      cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
     }
 
     return image

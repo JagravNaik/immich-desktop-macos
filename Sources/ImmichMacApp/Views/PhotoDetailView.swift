@@ -10,7 +10,6 @@ struct PhotoDetailView: View {
 
   @State private var image: NSImage?
   @State private var currentItemID: String?
-  @State private var loadedSize: ThumbnailStore.ThumbnailSize = .thumbnail
   @State private var isLoading = false
   @State private var dragOffset: CGSize = .zero
 
@@ -41,13 +40,11 @@ struct PhotoDetailView: View {
         // Immediately clear stale image to prevent flash of previous photo
         image = nil
         currentItemID = newID
-        loadedSize = .thumbnail
         isLoading = true
       }
       .task(id: item.id) {
         currentItemID = item.id
         isLoading = true
-        loadedSize = .thumbnail
         defer {
           if currentItemID == item.id {
             isLoading = false
@@ -65,7 +62,6 @@ struct PhotoDetailView: View {
         if let preview = await thumbnailStore.loadImage(for: item, context: appState.thumbnailContext, size: .preview) {
           guard currentItemID == item.id else { return }
           self.image = preview
-          self.loadedSize = .preview
         }
 
         // Step 3: Load original full-resolution (only for photos, not videos)
@@ -73,7 +69,6 @@ struct PhotoDetailView: View {
           if let original = await thumbnailStore.loadImage(for: item, context: appState.thumbnailContext, size: .original) {
             guard currentItemID == item.id else { return }
             self.image = original
-            self.loadedSize = .original
           }
         }
       }
@@ -209,6 +204,7 @@ struct PhotoDetailView: View {
         .keyboardShortcut(.leftArrow, modifiers: [])
         .opacity(0)
     }
+    .accessibilityHidden(true)
   }
 
   // MARK: - URL Helper
