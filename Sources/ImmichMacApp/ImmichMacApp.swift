@@ -6,10 +6,12 @@ import AVKit
 struct ImmichMacApp: App {
   var body: some Scene {
     WindowGroup {
-      ContentView(viewModel: .init())
-        .frame(minWidth: 720, minHeight: 480)
+      MainContentView(appState: .init())
+        .frame(minWidth: 900, minHeight: 600)
     }
     .windowResizability(.contentMinSize)
+    .windowStyle(.titleBar)
+    .windowToolbarStyle(.unified(showsTitle: false))
   }
 }
 #else

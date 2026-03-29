@@ -1,5 +1,7 @@
 import Foundation
 
+// MARK: - Server & Auth
+
 public struct ImmichServer: Hashable, Sendable {
   public let baseURL: URL
 
@@ -86,6 +88,8 @@ public struct UserSession: Sendable {
   }
 }
 
+// MARK: - Timeline
+
 public struct TimelineBucketSummary: Decodable, Hashable, Sendable {
   public let timeBucket: String
   public let count: Int
@@ -154,6 +158,254 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
   }
 }
 
+// MARK: - Albums
+
+public struct Album: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let albumName: String
+  public let description: String
+  public let assetCount: Int
+  public let albumThumbnailAssetId: String?
+  public let createdAt: Date
+  public let updatedAt: Date
+  public let isActivityEnabled: Bool
+  public let shared: Bool
+  public let hasSharedLink: Bool
+  public let ownerID: String
+
+  public init(
+    id: String,
+    albumName: String,
+    description: String,
+    assetCount: Int,
+    albumThumbnailAssetId: String?,
+    createdAt: Date,
+    updatedAt: Date,
+    isActivityEnabled: Bool,
+    shared: Bool,
+    hasSharedLink: Bool,
+    ownerID: String
+  ) {
+    self.id = id
+    self.albumName = albumName
+    self.description = description
+    self.assetCount = assetCount
+    self.albumThumbnailAssetId = albumThumbnailAssetId
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.isActivityEnabled = isActivityEnabled
+    self.shared = shared
+    self.hasSharedLink = hasSharedLink
+    self.ownerID = ownerID
+  }
+}
+
+// MARK: - People
+
+public struct Person: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let name: String
+  public let birthDate: Date?
+  public let thumbnailPath: String
+  public let isHidden: Bool
+  public let assetCount: Int
+
+  public init(
+    id: String,
+    name: String,
+    birthDate: Date?,
+    thumbnailPath: String,
+    isHidden: Bool,
+    assetCount: Int
+  ) {
+    self.id = id
+    self.name = name
+    self.birthDate = birthDate
+    self.thumbnailPath = thumbnailPath
+    self.isHidden = isHidden
+    self.assetCount = assetCount
+  }
+}
+
+// MARK: - Search
+
+public struct SearchResult: Sendable {
+  public let assets: [RemoteTimelineAsset]
+  public let totalCount: Int
+
+  public init(assets: [RemoteTimelineAsset], totalCount: Int) {
+    self.assets = assets
+    self.totalCount = totalCount
+  }
+}
+
+public struct MapMarker: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let latitude: Double
+  public let longitude: Double
+  public let city: String?
+  public let country: String?
+
+  public init(id: String, latitude: Double, longitude: Double, city: String?, country: String?) {
+    self.id = id
+    self.latitude = latitude
+    self.longitude = longitude
+    self.city = city
+    self.country = country
+  }
+}
+
+// MARK: - Memories
+
+public struct Memory: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let title: String
+  public let memoryAt: Date
+  public let assetCount: Int
+  public let isSaved: Bool
+  public let assets: [RemoteTimelineAsset]
+
+  public init(
+    id: String,
+    title: String,
+    memoryAt: Date,
+    assetCount: Int,
+    isSaved: Bool,
+    assets: [RemoteTimelineAsset]
+  ) {
+    self.id = id
+    self.title = title
+    self.memoryAt = memoryAt
+    self.assetCount = assetCount
+    self.isSaved = isSaved
+    self.assets = assets
+  }
+}
+
+// MARK: - Asset Detail (full metadata)
+
+public struct AssetDetail: Sendable {
+  public let id: String
+  public let type: String
+  public let originalFileName: String
+  public let localDateTime: Date?
+  public let fileCreatedAt: Date?
+  public let width: Int?
+  public let height: Int?
+  public let fileSizeInByte: Int?
+  public let isFavorite: Bool
+  public let duration: String?
+  public let livePhotoVideoId: String?
+  public let exif: ExifInfo?
+
+  public init(
+    id: String,
+    type: String,
+    originalFileName: String,
+    localDateTime: Date?,
+    fileCreatedAt: Date?,
+    width: Int?,
+    height: Int?,
+    fileSizeInByte: Int?,
+    isFavorite: Bool,
+    duration: String?,
+    livePhotoVideoId: String?,
+    exif: ExifInfo?
+  ) {
+    self.id = id
+    self.type = type
+    self.originalFileName = originalFileName
+    self.localDateTime = localDateTime
+    self.fileCreatedAt = fileCreatedAt
+    self.width = width
+    self.height = height
+    self.fileSizeInByte = fileSizeInByte
+    self.isFavorite = isFavorite
+    self.duration = duration
+    self.livePhotoVideoId = livePhotoVideoId
+    self.exif = exif
+  }
+}
+
+public struct ExifInfo: Sendable {
+  public let make: String?
+  public let model: String?
+  public let fNumber: Double?
+  public let focalLength: Double?
+  public let iso: Int?
+  public let exposureTime: String?
+  public let lensModel: String?
+  public let city: String?
+  public let state: String?
+  public let country: String?
+  public let latitude: Double?
+  public let longitude: Double?
+  public let description: String?
+  public let rating: Int?
+  public let dateTimeOriginal: Date?
+
+  public init(
+    make: String?, model: String?, fNumber: Double?, focalLength: Double?,
+    iso: Int?, exposureTime: String?, lensModel: String?,
+    city: String?, state: String?, country: String?,
+    latitude: Double?, longitude: Double?,
+    description: String?, rating: Int?, dateTimeOriginal: Date?
+  ) {
+    self.make = make
+    self.model = model
+    self.fNumber = fNumber
+    self.focalLength = focalLength
+    self.iso = iso
+    self.exposureTime = exposureTime
+    self.lensModel = lensModel
+    self.city = city
+    self.state = state
+    self.country = country
+    self.latitude = latitude
+    self.longitude = longitude
+    self.description = description
+    self.rating = rating
+    self.dateTimeOriginal = dateTimeOriginal
+  }
+}
+
+// MARK: - Shared Links
+
+public struct SharedLink: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let type: String
+  public let key: String
+  public let description: String?
+  public let expiresAt: Date?
+  public let allowUpload: Bool
+  public let allowDownload: Bool
+  public let assetCount: Int
+  public let albumId: String?
+  public let createdAt: Date
+  public let assetIds: [String]
+
+  public init(
+    id: String, type: String, key: String, description: String?,
+    expiresAt: Date?, allowUpload: Bool, allowDownload: Bool,
+    assetCount: Int, albumId: String?, createdAt: Date,
+    assetIds: [String] = []
+  ) {
+    self.id = id
+    self.type = type
+    self.key = key
+    self.description = description
+    self.expiresAt = expiresAt
+    self.allowUpload = allowUpload
+    self.allowDownload = allowDownload
+    self.assetCount = assetCount
+    self.albumId = albumId
+    self.createdAt = createdAt
+    self.assetIds = assetIds
+  }
+}
+
+// MARK: - Upload
+
 public struct UploadItem: Identifiable, Equatable, Sendable {
   public let id: UUID
   public let fileURL: URL
@@ -169,4 +421,18 @@ public enum UploadState: Equatable, Sendable {
   case uploading(progress: Double)
   case done
   case failed(reason: String)
+}
+
+// MARK: - Asset Statistics
+
+public struct AssetStatistics: Sendable {
+  public let total: Int
+  public let images: Int
+  public let videos: Int
+
+  public init(total: Int, images: Int, videos: Int) {
+    self.total = total
+    self.images = images
+    self.videos = videos
+  }
 }

@@ -27,6 +27,20 @@ public protocol ImmichAPIClient: Sendable {
   func login(server: ImmichServer, email: String, password: String) async throws -> UserSession
   func fetchTimelineBuckets(server: ImmichServer, session: UserSession) async throws -> [TimelineBucketSummary]
   func fetchTimelineBucket(server: ImmichServer, session: UserSession, timeBucket: String) async throws -> [RemoteTimelineAsset]
+  func fetchAlbums(server: ImmichServer, session: UserSession) async throws -> [Album]
+  func fetchAlbumAssets(server: ImmichServer, session: UserSession, albumId: String) async throws -> (Album, [RemoteTimelineAsset])
+  func fetchPeople(server: ImmichServer, session: UserSession) async throws -> [Person]
+  func fetchAssetDetail(server: ImmichServer, session: UserSession, assetId: String) async throws -> AssetDetail
+  func fetchAssetStatistics(server: ImmichServer, session: UserSession) async throws -> AssetStatistics
+  func setFavorite(server: ImmichServer, session: UserSession, assetId: String, isFavorite: Bool) async throws
+  func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
+  func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
+  func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
+  func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult
+  func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
+  func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
+  func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
+  func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]])
 }
 
 public enum ImmichAPIError: Error, LocalizedError, Sendable {
@@ -51,15 +65,15 @@ public enum ImmichAPIError: Error, LocalizedError, Sendable {
 }
 
 public struct URLSessionImmichAPIClient: ImmichAPIClient {
-  private let session: URLSession
+  private let urlSession: URLSession
 
   public init(session: URLSession? = nil) {
     if let session {
-      self.session = session
+      self.urlSession = session
     } else {
       let config = URLSessionConfiguration.ephemeral
       config.requestCachePolicy = .reloadIgnoringLocalCacheData
-      self.session = URLSession(configuration: config)
+      self.urlSession = URLSession(configuration: config)
     }
   }
 
@@ -138,6 +152,148 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return TimelineBucketMapper.assets(from: response)
   }
 
+  // MARK: - Albums
+
+  public func fetchAlbums(server: ImmichServer, session: UserSession) async throws -> [Album] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "albums"), session: session)
+    let responses: [AlbumResponse] = try await perform(request)
+    return responses.map { $0.toModel() }
+  }
+
+  public func fetchAlbumAssets(server: ImmichServer, session: UserSession, albumId: String) async throws -> (Album, [RemoteTimelineAsset]) {
+    let request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId),
+      session: session
+    )
+    let response: AlbumDetailResponse = try await perform(request)
+    return (response.toAlbumModel(), response.toAssetModels())
+  }
+
+  // MARK: - People
+
+  public func fetchPeople(server: ImmichServer, session: UserSession) async throws -> [Person] {
+    var components = URLComponents(url: server.baseURL.appending(path: "people"), resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "withHidden", value: "false")]
+    let request = authorizedRequest(url: components?.url ?? server.baseURL.appending(path: "people"), session: session)
+    let response: PeopleResponse = try await perform(request)
+    return response.people.map { $0.toModel() }
+  }
+
+  // MARK: - Asset Detail
+
+  public func fetchAssetDetail(server: ImmichServer, session: UserSession, assetId: String) async throws -> AssetDetail {
+    let request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId),
+      session: session
+    )
+    let response: AssetDetailResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  // MARK: - Asset Statistics
+
+  public func fetchAssetStatistics(server: ImmichServer, session: UserSession) async throws -> AssetStatistics {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "assets/statistics"), session: session)
+    let response: AssetStatisticsResponse = try await perform(request)
+    return AssetStatistics(total: response.total, images: response.images, videos: response.videos)
+  }
+
+  // MARK: - Favorites
+
+  public func setFavorite(server: ImmichServer, session: UserSession, assetId: String, isFavorite: Bool) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId),
+      session: session
+    )
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["isFavorite": isFavorite])
+    let _: AssetDetailResponse = try await perform(request)
+  }
+
+  // MARK: - Trash
+
+  public func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
+    request.httpMethod = "DELETE"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(TrashRequest(ids: assetIds))
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to trash assets")
+    }
+  }
+
+  public func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(TrashedSearchRequest())
+    let response: SearchAssetsResponse = try await perform(request)
+    return response.assets.items.compactMap { $0.toTimelineAsset() }
+  }
+
+  public func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "trash/restore/assets"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(TrashRequest(ids: assetIds))
+    let (_, restoreResponse) = try await urlSession.data(for: request)
+    guard let httpResponse = restoreResponse as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (restoreResponse as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to restore assets")
+    }
+  }
+
+  // MARK: - Search
+
+  public func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/smart"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(SmartSearchRequest(query: query))
+    let response: SearchAssetsResponse = try await perform(request)
+    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
+    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count)
+  }
+
+  public func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(personIds: [personId]))
+    let response: SearchAssetsResponse = try await perform(request)
+    return response.assets.items.compactMap { $0.toTimelineAsset() }
+  }
+
+  // MARK: - Map
+
+  public func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "map/markers"), session: session)
+    let responses: [MapMarkerResponse] = try await perform(request)
+    return responses.map { $0.toModel() }
+  }
+
+  // MARK: - Memories
+
+  public func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "memories"), session: session)
+    let responses: [MemoryResponse] = try await perform(request)
+    return responses.map { $0.toModel() }
+  }
+
+  // MARK: - Shared Links
+
+  public func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]]) {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "shared-links"), session: session)
+    let responses: [SharedLinkResponse] = try await perform(request)
+    let links = responses.map { $0.toModel() }
+    var assetsMap: [String: [RemoteTimelineAsset]] = [:]
+    for response in responses {
+      assetsMap[response.id] = response.toTimelineAssets()
+    }
+    return (links, assetsMap)
+  }
+
   private func fetchAboutInfo(server: ImmichServer, apiKey: String) async throws -> ServerInfo {
     var request = URLRequest(url: server.baseURL.appending(path: "server/about"))
     request.httpMethod = "GET"
@@ -163,7 +319,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
     let requestURL = request.url?.absoluteString ?? "unknown"
     immichLog("[ImmichAPI] Request: \(request.httpMethod ?? "GET") \(requestURL)")
-    let (data, response) = try await session.data(for: request)
+    let (data, response) = try await urlSession.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {
       throw ImmichAPIError.invalidResponse(url: requestURL)
     }
@@ -312,7 +468,7 @@ private enum TimelineBucketMapper {
     }
   }
 
-  nonisolated(unsafe) static let dateFormatters: [DateFormatter] = {
+  static let dateFormatters: [DateFormatter] = {
     let formats = [
       "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
       "yyyy-MM-dd'T'HH:mm:ssZ",
@@ -371,5 +527,376 @@ private enum ErrorMessage: Decodable {
     }
 
     self = .array(try container.decode([String].self))
+  }
+}
+
+// MARK: - Album Response DTOs
+
+private struct AlbumResponse: Decodable {
+  let id: String
+  let albumName: String
+  let description: String?
+  let assetCount: Int?
+  let albumThumbnailAssetId: String?
+  let createdAt: String?
+  let updatedAt: String?
+  let isActivityEnabled: Bool?
+  let shared: Bool?
+  let hasSharedLink: Bool?
+  let ownerId: String?
+
+  func toModel() -> Album {
+    Album(
+      id: id,
+      albumName: albumName,
+      description: description ?? "",
+      assetCount: assetCount ?? 0,
+      albumThumbnailAssetId: albumThumbnailAssetId,
+      createdAt: createdAt.flatMap { s in TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first } ?? Date(),
+      updatedAt: updatedAt.flatMap { s in TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first } ?? Date(),
+      isActivityEnabled: isActivityEnabled ?? false,
+      shared: shared ?? false,
+      hasSharedLink: hasSharedLink ?? false,
+      ownerID: ownerId ?? ""
+    )
+  }
+}
+
+// MARK: - Album Detail Response (includes assets)
+
+private struct AlbumDetailResponse: Decodable {
+  let id: String
+  let albumName: String
+  let description: String?
+  let assetCount: Int
+  let albumThumbnailAssetId: String?
+  let createdAt: String
+  let updatedAt: String
+  let isActivityEnabled: Bool?
+  let shared: Bool?
+  let hasSharedLink: Bool?
+  let ownerId: String?
+  let assets: [AlbumAssetResponse]?
+
+  func toAlbumModel() -> Album {
+    Album(
+      id: id,
+      albumName: albumName,
+      description: description ?? "",
+      assetCount: assetCount,
+      albumThumbnailAssetId: albumThumbnailAssetId,
+      createdAt: TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: createdAt) }.first ?? Date(),
+      updatedAt: TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: updatedAt) }.first ?? Date(),
+      isActivityEnabled: isActivityEnabled ?? false,
+      shared: shared ?? false,
+      hasSharedLink: hasSharedLink ?? false,
+      ownerID: ownerId ?? ""
+    )
+  }
+
+  func toAssetModels() -> [RemoteTimelineAsset] {
+    (assets ?? []).compactMap { $0.toModel() }
+  }
+}
+
+private struct AlbumAssetResponse: Decodable {
+  let id: String
+  let type: String?
+  let fileCreatedAt: String?
+  let duration: String?
+  let isFavorite: Bool?
+  let isTrashed: Bool?
+  let livePhotoVideoId: String?
+  let ownerId: String?
+  let exifInfo: AlbumAssetExifResponse?
+  let projectionType: String?
+  let thumbhash: String?
+  let stack: AlbumAssetStackResponse?
+
+  func toModel() -> RemoteTimelineAsset? {
+    guard let createdAtStr = fileCreatedAt,
+          let createdAt = TimelineBucketMapper.dateFormatters.lazy.compactMap({ $0.date(from: createdAtStr) }).first else {
+      return nil
+    }
+    let isImage = (type ?? "IMAGE") == "IMAGE"
+    return RemoteTimelineAsset(
+      id: id,
+      city: exifInfo?.city,
+      country: exifInfo?.country,
+      createdAt: createdAt,
+      duration: duration,
+      isFavorite: isFavorite ?? false,
+      isImage: isImage,
+      isTrashed: isTrashed ?? false,
+      latitude: exifInfo?.latitude,
+      longitude: exifInfo?.longitude,
+      livePhotoVideoID: livePhotoVideoId,
+      ownerID: ownerId ?? "",
+      projectionType: projectionType,
+      ratio: 1.0,
+      stackChildrenCount: stack?.assetCount,
+      thumbhash: thumbhash,
+      visibility: "timeline"
+    )
+  }
+}
+
+private struct AlbumAssetExifResponse: Decodable {
+  let city: String?
+  let country: String?
+  let latitude: Double?
+  let longitude: Double?
+}
+
+private struct AlbumAssetStackResponse: Decodable {
+  let id: String?
+  let assetCount: Int?
+}
+
+// MARK: - People Response DTOs
+
+private struct PeopleResponse: Decodable {
+  let total: Int
+  let people: [PersonResponse]
+}
+
+private struct PersonResponse: Decodable {
+  let id: String
+  let name: String
+  let birthDate: String?
+  let thumbnailPath: String?
+  let isHidden: Bool
+  let updatedAt: String?
+
+  func toModel() -> Person {
+    let birthDateParsed: Date? = birthDate.flatMap { dateStr in
+      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: dateStr) }.first
+    }
+    return Person(
+      id: id,
+      name: name,
+      birthDate: birthDateParsed,
+      thumbnailPath: thumbnailPath ?? "",
+      isHidden: isHidden,
+      assetCount: 0
+    )
+  }
+}
+
+// MARK: - Asset Detail Response
+
+private struct AssetDetailResponse: Decodable {
+  let id: String
+  let type: String?
+  let originalFileName: String?
+  let localDateTime: String?
+  let fileCreatedAt: String?
+  let exifInfo: ExifInfoResponse?
+  let isFavorite: Bool?
+  let isTrashed: Bool?
+  let duration: String?
+  let livePhotoVideoId: String?
+
+  struct ExifInfoResponse: Decodable {
+    let make: String?
+    let model: String?
+    let fNumber: Double?
+    let focalLength: Double?
+    let iso: Int?
+    let exposureTime: String?
+    let lensModel: String?
+    let city: String?
+    let state: String?
+    let country: String?
+    let latitude: Double?
+    let longitude: Double?
+    let description: String?
+    let rating: Int?
+    let dateTimeOriginal: String?
+    let exifImageWidth: Int?
+    let exifImageHeight: Int?
+    let fileSizeInByte: Int?
+  }
+
+  func toModel() -> AssetDetail {
+    let exifModel: ExifInfo? = exifInfo.map { e in
+      ExifInfo(
+        make: e.make, model: e.model, fNumber: e.fNumber, focalLength: e.focalLength,
+        iso: e.iso, exposureTime: e.exposureTime, lensModel: e.lensModel,
+        city: e.city, state: e.state, country: e.country,
+        latitude: e.latitude, longitude: e.longitude,
+        description: e.description, rating: e.rating,
+        dateTimeOriginal: e.dateTimeOriginal.flatMap { s in
+          TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+        }
+      )
+    }
+    return AssetDetail(
+      id: id,
+      type: type ?? "IMAGE",
+      originalFileName: originalFileName ?? "",
+      localDateTime: localDateTime.flatMap { s in
+        TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+      },
+      fileCreatedAt: fileCreatedAt.flatMap { s in
+        TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+      },
+      width: exifInfo?.exifImageWidth,
+      height: exifInfo?.exifImageHeight,
+      fileSizeInByte: exifInfo?.fileSizeInByte,
+      isFavorite: isFavorite ?? false,
+      duration: duration,
+      livePhotoVideoId: livePhotoVideoId,
+      exif: exifModel
+    )
+  }
+
+  func toTimelineAsset() -> RemoteTimelineAsset? {
+    guard let createdAt = fileCreatedAt.flatMap({ s in
+      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+    }) else { return nil }
+
+    return RemoteTimelineAsset(
+      id: id,
+      city: exifInfo?.city,
+      country: exifInfo?.country,
+      createdAt: createdAt,
+      duration: duration,
+      isFavorite: isFavorite ?? false,
+      isImage: (type ?? "IMAGE") == "IMAGE",
+      isTrashed: isTrashed ?? false,
+      latitude: exifInfo?.latitude,
+      longitude: exifInfo?.longitude,
+      livePhotoVideoID: livePhotoVideoId,
+      ownerID: "",
+      projectionType: nil,
+      ratio: Double(exifInfo?.exifImageWidth ?? 1) / Double(exifInfo?.exifImageHeight ?? 1),
+      stackChildrenCount: nil,
+      thumbhash: nil,
+      visibility: "timeline"
+    )
+  }
+}
+
+// MARK: - Asset Statistics Response
+
+private struct AssetStatisticsResponse: Decodable {
+  let total: Int
+  let images: Int
+  let videos: Int
+}
+
+// MARK: - Search DTOs
+
+private struct SmartSearchRequest: Encodable {
+  let query: String
+}
+
+private struct MetadataSearchRequest: Encodable {
+  let personIds: [String]
+}
+
+private struct SearchAssetsResponse: Decodable {
+  let assets: SearchAssetsPage
+
+  struct SearchAssetsPage: Decodable {
+    let items: [AssetDetailResponse]
+    let total: Int?
+  }
+}
+
+// MARK: - Trash DTOs
+
+private struct TrashRequest: Encodable {
+  let ids: [String]
+}
+
+private struct TrashedSearchRequest: Encodable {
+  let withDeleted = true
+  let trashedAfter = "1970-01-01T00:00:00.000Z"
+}
+
+// MARK: - Map DTOs
+
+private struct MapMarkerResponse: Decodable {
+  let id: String
+  let lat: Double
+  let lon: Double
+  let city: String?
+  let country: String?
+
+  func toModel() -> MapMarker {
+    MapMarker(id: id, latitude: lat, longitude: lon, city: city, country: country)
+  }
+}
+
+// MARK: - Memory DTOs
+
+private struct MemoryResponse: Decodable {
+  let id: String
+  let data: MemoryData?
+  let memoryAt: String?
+  let isSaved: Bool?
+  let assets: [AssetDetailResponse]?
+
+  struct MemoryData: Decodable {
+    let year: Int?
+  }
+
+  func toModel() -> Memory {
+    let parsedDate = memoryAt.flatMap { s in
+      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+    } ?? Date()
+    let yearText = data?.year.map { "On This Day (\($0))" } ?? "Memory"
+    let assetModels = (assets ?? []).compactMap { $0.toTimelineAsset() }
+    return Memory(
+      id: id,
+      title: yearText,
+      memoryAt: parsedDate,
+      assetCount: assetModels.count,
+      isSaved: isSaved ?? false,
+      assets: assetModels
+    )
+  }
+}
+
+// MARK: - Shared Link DTOs
+
+private struct SharedLinkResponse: Decodable {
+  let id: String
+  let type: String?
+  let key: String?
+  let description: String?
+  let expiresAt: String?
+  let allowUpload: Bool?
+  let allowDownload: Bool?
+  let assets: [AssetDetailResponse]?
+  let album: AlbumResponse?
+  let createdAt: String?
+
+  func toModel() -> SharedLink {
+    let parsedExpiry = expiresAt.flatMap { s in
+      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+    }
+    let parsedCreated = createdAt.flatMap { s in
+      TimelineBucketMapper.dateFormatters.lazy.compactMap { $0.date(from: s) }.first
+    } ?? Date()
+    return SharedLink(
+      id: id,
+      type: type ?? "INDIVIDUAL",
+      key: key ?? "",
+      description: description,
+      expiresAt: parsedExpiry,
+      allowUpload: allowUpload ?? false,
+      allowDownload: allowDownload ?? true,
+      assetCount: assets?.count ?? album?.assetCount ?? 0,
+      albumId: album?.id,
+      createdAt: parsedCreated,
+      assetIds: assets?.map(\.id) ?? []
+    )
+  }
+
+  func toTimelineAssets() -> [RemoteTimelineAsset] {
+    (assets ?? []).compactMap { $0.toTimelineAsset() }
   }
 }
