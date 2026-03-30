@@ -9,7 +9,7 @@ struct LibraryGridView: View {
   @ObservedObject var thumbnailStore: ThumbnailStore
 
   private let gridColumns = [
-    GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 2),
+    GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 2),
   ]
 
   var body: some View {
@@ -83,21 +83,15 @@ struct LibraryGridView: View {
     let context = appState.thumbnailContext
     let selectedID = appState.selectedItemID
     return ScrollView {
-      LazyVStack(alignment: .leading, spacing: 20) {
+      LazyVStack(alignment: .leading, spacing: 12) {
         ForEach(appState.librarySections) { section in
-          VStack(alignment: .leading, spacing: 6) {
-            // Section header (Photos-style: bold month + count)
-            HStack(alignment: .lastTextBaseline, spacing: 8) {
-              Text(section.title)
-                .font(.title3.weight(.semibold))
-
-              Text("\(section.itemCount)")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-
-              Spacer()
-            }
-            .padding(.horizontal, 8)
+          VStack(alignment: .leading, spacing: 4) {
+            // Section header (Photos-style: subtle date label)
+            Text(section.title)
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(.secondary)
+              .padding(.horizontal, 4)
+              .padding(.top, 4)
 
             // Photo grid
             LazyVGrid(columns: gridColumns, spacing: 2) {
@@ -149,7 +143,8 @@ struct LibraryGridView: View {
           .padding(.vertical, 16)
         }
       }
-      .padding(12)
+      .padding(.horizontal, 2)
+      .padding(.vertical, 4)
     }
   }
 
@@ -186,7 +181,8 @@ struct LibraryGridView: View {
           )
         }
       }
-      .padding(12)
+      .padding(.horizontal, 2)
+      .padding(.vertical, 4)
     }
   }
 
@@ -258,7 +254,7 @@ struct PhotoGridCell: View {
   @State private var isHovered = false
 
   var body: some View {
-    ZStack(alignment: .bottomLeading) {
+    ZStack {
       // Thumbnail (edge-to-edge, Photos style)
       AssetThumbnailView(
         item: item,
@@ -267,30 +263,49 @@ struct PhotoGridCell: View {
       )
       .aspectRatio(1, contentMode: .fit)
 
-      // Badges overlay (bottom-left)
-      HStack(spacing: 4) {
-        if item.isFavorite {
-          Image(systemName: "heart.fill")
-            .foregroundStyle(.white)
-        }
-        if item.isVideo {
-          Image(systemName: "video.fill")
-          if !item.timeLabel.isEmpty {
+      // Video duration badge (bottom-trailing, macOS Photos style)
+      if item.isVideo, !item.timeLabel.isEmpty {
+        VStack {
+          Spacer()
+          HStack {
+            Spacer()
             Text(item.timeLabel)
-              .font(.caption2)
+              .font(.caption2.weight(.medium).monospacedDigit())
+              .foregroundStyle(.white)
+              .padding(.horizontal, 5)
+              .padding(.vertical, 2)
+              .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+              .padding(4)
           }
-        } else if item.isLivePhoto {
-          Image(systemName: "livephoto")
-        }
-        if let count = item.stackCount, count > 0 {
-          Image(systemName: "square.stack")
-          Text("+\(count)").font(.caption2)
         }
       }
-      .font(.caption2)
-      .foregroundStyle(.white)
-      .padding(6)
-      .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+
+      // Bottom-leading badges (favorite, live photo, stack)
+      VStack {
+        Spacer()
+        HStack(spacing: 3) {
+          if item.isFavorite {
+            Image(systemName: "heart.fill")
+              .foregroundStyle(.white)
+          }
+          if item.isVideo {
+            Image(systemName: "video.fill")
+              .foregroundStyle(.white)
+          } else if item.isLivePhoto {
+            Image(systemName: "livephoto")
+              .foregroundStyle(.white)
+          }
+          if let count = item.stackCount, count > 0 {
+            Image(systemName: "square.stack")
+            Text("+\(count)").font(.caption2)
+          }
+          Spacer()
+        }
+        .font(.caption2)
+        .foregroundStyle(.white)
+        .padding(4)
+        .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+      }
     }
     .overlay {
       // Selection ring

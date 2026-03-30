@@ -528,7 +528,7 @@ struct RecentlyDeletedView: View {
   @ObservedObject var thumbnailStore: ThumbnailStore
 
   private let gridColumns = [
-    GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 2),
+    GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 2),
   ]
 
   var body: some View {
