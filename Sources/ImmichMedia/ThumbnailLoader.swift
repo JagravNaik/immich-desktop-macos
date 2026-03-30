@@ -6,36 +6,41 @@ import ImageIO
 
 public typealias PlatformImage = NSImage
 
-@MainActor
-public final class ThumbnailLoader {
+public final class ThumbnailLoader: @unchecked Sendable {
   private let cache = NSCache<NSURL, NSImage>()
 
   public init() {}
 
-  public func loadThumbnail(for fileURL: URL, maxPixelSize: CGFloat = 256) -> PlatformImage? {
+  public func loadThumbnail(for fileURL: URL, maxPixelSize: CGFloat = 256) async -> PlatformImage? {
     if let cached = cache.object(forKey: fileURL as NSURL) {
       return cached
     }
 
-    guard
-      let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
-      let cgImage = CGImageSourceCreateThumbnailAtIndex(
-        source,
-        0,
-        [
-          kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-          kCGImageSourceCreateThumbnailFromImageAlways: true,
-          kCGImageSourceCreateThumbnailWithTransform: true,
-        ] as CFDictionary
-      )
-    else {
-      return nil
-    }
+    let url = fileURL
+    let pixelSize = maxPixelSize
+    let result: NSImage? = await Task.detached(priority: .userInitiated) {
+      guard
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let cgImage = CGImageSourceCreateThumbnailAtIndex(
+          source,
+          0,
+          [
+            kCGImageSourceThumbnailMaxPixelSize: pixelSize,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+          ] as CFDictionary
+        )
+      else {
+        return nil
+      }
+      let size = NSSize(width: cgImage.width, height: cgImage.height)
+      return NSImage(cgImage: cgImage, size: size)
+    }.value
 
-    let size = NSSize(width: cgImage.width, height: cgImage.height)
-    let thumbnail = NSImage(cgImage: cgImage, size: size)
-    cache.setObject(thumbnail, forKey: fileURL as NSURL)
-    return thumbnail
+    if let result {
+      cache.setObject(result, forKey: fileURL as NSURL)
+    }
+    return result
   }
 }
 
@@ -43,11 +48,10 @@ public final class ThumbnailLoader {
 
 public struct PlatformImage: Sendable {}
 
-@MainActor
-public final class ThumbnailLoader {
+public final class ThumbnailLoader: @unchecked Sendable {
   public init() {}
 
-  public func loadThumbnail(for _: URL, maxPixelSize _: Double = 256) -> PlatformImage? {
+  public func loadThumbnail(for _: URL, maxPixelSize _: Double = 256) async -> PlatformImage? {
     nil
   }
 }

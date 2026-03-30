@@ -736,6 +736,8 @@ final class AppState: ObservableObject {
     }
 
     guard let newVal else { return }
+    rebuildLibrarySections()
+    updateMediaCounts()
 
     // Sync with server
     guard let connectedServer, let currentSession else { return }
@@ -756,6 +758,8 @@ final class AppState: ObservableObject {
         if let idx = activeSharedLinkItems.firstIndex(where: { $0.id == itemID }) {
           activeSharedLinkItems[idx].isFavorite = !newVal
         }
+        rebuildLibrarySections()
+        updateMediaCounts()
         immichLog("[Favorite] Sync failed: \(error)")
       }
     }
@@ -860,7 +864,12 @@ final class AppState: ObservableObject {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = filename
         panel.canCreateDirectories = true
-        let response = await panel.beginSheetModal(for: NSApp.keyWindow!)
+        let response: NSApplication.ModalResponse
+        if let window = NSApp.keyWindow {
+          response = await panel.beginSheetModal(for: window)
+        } else {
+          response = panel.runModal()
+        }
         if response == .OK, let url = panel.url {
           try data.write(to: url)
           immichLog("[Download] Saved \(filename) to \(url.path)")
@@ -1003,6 +1012,14 @@ final class AppState: ObservableObject {
     selectedItemIDs = Set(filteredItems.map(\.id))
   }
 
+  func deselectAllItems() {
+    selectedItemIDs.removeAll()
+  }
+
+  var allItemsSelected: Bool {
+    !filteredItems.isEmpty && selectedItemIDs.count == filteredItems.count
+  }
+
   func batchFavorite() {
     for id in selectedItemIDs {
       toggleFavorite(for: id)
@@ -1040,7 +1057,12 @@ final class AppState: ObservableObject {
       panel.canChooseFiles = false
       panel.canCreateDirectories = true
       panel.prompt = "Choose Folder"
-      let response = await panel.beginSheetModal(for: NSApp.keyWindow!)
+      let response: NSApplication.ModalResponse
+      if let window = NSApp.keyWindow {
+        response = await panel.beginSheetModal(for: window)
+      } else {
+        response = panel.runModal()
+      }
       guard response == .OK, let folder = panel.url else { return }
 
       for id in ids {
@@ -1318,6 +1340,7 @@ final class AppState: ObservableObject {
       }
       immichLog("[Upload] Completed: \(item.fileURL.lastPathComponent) -> \(remoteID)")
     } catch {
+      // UploadQueue only exposes markDone (no markFailed); clearing it here so the queue can proceed
       await uploadQueue.markDone(item)
       updateUploadRow(id: item.id, progress: 0, state: .failed(reason: error.localizedDescription))
       immichLog("[Upload] Failed: \(error)")

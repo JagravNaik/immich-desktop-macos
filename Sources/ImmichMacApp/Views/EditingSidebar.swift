@@ -236,8 +236,7 @@ struct FilterPreviewThumbnail: View {
       RoundedRectangle(cornerRadius: 8)
         .fill(.quaternary)
 
-      if let img = pipeline.editedImage ?? nil {
-        // Reuse current pipeline image as a quick preview stand-in
+      if let img = pipeline.previewImage(for: preset) {
         Image(nsImage: img)
           .resizable()
           .scaledToFill()

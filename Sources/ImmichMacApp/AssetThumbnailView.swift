@@ -14,6 +14,16 @@ final class ThumbnailStore: ObservableObject {
     return c
   }()
 
+  /// Synchronous cache-only lookup — returns nil if not cached, never triggers a network fetch.
+  func cachedImage(
+    for item: AppState.PhotoItem,
+    context: AppState.ThumbnailContext?,
+    size: ThumbnailSize = .thumbnail
+  ) -> NSImage? {
+    let key = cacheKey(for: item, context: context, size: size)
+    return cache.object(forKey: key as NSString)
+  }
+
   func loadImage(
     for item: AppState.PhotoItem,
     context: AppState.ThumbnailContext?,

@@ -6,18 +6,41 @@ import ImmichCore
 
 private let debugLogURL = URL(fileURLWithPath: "/tmp/immich-debug.log")
 
+private let isImmichDebugLoggingEnabled: Bool = {
+  #if DEBUG
+  return true
+  #else
+  return ProcessInfo.processInfo.environment["IMMICH_DEBUG_LOG"] == "1"
+  #endif
+}()
+
+private let immichDebugLogMaxSize: UInt64 = 5 * 1024 * 1024 // 5 MB
+
 public func immichLog(_ message: String) {
+  guard isImmichDebugLoggingEnabled else { return }
+
   let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-  if let data = line.data(using: .utf8) {
-    if FileManager.default.fileExists(atPath: debugLogURL.path) {
-      if let handle = try? FileHandle(forWritingTo: debugLogURL) {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        handle.closeFile()
-      }
-    } else {
-      try? data.write(to: debugLogURL)
+  guard let data = line.data(using: .utf8) else { return }
+
+  let fileManager = FileManager.default
+  let path = debugLogURL.path
+
+  if fileManager.fileExists(atPath: path) {
+    if let attrs = try? fileManager.attributesOfItem(atPath: path),
+       let size = attrs[.size] as? NSNumber,
+       size.uint64Value > immichDebugLogMaxSize {
+      try? fileManager.removeItem(at: debugLogURL)
     }
+  }
+
+  if fileManager.fileExists(atPath: path) {
+    if let handle = try? FileHandle(forWritingTo: debugLogURL) {
+      handle.seekToEndOfFile()
+      handle.write(data)
+      try? handle.close()
+    }
+  } else {
+    try? data.write(to: debugLogURL)
   }
 }
 
@@ -317,16 +340,48 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     }
     // Extract filename from Content-Disposition header or use assetId
     let filename: String
-    if let disposition = httpResponse.value(forHTTPHeaderField: "Content-Disposition"),
-       let range = disposition.range(of: "filename=\""),
-       let end = disposition[range.upperBound...].firstIndex(of: "\"") {
-      filename = String(disposition[range.upperBound..<end])
+    if let disposition = httpResponse.value(forHTTPHeaderField: "Content-Disposition") {
+      if let name = Self.parseFilename(from: disposition) {
+        filename = name
+      } else {
+        filename = "\(assetId).jpg"
+      }
+    } else if let suggestedName = response.suggestedFilename, suggestedName != assetId {
+      filename = suggestedName
     } else {
       let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
       let ext = contentType.contains("video") ? "mp4" : (contentType.contains("png") ? "png" : "jpg")
       filename = "\(assetId).\(ext)"
     }
     return (data, filename)
+  }
+
+  /// Parse filename from Content-Disposition header, handling both
+  /// `filename="..."` and `filename*=UTF-8''...` forms.
+  private static func parseFilename(from disposition: String) -> String? {
+    // Prefer filename*= (RFC 5987) which carries the real UTF-8 name
+    if let starRange = disposition.range(of: "filename\\*=(?:UTF-8|utf-8)''", options: .regularExpression) {
+      let afterStar = disposition[starRange.upperBound...]
+      let end = afterStar.firstIndex(where: { $0 == ";" || $0 == " " }) ?? afterStar.endIndex
+      let encoded = String(afterStar[..<end])
+      if let decoded = encoded.removingPercentEncoding, !decoded.isEmpty {
+        return decoded
+      }
+    }
+    // Fall back to filename="..."
+    if let range = disposition.range(of: "filename=\""),
+       let end = disposition[range.upperBound...].firstIndex(of: "\"") {
+      let name = String(disposition[range.upperBound..<end])
+      if !name.isEmpty { return name }
+    }
+    // Fall back to filename=... (unquoted)
+    if let range = disposition.range(of: "filename=") {
+      let after = disposition[range.upperBound...].trimmingCharacters(in: .whitespaces)
+      let end = after.firstIndex(where: { $0 == ";" || $0 == " " }) ?? after.endIndex
+      let name = String(after[..<end])
+      if !name.isEmpty && name != "\"" { return name }
+    }
+    return nil
   }
 
   // MARK: - Upload Asset
@@ -498,7 +553,10 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
     var request = authorizedRequest(
-      url: server.baseURL.appending(path: "assets/\(assetId)/original"),
+      url: server.baseURL
+        .appendingPathComponent("assets")
+        .appendingPathComponent(assetId)
+        .appendingPathComponent("original"),
       session: session
     )
     request.httpMethod = "PUT"
@@ -695,22 +753,21 @@ private enum TimelineBucketMapper {
     "yyyy-MM-dd'T'HH:mm:ss"
   ]
 
-  private static let dateFormatters: [DateFormatter] = dateFormats.map { format in
-    let formatter = DateFormatter()
-    formatter.calendar = Calendar(identifier: .iso8601)
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = format
-    return formatter
-  }
-
-  // Cached formatters — safe to share because DateFormatter.date(from:) is read-only on these
-  // pre-configured instances, and static let initialization is thread-safe in Swift.
   static func parseDate(_ value: String) -> Date? {
-    for formatter in dateFormatters {
-      if let date = formatter.date(from: value) {
-        return date
-      }
+    // ISO8601DateFormatter is thread-safe unlike DateFormatter
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = iso.date(from: value) { return date }
+    iso.formatOptions = [.withInternetDateTime]
+    if let date = iso.date(from: value) { return date }
+    // Fall back to per-call DateFormatter instances for non-standard formats
+    for format in dateFormats {
+      let formatter = DateFormatter()
+      formatter.calendar = Calendar(identifier: .iso8601)
+      formatter.locale = Locale(identifier: "en_US_POSIX")
+      formatter.timeZone = TimeZone(secondsFromGMT: 0)
+      formatter.dateFormat = format
+      if let date = formatter.date(from: value) { return date }
     }
     return nil
   }

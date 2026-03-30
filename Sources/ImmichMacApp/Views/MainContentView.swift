@@ -195,11 +195,15 @@ struct MainContentView: View {
           .font(.callout)
 
         Button {
-          appState.selectAllItems()
+          if appState.allItemsSelected {
+            appState.deselectAllItems()
+          } else {
+            appState.selectAllItems()
+          }
         } label: {
-          Image(systemName: "checkmark.circle.fill")
+          Image(systemName: appState.allItemsSelected ? "checkmark.circle.badge.xmark" : "checkmark.circle.fill")
         }
-        .help("Select All")
+        .help(appState.allItemsSelected ? "Deselect All" : "Select All")
 
         Button {
           appState.batchFavorite()

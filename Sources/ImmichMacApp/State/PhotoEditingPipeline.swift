@@ -220,8 +220,8 @@ final class PhotoEditingPipeline: ObservableObject {
 
   // MARK: - Filter Presets (CIFilter-based)
 
-  private func applyFilterPreset(to image: CIImage) -> CIImage {
-    switch selectedFilter {
+  private func applyFilterPreset(to image: CIImage, preset: FilterPreset? = nil) -> CIImage {
+    switch preset ?? selectedFilter {
     case .original:
       return image
 
@@ -275,6 +275,14 @@ final class PhotoEditingPipeline: ObservableObject {
   }
 
   // MARK: - Actions
+
+  /// Renders a small preview of the source image with only the given filter preset applied.
+  func previewImage(for preset: FilterPreset) -> NSImage? {
+    guard let sourceImage else { return sourceNSImage }
+    let filtered = applyFilterPreset(to: sourceImage, preset: preset)
+    guard let cgImage = ciContext.createCGImage(filtered, from: filtered.extent) else { return sourceNSImage }
+    return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+  }
 
   func autoEnhance() {
     exposure = 0.1

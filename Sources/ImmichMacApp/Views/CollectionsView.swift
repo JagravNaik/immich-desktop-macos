@@ -1,5 +1,6 @@
 #if canImport(SwiftUI) && canImport(AppKit)
 import SwiftUI
+import AppKit
 import ImmichCore
 
 // MARK: - Collections View (macOS 26 Photos-style)

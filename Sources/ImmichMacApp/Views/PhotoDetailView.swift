@@ -23,7 +23,6 @@ struct PhotoDetailView: View {
 
         // Main content
         contentView(for: item)
-          .id(item.id)
           .overlay(alignment: .topLeading) {
             if item.isLivePhoto {
               liveBadge
@@ -38,8 +37,10 @@ struct PhotoDetailView: View {
       }
       .transition(.opacity.combined(with: .scale(scale: 0.95)))
       .onChange(of: item.id) { _, newID in
-        // Immediately clear stale image to prevent flash of previous photo
-        image = nil
+        // Show cached thumbnail immediately to avoid blank frame
+        if let cached = thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext) {
+          image = cached
+        }
         currentItemID = newID
         isLoading = true
       }
