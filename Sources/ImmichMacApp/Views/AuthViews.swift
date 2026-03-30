@@ -160,6 +160,18 @@ struct LoginCard: View {
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
       .disabled(appState.isSigningIn)
+
+      if appState.oauthEnabled {
+        Divider()
+        Button {
+          appState.signInWithOAuth()
+        } label: {
+          Label(appState.oauthButtonText, systemImage: "globe")
+            .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .disabled(appState.isSigningIn)
+      }
     }
   }
 
@@ -169,8 +181,19 @@ struct LoginCard: View {
         .font(.headline)
 
       if appState.oauthEnabled {
-        Text("\(appState.oauthButtonText) is enabled but not yet implemented in this client.")
-          .foregroundStyle(.secondary)
+        Button {
+          appState.signInWithOAuth()
+        } label: {
+          if appState.isSigningIn {
+            ProgressView().frame(maxWidth: .infinity)
+          } else {
+            Label(appState.oauthButtonText, systemImage: "globe")
+              .frame(maxWidth: .infinity)
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(appState.isSigningIn)
       }
     }
     .padding(16)

@@ -1,6 +1,8 @@
-#if canImport(SwiftUI)
+#if canImport(SwiftUI) && canImport(AppKit)
 import Foundation
 import SwiftUI
+import AppKit
+import AuthenticationServices
 import ImmichAPI
 import ImmichCore
 import ImmichSync
@@ -100,6 +102,12 @@ final class AppState: ObservableObject {
   @Published var isLoadingTimeline = false
   @Published var searchText = ""
 
+  // Smart search
+  @Published var searchResults: [PhotoItem] = []
+  @Published var isSearching = false
+  @Published var searchTotalCount = 0
+  private var searchTask: Task<Void, Never>?
+
   // Album detail
   @Published var activeAlbumID: String?
   @Published var activeAlbumItems: [PhotoItem] = []
@@ -130,6 +138,16 @@ final class AppState: ObservableObject {
   @Published var isPeeking = false
   @Published var showInfoPopover = false
   @Published var hoveredItemID: String?
+
+  // Multi-select
+  @Published var isMultiSelectMode = false
+  @Published var selectedItemIDs: Set<String> = []
+
+  // Album CRUD
+  @Published var showCreateAlbumSheet = false
+  @Published var showAddToAlbumSheet = false
+  @Published var newAlbumName = ""
+  @Published var newAlbumDescription = ""
 
   // Collections
   @Published var albums: [Album] = []
@@ -249,6 +267,10 @@ final class AppState: ObservableObject {
     }()
 
     guard !searchText.isEmpty else { return sectionFiltered }
+    // If we have server search results, show those instead of local filter
+    if !searchResults.isEmpty || isSearching {
+      return searchResults
+    }
     return sectionFiltered.filter {
       $0.title.localizedCaseInsensitiveContains(searchText)
     }
@@ -397,6 +419,56 @@ final class AppState: ObservableObject {
     }
   }
 
+  // MARK: - OAuth Login
+
+  func signInWithOAuth() {
+    guard let connectedServer else { return }
+    isSigningIn = true
+
+    Task {
+      do {
+        let redirectUri = "immich://oauth-callback"
+        let oauthURL = try await apiClient.startOAuth(server: connectedServer, redirectUri: redirectUri)
+
+        guard let url = URL(string: oauthURL) else {
+          statusText = "Invalid OAuth URL from server"
+          isSigningIn = false
+          return
+        }
+
+        let callbackURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+          let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "immich") { callbackURL, error in
+            if let error {
+              continuation.resume(throwing: error)
+            } else if let callbackURL {
+              continuation.resume(returning: callbackURL)
+            } else {
+              continuation.resume(throwing: ImmichAPIError.invalidResponse(url: "oauth"))
+            }
+          }
+          session.prefersEphemeralWebBrowserSession = false
+          session.start()
+        }
+
+        let session = try await apiClient.finishOAuth(server: connectedServer, oauthCallbackUrl: callbackURL.absoluteString)
+        currentSession = session
+        emailText = session.userEmail
+        UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
+        resetLibraryState()
+        appPhase = .library
+        statusText = "Signed in as \(session.userName)"
+        await loadInitialData()
+      } catch {
+        if (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin {
+          statusText = "OAuth login cancelled"
+        } else {
+          statusText = "OAuth failed: \(error.localizedDescription)"
+        }
+      }
+      isSigningIn = false
+    }
+  }
+
   func signOut() {
     currentSession = nil
     passwordText = ""
@@ -422,7 +494,12 @@ final class AppState: ObservableObject {
 
   private func resetLibraryState() {
     searchText = ""
+    searchResults = []
+    isSearching = false
+    searchTotalCount = 0
     selectedItemID = nil
+    isMultiSelectMode = false
+    selectedItemIDs = []
     libraryItems = []
     favoritesCount = 0
     videosCount = 0
@@ -505,6 +582,46 @@ final class AppState: ObservableObject {
     let assets = sharedLinkAssets[linkID] ?? []
     activeSharedLinkItems = assets.filter { !$0.isTrashed }.map {
       Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
+    }
+  }
+
+  // MARK: - Smart Search
+
+  func performSmartSearch(query: String) {
+    searchTask?.cancel()
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    guard !trimmed.isEmpty else {
+      searchResults = []
+      isSearching = false
+      searchTotalCount = 0
+      return
+    }
+
+    isSearching = true
+    searchTask = Task {
+      // Debounce: wait 300ms so we don't fire on every keystroke
+      do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+      guard !Task.isCancelled else { return }
+      guard let connectedServer, let currentSession else {
+        isSearching = false
+        return
+      }
+
+      do {
+        let result = try await apiClient.searchAssets(
+          server: connectedServer, session: currentSession, query: trimmed
+        )
+        guard !Task.isCancelled else { return }
+        searchResults = result.assets.filter { !$0.isTrashed }.map {
+          Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
+        }
+        searchTotalCount = result.totalCount
+      } catch {
+        guard !Task.isCancelled else { return }
+        immichLog("[Search] Smart search failed: \(error)")
+      }
+      isSearching = false
     }
   }
 
@@ -726,6 +843,53 @@ final class AppState: ObservableObject {
     }
   }
 
+  // MARK: - Download / Export
+
+  @Published var isDownloading = false
+
+  func downloadAsset(_ assetID: String) {
+    guard let connectedServer, let currentSession else { return }
+    isDownloading = true
+    Task {
+      defer { isDownloading = false }
+      do {
+        let (data, filename) = try await apiClient.downloadOriginalAsset(
+          server: connectedServer, session: currentSession, assetId: assetID
+        )
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = filename
+        panel.canCreateDirectories = true
+        let response = await panel.beginSheetModal(for: NSApp.keyWindow!)
+        if response == .OK, let url = panel.url {
+          try data.write(to: url)
+          immichLog("[Download] Saved \(filename) to \(url.path)")
+        }
+      } catch {
+        immichLog("[Download] Failed: \(error)")
+      }
+    }
+  }
+
+  // MARK: - Share (NSSharingService)
+
+  func shareAsset(_ assetID: String, from view: NSView) {
+    guard let connectedServer, let currentSession else { return }
+    Task {
+      do {
+        let (data, filename) = try await apiClient.downloadOriginalAsset(
+          server: connectedServer, session: currentSession, assetId: assetID
+        )
+        // Write to temp file for sharing
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try data.write(to: tempURL)
+        let picker = NSSharingServicePicker(items: [tempURL])
+        picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+      } catch {
+        immichLog("[Share] Failed: \(error)")
+      }
+    }
+  }
+
   // MARK: - Trash Loading
 
   func loadTrashedAssets() async {
@@ -757,6 +921,184 @@ final class AppState: ObservableObject {
       } catch {
         immichLog("[Restore] Failed: \(error)")
       }
+    }
+  }
+
+  // MARK: - Multi-Select Actions
+
+  func toggleMultiSelect() {
+    isMultiSelectMode.toggle()
+    if !isMultiSelectMode {
+      selectedItemIDs.removeAll()
+    }
+  }
+
+  func toggleItemSelection(_ itemID: String) {
+    if selectedItemIDs.contains(itemID) {
+      selectedItemIDs.remove(itemID)
+    } else {
+      selectedItemIDs.insert(itemID)
+    }
+  }
+
+  func selectAllItems() {
+    selectedItemIDs = Set(filteredItems.map(\.id))
+  }
+
+  func batchFavorite() {
+    for id in selectedItemIDs {
+      toggleFavorite(for: id)
+    }
+  }
+
+  func batchTrash() {
+    guard let connectedServer, let currentSession else { return }
+    let ids = Array(selectedItemIDs)
+    libraryItems.removeAll { ids.contains($0.id) }
+    activeAlbumItems.removeAll { ids.contains($0.id) }
+    activePersonItems.removeAll { ids.contains($0.id) }
+    activeSharedLinkItems.removeAll { ids.contains($0.id) }
+    rebuildLibrarySections()
+    selectedItemIDs.removeAll()
+    if let selectedItemID, ids.contains(selectedItemID) {
+      self.selectedItemID = filteredItems.first?.id
+      isViewingPhoto = false
+    }
+    Task {
+      do {
+        try await apiClient.trashAssets(server: connectedServer, session: currentSession, assetIds: ids)
+      } catch {
+        immichLog("[BatchTrash] Failed: \(error)")
+      }
+    }
+  }
+
+  func batchDownload() {
+    guard let connectedServer, let currentSession else { return }
+    let ids = Array(selectedItemIDs)
+    Task {
+      let panel = NSOpenPanel()
+      panel.canChooseDirectories = true
+      panel.canChooseFiles = false
+      panel.canCreateDirectories = true
+      panel.prompt = "Choose Folder"
+      let response = await panel.beginSheetModal(for: NSApp.keyWindow!)
+      guard response == .OK, let folder = panel.url else { return }
+
+      for id in ids {
+        do {
+          let (data, filename) = try await apiClient.downloadOriginalAsset(
+            server: connectedServer, session: currentSession, assetId: id
+          )
+          let fileURL = folder.appendingPathComponent(filename)
+          try data.write(to: fileURL)
+          immichLog("[BatchDownload] Saved \(filename)")
+        } catch {
+          immichLog("[BatchDownload] Failed for \(id): \(error)")
+        }
+      }
+    }
+  }
+
+  // MARK: - Album CRUD
+
+  func createAlbum(name: String, description: String = "", assetIds: [String] = []) async {
+    guard let connectedServer, let currentSession else { return }
+    do {
+      let album = try await apiClient.createAlbum(
+        server: connectedServer, session: currentSession,
+        name: name, description: description, assetIds: assetIds
+      )
+      albums.insert(album, at: 0)
+      immichLog("[Album] Created: \(album.albumName)")
+    } catch {
+      immichLog("[Album] Create failed: \(error)")
+    }
+  }
+
+  func renameAlbum(_ albumID: String, newName: String) async {
+    guard let connectedServer, let currentSession else { return }
+    do {
+      try await apiClient.renameAlbum(
+        server: connectedServer, session: currentSession, albumId: albumID, newName: newName
+      )
+      if let idx = albums.firstIndex(where: { $0.id == albumID }) {
+        let old = albums[idx]
+        albums[idx] = Album(
+          id: old.id, albumName: newName, description: old.description,
+          assetCount: old.assetCount, albumThumbnailAssetId: old.albumThumbnailAssetId,
+          createdAt: old.createdAt, updatedAt: Date(),
+          isActivityEnabled: old.isActivityEnabled, shared: old.shared,
+          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+        )
+      }
+      immichLog("[Album] Renamed to: \(newName)")
+    } catch {
+      immichLog("[Album] Rename failed: \(error)")
+    }
+  }
+
+  func deleteAlbum(_ albumID: String) async {
+    guard let connectedServer, let currentSession else { return }
+    do {
+      try await apiClient.deleteAlbum(server: connectedServer, session: currentSession, albumId: albumID)
+      albums.removeAll { $0.id == albumID }
+      pinnedAlbumIDs.remove(albumID)
+      UserDefaults.standard.set(Array(pinnedAlbumIDs), forKey: "immich.pinnedAlbums")
+      if activeAlbumID == albumID {
+        activeAlbumID = nil
+        activeAlbumItems = []
+        sidebarSelection = .allAlbums
+      }
+      immichLog("[Album] Deleted: \(albumID)")
+    } catch {
+      immichLog("[Album] Delete failed: \(error)")
+    }
+  }
+
+  func addAssetsToAlbum(_ albumID: String, assetIds: [String]) async {
+    guard let connectedServer, let currentSession else { return }
+    do {
+      try await apiClient.addAssetsToAlbum(
+        server: connectedServer, session: currentSession, albumId: albumID, assetIds: assetIds
+      )
+      // Update the count
+      if let idx = albums.firstIndex(where: { $0.id == albumID }) {
+        let old = albums[idx]
+        albums[idx] = Album(
+          id: old.id, albumName: old.albumName, description: old.description,
+          assetCount: old.assetCount + assetIds.count, albumThumbnailAssetId: old.albumThumbnailAssetId,
+          createdAt: old.createdAt, updatedAt: Date(),
+          isActivityEnabled: old.isActivityEnabled, shared: old.shared,
+          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+        )
+      }
+      immichLog("[Album] Added \(assetIds.count) assets to \(albumID)")
+    } catch {
+      immichLog("[Album] Add assets failed: \(error)")
+    }
+  }
+
+  func removeAssetsFromAlbum(_ albumID: String, assetIds: [String]) async {
+    guard let connectedServer, let currentSession else { return }
+    do {
+      try await apiClient.removeAssetsFromAlbum(
+        server: connectedServer, session: currentSession, albumId: albumID, assetIds: assetIds
+      )
+      activeAlbumItems.removeAll { assetIds.contains($0.id) }
+      if let idx = albums.firstIndex(where: { $0.id == albumID }) {
+        let old = albums[idx]
+        albums[idx] = Album(
+          id: old.id, albumName: old.albumName, description: old.description,
+          assetCount: max(0, old.assetCount - assetIds.count), albumThumbnailAssetId: old.albumThumbnailAssetId,
+          createdAt: old.createdAt, updatedAt: Date(),
+          isActivityEnabled: old.isActivityEnabled, shared: old.shared,
+          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+        )
+      }
+      immichLog("[Album] Removed \(assetIds.count) assets from \(albumID)")
+    } catch {
+      immichLog("[Album] Remove assets failed: \(error)")
     }
   }
 
@@ -877,14 +1219,51 @@ final class AppState: ObservableObject {
   }
 
   private func simulateUpload(_ item: UploadItem) async {
-    for step in stride(from: 0.1, through: 1.0, by: 0.1) {
-      guard !Task.isCancelled else { return }
-      await uploadQueue.markUploading(item, progress: step)
-      updateUploadRow(id: item.id, progress: step, state: .uploading(progress: step))
-      do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+    guard let connectedServer, let currentSession else {
+      updateUploadRow(id: item.id, progress: 0, state: .failed(reason: "Not connected"))
+      return
     }
-    await uploadQueue.markDone(item)
-    updateUploadRow(id: item.id, progress: 1, state: .done)
+    do {
+      let remoteID = try await apiClient.uploadAsset(
+        server: connectedServer, session: currentSession, fileURL: item.fileURL,
+        onProgress: { [weak self] progress in
+          Task { @MainActor in
+            self?.updateUploadRow(id: item.id, progress: progress, state: .uploading(progress: progress))
+          }
+        }
+      )
+      await uploadQueue.markDone(item)
+      updateUploadRow(id: item.id, progress: 1, state: .done)
+
+      // Replace local item with remote asset reference
+      if let idx = libraryItems.firstIndex(where: { $0.source == .localFile(item.fileURL) }) {
+        let old = libraryItems[idx]
+        libraryItems[idx] = PhotoItem(
+          id: remoteID.isEmpty ? old.id : remoteID,
+          source: remoteID.isEmpty ? old.source : .remoteAsset(id: remoteID),
+          title: old.title,
+          date: old.date,
+          isFavorite: old.isFavorite,
+          isVideo: old.isVideo,
+          isImported: old.isImported,
+          livePhotoVideoID: old.livePhotoVideoID,
+          latitude: old.latitude,
+          longitude: old.longitude,
+          durationText: old.durationText,
+          city: old.city,
+          country: old.country,
+          stackCount: old.stackCount,
+          timeBucketKey: old.timeBucketKey,
+          projectionType: old.projectionType
+        )
+        rebuildLibrarySections()
+      }
+      immichLog("[Upload] Completed: \(item.fileURL.lastPathComponent) -> \(remoteID)")
+    } catch {
+      await uploadQueue.markDone(item)
+      updateUploadRow(id: item.id, progress: 0, state: .failed(reason: error.localizedDescription))
+      immichLog("[Upload] Failed: \(error)")
+    }
   }
 
   private func updateUploadRow(id: UUID, progress: Double, state: UploadState) {

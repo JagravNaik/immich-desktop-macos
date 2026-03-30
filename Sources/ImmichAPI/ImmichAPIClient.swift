@@ -41,6 +41,15 @@ public protocol ImmichAPIClient: Sendable {
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
   func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]])
+  func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String)
+  func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @Sendable (Double) -> Void) async throws -> String
+  func createAlbum(server: ImmichServer, session: UserSession, name: String, description: String, assetIds: [String]) async throws -> Album
+  func renameAlbum(server: ImmichServer, session: UserSession, albumId: String, newName: String) async throws
+  func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws
+  func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
+  func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
+  func startOAuth(server: ImmichServer, redirectUri: String) async throws -> String
+  func finishOAuth(server: ImmichServer, oauthCallbackUrl: String) async throws -> UserSession
 }
 
 public enum ImmichAPIError: Error, LocalizedError, Sendable {
@@ -292,6 +301,171 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       assetsMap[response.id] = response.toTimelineAssets()
     }
     return (links, assetsMap)
+  }
+
+  // MARK: - Download Original Asset
+
+  public func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String) {
+    let request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId).appending(path: "original"),
+      session: session
+    )
+    let (data, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to download asset")
+    }
+    // Extract filename from Content-Disposition header or use assetId
+    let filename: String
+    if let disposition = httpResponse.value(forHTTPHeaderField: "Content-Disposition"),
+       let range = disposition.range(of: "filename=\""),
+       let end = disposition[range.upperBound...].firstIndex(of: "\"") {
+      filename = String(disposition[range.upperBound..<end])
+    } else {
+      let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "image/jpeg"
+      let ext = contentType.contains("video") ? "mp4" : (contentType.contains("png") ? "png" : "jpg")
+      filename = "\(assetId).\(ext)"
+    }
+    return (data, filename)
+  }
+
+  // MARK: - Upload Asset
+
+  public func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @Sendable (Double) -> Void) async throws -> String {
+    let boundary = UUID().uuidString
+    let fileData = try Data(contentsOf: fileURL)
+    let filename = fileURL.lastPathComponent
+    let mimeType = fileURL.mimeType
+
+    // Get file creation date
+    let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+    let createdDate = (attrs?[.creationDate] as? Date) ?? Date()
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let deviceAssetId = "\(filename)-\(Int(createdDate.timeIntervalSince1970 * 1000))"
+
+    var body = Data()
+    func appendField(_ name: String, _ value: String) {
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+      body.append("\(value)\r\n".data(using: .utf8)!)
+    }
+    appendField("deviceAssetId", deviceAssetId)
+    appendField("deviceId", "macos-desktop")
+    appendField("fileCreatedAt", isoFormatter.string(from: createdDate))
+    appendField("fileModifiedAt", isoFormatter.string(from: Date()))
+    appendField("isFavorite", "false")
+
+    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+    body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+    body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+    body.append(fileData)
+    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+    var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+    request.httpBody = body
+
+    onProgress(0.5) // halfway after building body
+    let (data, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Upload failed")
+    }
+    onProgress(1.0)
+
+    if let json = try? JSONDecoder().decode(UploadResponse.self, from: data) {
+      return json.id
+    }
+    return ""
+  }
+
+  // MARK: - Album CRUD
+
+  public func createAlbum(server: ImmichServer, session: UserSession, name: String, description: String, assetIds: [String]) async throws -> Album {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "albums"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(CreateAlbumRequest(albumName: name, description: description, assetIds: assetIds))
+    let response: AlbumResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  public func renameAlbum(server: ImmichServer, session: UserSession, albumId: String, newName: String) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId),
+      session: session
+    )
+    request.httpMethod = "PATCH"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["albumName": newName])
+    let _: AlbumResponse = try await perform(request)
+  }
+
+  public func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to delete album")
+    }
+  }
+
+  public func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId).appending(path: "assets"),
+      session: session
+    )
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(BulkIdsRequest(ids: assetIds))
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to add assets to album")
+    }
+  }
+
+  public func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId).appending(path: "assets"),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(BulkIdsRequest(ids: assetIds))
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to remove assets from album")
+    }
+  }
+
+  // MARK: - OAuth
+
+  public func startOAuth(server: ImmichServer, redirectUri: String) async throws -> String {
+    var request = URLRequest(url: server.baseURL.appending(path: "oauth/authorize"))
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["redirectUri": redirectUri])
+    let response: OAuthAuthorizeResponse = try await perform(request)
+    return response.url
+  }
+
+  public func finishOAuth(server: ImmichServer, oauthCallbackUrl: String) async throws -> UserSession {
+    var request = URLRequest(url: server.baseURL.appending(path: "oauth/callback"))
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["url": oauthCallbackUrl])
+    let response: LoginResponse = try await perform(request)
+    return UserSession(
+      accessToken: response.accessToken,
+      isAdmin: response.isAdmin,
+      shouldChangePassword: response.shouldChangePassword,
+      userEmail: response.userEmail,
+      userID: response.userID,
+      userName: response.name
+    )
   }
 
   private func fetchAboutInfo(server: ImmichServer, apiKey: String) async throws -> ServerInfo {
@@ -883,5 +1057,47 @@ private struct SharedLinkResponse: Decodable {
 
   func toTimelineAssets() -> [RemoteTimelineAsset] {
     (assets ?? []).compactMap { $0.toTimelineAsset() }
+  }
+}
+
+// MARK: - Upload DTOs
+
+private struct UploadResponse: Decodable {
+  let id: String
+}
+
+private struct CreateAlbumRequest: Encodable {
+  let albumName: String
+  let description: String
+  let assetIds: [String]
+}
+
+private struct BulkIdsRequest: Encodable {
+  let ids: [String]
+}
+
+private struct OAuthAuthorizeResponse: Decodable {
+  let url: String
+}
+
+// MARK: - URL MIME Type Helper
+
+extension URL {
+  var mimeType: String {
+    switch pathExtension.lowercased() {
+    case "jpg", "jpeg": return "image/jpeg"
+    case "png": return "image/png"
+    case "gif": return "image/gif"
+    case "heic": return "image/heic"
+    case "heif": return "image/heif"
+    case "webp": return "image/webp"
+    case "mov": return "video/quicktime"
+    case "mp4": return "video/mp4"
+    case "m4v": return "video/x-m4v"
+    case "avi": return "video/x-msvideo"
+    case "tiff", "tif": return "image/tiff"
+    case "raw", "dng", "cr2", "nef", "arw": return "image/raw"
+    default: return "application/octet-stream"
+    }
   }
 }

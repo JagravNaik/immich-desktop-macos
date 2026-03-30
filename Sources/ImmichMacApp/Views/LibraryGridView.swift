@@ -105,6 +105,8 @@ struct LibraryGridView: View {
                 PhotoGridCell(
                   item: item,
                   isSelected: item.id == selectedID,
+                  isMultiSelected: appState.selectedItemIDs.contains(item.id),
+                  isMultiSelectMode: appState.isMultiSelectMode,
                   context: context,
                   thumbnailStore: thumbnailStore,
                   onSelect: { appState.selectedItemID = item.id },
@@ -115,7 +117,13 @@ struct LibraryGridView: View {
                       appState.isViewingPhoto = true
                     }
                   },
-                  onFavoriteToggle: { appState.toggleFavorite(for: item.id) }
+                  onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
+                  onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
+                  onDownload: { appState.downloadAsset(item.id) },
+                  onAddToAlbum: {
+                    appState.selectedItemIDs = [item.id]
+                    appState.showAddToAlbumSheet = true
+                  }
                 )
               }
             }
@@ -156,6 +164,8 @@ struct LibraryGridView: View {
           PhotoGridCell(
             item: item,
             isSelected: item.id == selectedID,
+            isMultiSelected: appState.selectedItemIDs.contains(item.id),
+            isMultiSelectMode: appState.isMultiSelectMode,
             context: context,
             thumbnailStore: thumbnailStore,
             onSelect: { appState.selectedItemID = item.id },
@@ -166,7 +176,13 @@ struct LibraryGridView: View {
                 appState.isViewingPhoto = true
               }
             },
-            onFavoriteToggle: { appState.toggleFavorite(for: item.id) }
+            onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
+            onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
+            onDownload: { appState.downloadAsset(item.id) },
+            onAddToAlbum: {
+              appState.selectedItemIDs = [item.id]
+              appState.showAddToAlbumSheet = true
+            }
           )
         }
       }
@@ -228,11 +244,16 @@ struct LibraryGridView: View {
 struct PhotoGridCell: View {
   let item: AppState.PhotoItem
   let isSelected: Bool
+  let isMultiSelected: Bool
+  let isMultiSelectMode: Bool
   let context: AppState.ThumbnailContext?
   let thumbnailStore: ThumbnailStore
   let onSelect: () -> Void
   let onOpen: () -> Void
   let onFavoriteToggle: () -> Void
+  let onMultiSelectToggle: () -> Void
+  var onDownload: (() -> Void)?
+  var onAddToAlbum: (() -> Void)?
 
   @State private var isHovered = false
 
@@ -273,9 +294,21 @@ struct PhotoGridCell: View {
     }
     .overlay {
       // Selection ring
-      if isSelected {
+      if isSelected || isMultiSelected {
         RoundedRectangle(cornerRadius: 2)
           .strokeBorder(Color.accentColor, lineWidth: 3)
+      }
+    }
+    .overlay(alignment: .topLeading) {
+      // Multi-select checkbox
+      if isMultiSelectMode {
+        Image(systemName: isMultiSelected ? "checkmark.circle.fill" : "circle")
+          .font(.title3)
+          .foregroundStyle(isMultiSelected ? Color.accentColor : .white)
+          .shadow(color: .black.opacity(0.5), radius: 2)
+          .padding(6)
+          .contentShape(Rectangle())
+          .onTapGesture { onMultiSelectToggle() }
       }
     }
     .overlay(alignment: .topTrailing) {
@@ -298,14 +331,21 @@ struct PhotoGridCell: View {
     .onHover { isHovered = $0 }
     .contentShape(Rectangle())
     .onTapGesture(count: 2) {
-      onOpen()
+      if !isMultiSelectMode { onOpen() }
     }
     .onTapGesture(count: 1) {
-      onSelect()
+      if isMultiSelectMode {
+        onMultiSelectToggle()
+      } else {
+        onSelect()
+      }
     }
     .contextMenu {
       Button("Open") { onOpen() }
       Button(item.isFavorite ? "Unfavorite" : "Favorite") { onFavoriteToggle() }
+      Divider()
+      Button("Download Original") { onDownload?() }
+      Button("Add to Album…") { onAddToAlbum?() }
       Divider()
       Button("Get Info") { onSelect() }
     }

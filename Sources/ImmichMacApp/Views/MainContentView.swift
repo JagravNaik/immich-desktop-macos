@@ -55,6 +55,12 @@ struct MainContentView: View {
     .onChange(of: appState.sidebarSelection) { _, _ in
       dismissViewer()
     }
+    .sheet(isPresented: $appState.showCreateAlbumSheet) {
+      CreateAlbumSheet(appState: appState)
+    }
+    .sheet(isPresented: $appState.showAddToAlbumSheet) {
+      AddToAlbumSheet(appState: appState)
+    }
   }
 
   private func dismissViewer() {
@@ -95,6 +101,9 @@ struct MainContentView: View {
       }
     }
     .searchable(text: $appState.searchText, placement: .toolbar, prompt: "Search")
+    .onChange(of: appState.searchText) { _, newValue in
+      appState.performSmartSearch(query: newValue)
+    }
     .toolbar {
       if appState.isViewingPhoto {
         viewerToolbar
@@ -178,6 +187,58 @@ struct MainContentView: View {
   @ToolbarContentBuilder
   private var browserToolbar: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
+      if appState.isMultiSelectMode {
+        Text("\(appState.selectedItemIDs.count) selected")
+          .foregroundStyle(.secondary)
+          .font(.callout)
+
+        Button {
+          appState.selectAllItems()
+        } label: {
+          Image(systemName: "checkmark.circle.fill")
+        }
+        .help("Select All")
+
+        Button {
+          appState.batchFavorite()
+        } label: {
+          Image(systemName: "heart")
+        }
+        .help("Favorite Selected")
+        .disabled(appState.selectedItemIDs.isEmpty)
+
+        Button {
+          appState.batchDownload()
+        } label: {
+          Image(systemName: "arrow.down.circle")
+        }
+        .help("Download Selected")
+        .disabled(appState.selectedItemIDs.isEmpty)
+
+        Button {
+          appState.showAddToAlbumSheet = true
+        } label: {
+          Image(systemName: "rectangle.stack.badge.plus")
+        }
+        .help("Add to Album")
+        .disabled(appState.selectedItemIDs.isEmpty)
+
+        Button {
+          appState.batchTrash()
+        } label: {
+          Image(systemName: "trash")
+        }
+        .help("Trash Selected")
+        .disabled(appState.selectedItemIDs.isEmpty)
+      }
+
+      Button {
+        appState.toggleMultiSelect()
+      } label: {
+        Image(systemName: appState.isMultiSelectMode ? "checkmark.circle.fill" : "checkmark.circle")
+      }
+      .help(appState.isMultiSelectMode ? "Exit Selection" : "Select Multiple")
+
       Button {
         importFromFinder()
       } label: {
@@ -185,7 +246,7 @@ struct MainContentView: View {
       }
       .help("Import Files")
 
-      // View options (placeholder for zoom/filter controls)
+      // View options
       Menu {
         Button("Hide Screenshots") {}
         Button("Show Only Photos") {}
@@ -257,6 +318,16 @@ struct MainContentView: View {
         .popover(isPresented: $appState.showInfoPopover, arrowEdge: .bottom) {
           AssetInfoInspector(appState: appState, item: item)
         }
+
+        Button {
+          appState.downloadAsset(item.id)
+        } label: {
+          Image(systemName: "arrow.down.circle")
+        }
+        .help("Download Original")
+        .disabled(appState.isDownloading)
+
+        ShareButton(appState: appState, assetID: item.id)
 
         Button {
           appState.trashItem(item.id)
@@ -424,6 +495,18 @@ struct AllAlbumsView: View {
             } onPin: {
               appState.togglePinAlbum(album.id)
             }
+            .contextMenu {
+              Button("Open Album") {
+                appState.sidebarSelection = .album(id: album.id)
+              }
+              Button("Pin to Sidebar") {
+                appState.togglePinAlbum(album.id)
+              }
+              Divider()
+              Button("Delete Album") {
+                Task { await appState.deleteAlbum(album.id) }
+              }
+            }
           }
         }
         .padding(20)
@@ -473,6 +556,8 @@ struct RecentlyDeletedView: View {
               PhotoGridCell(
                 item: item,
                 isSelected: item.id == appState.selectedItemID,
+                isMultiSelected: false,
+                isMultiSelectMode: false,
                 context: appState.thumbnailContext,
                 thumbnailStore: thumbnailStore,
                 onSelect: { appState.selectedItemID = item.id },
@@ -482,7 +567,8 @@ struct RecentlyDeletedView: View {
                     appState.isViewingPhoto = true
                   }
                 },
-                onFavoriteToggle: {}
+                onFavoriteToggle: {},
+                onMultiSelectToggle: {}
               )
               .contextMenu {
                 Button("Restore") { appState.restoreItem(item.id) }
@@ -498,6 +584,46 @@ struct RecentlyDeletedView: View {
 }
 
 // MARK: - Split View Divider Configurator
+
+/// Share button that provides an NSView anchor for NSSharingServicePicker
+struct ShareButton: NSViewRepresentable {
+  @ObservedObject var appState: AppState
+  let assetID: String
+
+  func makeNSView(context: Context) -> NSButton {
+    let button = NSButton()
+    button.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share")
+    button.bezelStyle = .toolbar
+    button.isBordered = false
+    button.target = context.coordinator
+    button.action = #selector(Coordinator.share(_:))
+    button.toolTip = "Share"
+    return button
+  }
+
+  func updateNSView(_ nsView: NSButton, context: Context) {
+    context.coordinator.appState = appState
+    context.coordinator.assetID = assetID
+  }
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(appState: appState, assetID: assetID)
+  }
+
+  class Coordinator: NSObject {
+    var appState: AppState
+    var assetID: String
+
+    init(appState: AppState, assetID: String) {
+      self.appState = appState
+      self.assetID = assetID
+    }
+
+    @MainActor @objc func share(_ sender: NSButton) {
+      appState.shareAsset(assetID, from: sender)
+    }
+  }
+}
 
 /// Finds the underlying NSSplitView and widens the divider so the resize cursor appears on hover.
 private struct SplitViewDividerConfigurator: NSViewRepresentable {
@@ -520,6 +646,119 @@ private struct SplitViewDividerConfigurator: NSViewRepresentable {
     if let splitView = view as? NSSplitView { return splitView }
     if let parent = view.superview { return findSplitView(from: parent) }
     return nil
+  }
+}
+
+// MARK: - Create Album Sheet
+
+struct CreateAlbumSheet: View {
+  @ObservedObject var appState: AppState
+  @State private var name = ""
+  @State private var description = ""
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text("Create Album")
+        .font(.title2.weight(.semibold))
+
+      TextField("Album Name", text: $name)
+        .textFieldStyle(.roundedBorder)
+
+      TextField("Description (optional)", text: $description)
+        .textFieldStyle(.roundedBorder)
+
+      HStack {
+        Spacer()
+        Button("Cancel") {
+          appState.showCreateAlbumSheet = false
+        }
+        Button("Create") {
+          let assetIds = appState.isMultiSelectMode ? Array(appState.selectedItemIDs) : []
+          Task {
+            await appState.createAlbum(name: name, description: description, assetIds: assetIds)
+            appState.showCreateAlbumSheet = false
+            if appState.isMultiSelectMode {
+              appState.selectedItemIDs.removeAll()
+              appState.isMultiSelectMode = false
+            }
+          }
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+      }
+    }
+    .padding(24)
+    .frame(width: 380)
+  }
+}
+
+// MARK: - Add to Album Sheet
+
+struct AddToAlbumSheet: View {
+  @ObservedObject var appState: AppState
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text("Add to Album")
+        .font(.title2.weight(.semibold))
+
+      Text("Choose an album to add \(appState.selectedItemIDs.count) item(s) to:")
+        .foregroundStyle(.secondary)
+
+      if appState.albums.isEmpty {
+        Text("No albums available.")
+          .foregroundStyle(.tertiary)
+          .padding(.vertical, 8)
+      } else {
+        ScrollView {
+          VStack(spacing: 2) {
+            ForEach(appState.albums) { album in
+              Button {
+                let ids = Array(appState.selectedItemIDs)
+                Task {
+                  await appState.addAssetsToAlbum(album.id, assetIds: ids)
+                  appState.showAddToAlbumSheet = false
+                  appState.selectedItemIDs.removeAll()
+                  appState.isMultiSelectMode = false
+                }
+              } label: {
+                HStack {
+                  Image(systemName: "rectangle.stack")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24)
+                  VStack(alignment: .leading) {
+                    Text(album.albumName)
+                      .font(.subheadline)
+                    Text("\(album.assetCount) items")
+                      .font(.caption)
+                      .foregroundStyle(.secondary)
+                  }
+                  Spacer()
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+            }
+          }
+        }
+        .frame(maxHeight: 300)
+      }
+
+      HStack {
+        Button("New Album…") {
+          appState.showAddToAlbumSheet = false
+          appState.showCreateAlbumSheet = true
+        }
+        Spacer()
+        Button("Cancel") {
+          appState.showAddToAlbumSheet = false
+        }
+      }
+    }
+    .padding(24)
+    .frame(width: 380)
   }
 }
 #endif
