@@ -7,6 +7,7 @@ import AppKit
 struct PhotoDetailView: View {
   @ObservedObject var appState: AppState
   @ObservedObject var thumbnailStore: ThumbnailStore
+  @ObservedObject var editingPipeline: PhotoEditingPipeline
 
   @State private var image: NSImage?
   @State private var currentItemID: String?
@@ -69,6 +70,13 @@ struct PhotoDetailView: View {
           if let original = await thumbnailStore.loadImage(for: item, context: appState.thumbnailContext, size: .original) {
             guard currentItemID == item.id else { return }
             self.image = original
+            // Feed the best available image to the editing pipeline
+            editingPipeline.setSourceImage(original)
+          }
+        } else {
+          // For non-original loads, still set the pipeline source from best available
+          if let img = self.image {
+            editingPipeline.setSourceImage(img)
           }
         }
       }
@@ -80,8 +88,13 @@ struct PhotoDetailView: View {
   @ViewBuilder
   private func contentView(for item: AppState.PhotoItem) -> some View {
     ZStack {
-      // Still image always rendered underneath
-      if let image {
+      // Still image: show edited version when editing, otherwise raw
+      if appState.isEditing, let editedImage = editingPipeline.editedImage {
+        Image(nsImage: editedImage)
+          .resizable()
+          .scaledToFit()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if let image {
         Image(nsImage: image)
           .resizable()
           .scaledToFit()

@@ -7,6 +7,7 @@ import AppKit
 struct MainContentView: View {
   @StateObject var appState: AppState
   @StateObject private var thumbnailStore = ThumbnailStore()
+  @StateObject private var editingPipeline = PhotoEditingPipeline()
   @State private var spacebarMonitor: Any?
 
   var body: some View {
@@ -80,14 +81,15 @@ struct MainContentView: View {
         // Photo viewer with hero transition
         PhotoDetailView(
           appState: appState,
-          thumbnailStore: thumbnailStore
+          thumbnailStore: thumbnailStore,
+          editingPipeline: editingPipeline
         )
 
         // Editing sidebar (right side, slides in)
         if appState.isEditing {
           HStack(spacing: 0) {
             Spacer()
-            EditingSidebar(appState: appState, item: item)
+            EditingSidebar(appState: appState, pipeline: editingPipeline, item: item)
               .transition(.move(edge: .trailing))
           }
         }

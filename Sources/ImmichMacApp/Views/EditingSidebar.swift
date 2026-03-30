@@ -6,18 +6,8 @@ import ImmichCore
 
 struct EditingSidebar: View {
   @ObservedObject var appState: AppState
+  @ObservedObject var pipeline: PhotoEditingPipeline
   let item: AppState.PhotoItem
-
-  @State private var brightness: Double = 0
-  @State private var contrast: Double = 0
-  @State private var saturation: Double = 0
-  @State private var exposure: Double = 0
-  @State private var highlights: Double = 0
-  @State private var shadows: Double = 0
-  @State private var warmth: Double = 0
-  @State private var sharpness: Double = 0
-  @State private var rotation: Double = 0
-  @State private var selectedFilterIndex = 0
 
   var body: some View {
     VStack(spacing: 0) {
@@ -49,18 +39,43 @@ struct EditingSidebar: View {
 
       // Bottom bar
       HStack {
-        Button("Auto Enhance") {
-          autoEnhance()
+        Button("Auto") {
+          withAnimation(.easeInOut(duration: 0.3)) {
+            pipeline.autoEnhance()
+          }
         }
         .buttonStyle(.bordered)
+        .help("Auto Enhance")
 
         Spacer()
 
         Button("Reset") {
-          resetAll()
+          withAnimation(.easeInOut(duration: 0.2)) {
+            pipeline.resetAll()
+          }
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
+        .disabled(!pipeline.hasEdits)
+
+        Menu {
+          Button("Save to Server") {
+            appState.saveEditedImage(pipeline: pipeline)
+          }
+          Button("Export to Disk…") {
+            appState.exportEditedImage(pipeline: pipeline)
+          }
+          Divider()
+          Button("Revert to Original") {
+            withAnimation(.easeInOut(duration: 0.2)) {
+              pipeline.resetAll()
+            }
+          }
+        } label: {
+          Text("Save")
+        }
+        .menuStyle(.borderedButton)
+        .disabled(!pipeline.hasEdits)
 
         Button("Done") {
           withAnimation(.easeInOut(duration: 0.2)) {
@@ -79,14 +94,14 @@ struct EditingSidebar: View {
 
   private var adjustContent: some View {
     VStack(alignment: .leading, spacing: 16) {
-      adjustSlider(label: "Exposure", value: $exposure, range: -2...2)
-      adjustSlider(label: "Brightness", value: $brightness, range: -1...1)
-      adjustSlider(label: "Contrast", value: $contrast, range: -1...1)
-      adjustSlider(label: "Highlights", value: $highlights, range: -1...1)
-      adjustSlider(label: "Shadows", value: $shadows, range: -1...1)
-      adjustSlider(label: "Saturation", value: $saturation, range: -1...1)
-      adjustSlider(label: "Warmth", value: $warmth, range: -1...1)
-      adjustSlider(label: "Sharpness", value: $sharpness, range: 0...1)
+      adjustSlider(label: "Exposure", value: $pipeline.exposure, range: -2...2)
+      adjustSlider(label: "Brightness", value: $pipeline.brightness, range: -1...1)
+      adjustSlider(label: "Contrast", value: $pipeline.contrast, range: -1...1)
+      adjustSlider(label: "Highlights", value: $pipeline.highlights, range: -1...1)
+      adjustSlider(label: "Shadows", value: $pipeline.shadows, range: -1...1)
+      adjustSlider(label: "Saturation", value: $pipeline.saturation, range: -1...1)
+      adjustSlider(label: "Warmth", value: $pipeline.warmth, range: -1...1)
+      adjustSlider(label: "Sharpness", value: $pipeline.sharpness, range: 0...1)
     }
     .padding(16)
   }
@@ -117,25 +132,22 @@ struct EditingSidebar: View {
         .padding(.top, 12)
 
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 72))], spacing: 12) {
-        ForEach(Array(filterNames.enumerated()), id: \.offset) { index, name in
+        ForEach(PhotoEditingPipeline.FilterPreset.allCases) { preset in
           VStack(spacing: 4) {
-            RoundedRectangle(cornerRadius: 8)
-              .fill(filterGradient(for: index))
-              .frame(height: 56)
-              .overlay {
-                if selectedFilterIndex == index {
-                  RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color.accentColor, lineWidth: 2)
-                }
-              }
+            FilterPreviewThumbnail(
+              pipeline: pipeline,
+              preset: preset,
+              isSelected: pipeline.selectedFilter == preset
+            )
+            .frame(height: 56)
 
-            Text(name)
+            Text(preset.rawValue)
               .font(.system(size: 9))
               .lineLimit(1)
           }
           .onTapGesture {
             withAnimation(.easeInOut(duration: 0.15)) {
-              selectedFilterIndex = index
+              pipeline.selectedFilter = preset
             }
           }
         }
@@ -143,26 +155,6 @@ struct EditingSidebar: View {
       .padding(.horizontal, 16)
       .padding(.bottom, 16)
     }
-  }
-
-  private let filterNames = [
-    "Original", "Vivid", "Dramatic", "Mono",
-    "Noir", "Silvertone", "Fade", "Chrome", "Process"
-  ]
-
-  private func filterGradient(for index: Int) -> LinearGradient {
-    let colors: [Color] = switch index {
-    case 0: [.gray.opacity(0.2), .gray.opacity(0.3)]
-    case 1: [.orange.opacity(0.4), .red.opacity(0.3)]
-    case 2: [.indigo.opacity(0.4), .black.opacity(0.3)]
-    case 3: [.gray.opacity(0.5), .white.opacity(0.2)]
-    case 4: [.black.opacity(0.6), .gray.opacity(0.3)]
-    case 5: [.brown.opacity(0.3), .gray.opacity(0.2)]
-    case 6: [.mint.opacity(0.2), .gray.opacity(0.15)]
-    case 7: [.teal.opacity(0.3), .blue.opacity(0.2)]
-    default: [.purple.opacity(0.3), .pink.opacity(0.2)]
-    }
-    return LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
   }
 
   // MARK: - Crop Tab
@@ -173,7 +165,7 @@ struct EditingSidebar: View {
         .font(.caption.weight(.medium))
         .foregroundStyle(.secondary)
 
-      adjustSlider(label: "Rotation", value: $rotation, range: -45...45)
+      adjustSlider(label: "Rotation", value: $pipeline.rotation, range: -45...45)
 
       Divider()
 
@@ -182,41 +174,46 @@ struct EditingSidebar: View {
         .foregroundStyle(.secondary)
 
       LazyVGrid(columns: [GridItem(.adaptive(minimum: 60))], spacing: 8) {
-        aspectButton("Free", ratio: nil)
-        aspectButton("1:1", ratio: 1)
-        aspectButton("4:3", ratio: 4.0/3.0)
-        aspectButton("16:9", ratio: 16.0/9.0)
-        aspectButton("3:2", ratio: 3.0/2.0)
+        ForEach(PhotoEditingPipeline.CropAspect.allCases) { aspect in
+          Button(aspect.rawValue) {
+            pipeline.cropAspectRatio = aspect
+          }
+          .buttonStyle(.bordered)
+          .controlSize(.small)
+          .tint(pipeline.cropAspectRatio == aspect ? .accentColor : nil)
+        }
       }
 
       Divider()
 
       HStack(spacing: 16) {
         Button {
-          rotation = 0 // Rotate left 90
+          pipeline.rotateLeft()
         } label: {
           Image(systemName: "rotate.left")
         }
-        .help("Rotate Left")
+        .help("Rotate Left 90°")
 
         Button {
-          rotation = 0 // Rotate right 90
+          pipeline.rotateRight()
         } label: {
           Image(systemName: "rotate.right")
         }
-        .help("Rotate Right")
+        .help("Rotate Right 90°")
 
         Button {
-          // Flip horizontal
+          pipeline.flipHorizontal.toggle()
         } label: {
           Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+            .foregroundStyle(pipeline.flipHorizontal ? Color.accentColor : .primary)
         }
         .help("Flip Horizontal")
 
         Button {
-          // Flip vertical
+          pipeline.flipVertical.toggle()
         } label: {
           Image(systemName: "arrow.up.and.down.righttriangle.up.righttriangle.down")
+            .foregroundStyle(pipeline.flipVertical ? Color.accentColor : .primary)
         }
         .help("Flip Vertical")
       }
@@ -224,32 +221,35 @@ struct EditingSidebar: View {
     }
     .padding(16)
   }
+}
 
-  private func aspectButton(_ label: String, ratio: Double?) -> some View {
-    Button(label) {}
-      .buttonStyle(.bordered)
-      .controlSize(.small)
-  }
+// MARK: - Filter Preview Thumbnail
 
-  // MARK: - Actions
+/// Shows a tiny preview of the source image with each filter applied.
+struct FilterPreviewThumbnail: View {
+  @ObservedObject var pipeline: PhotoEditingPipeline
+  let preset: PhotoEditingPipeline.FilterPreset
+  let isSelected: Bool
 
-  private func autoEnhance() {
-    withAnimation(.easeInOut(duration: 0.3)) {
-      brightness = 0.05
-      contrast = 0.1
-      saturation = 0.15
-      exposure = 0.1
-      highlights = -0.1
-      shadows = 0.15
-      sharpness = 0.3
+  var body: some View {
+    ZStack {
+      RoundedRectangle(cornerRadius: 8)
+        .fill(.quaternary)
+
+      if let img = pipeline.editedImage ?? nil {
+        // Reuse current pipeline image as a quick preview stand-in
+        Image(nsImage: img)
+          .resizable()
+          .scaledToFill()
+          .clipShape(RoundedRectangle(cornerRadius: 8))
+      }
     }
-  }
-
-  private func resetAll() {
-    withAnimation(.easeInOut(duration: 0.2)) {
-      brightness = 0; contrast = 0; saturation = 0; exposure = 0
-      highlights = 0; shadows = 0; warmth = 0; sharpness = 0
-      rotation = 0; selectedFilterIndex = 0
+    .clipShape(RoundedRectangle(cornerRadius: 8))
+    .overlay {
+      if isSelected {
+        RoundedRectangle(cornerRadius: 8)
+          .strokeBorder(Color.accentColor, lineWidth: 2)
+      }
     }
   }
 }

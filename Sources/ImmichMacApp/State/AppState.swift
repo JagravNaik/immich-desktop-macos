@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import AuthenticationServices
+import UniformTypeIdentifiers
 import ImmichAPI
 import ImmichCore
 import ImmichSync
@@ -891,6 +892,63 @@ final class AppState: ObservableObject {
   }
 
   // MARK: - Trash Loading
+
+  // MARK: - Photo Editing (Save / Export)
+
+  func saveEditedImage(pipeline: PhotoEditingPipeline) {
+    guard let connectedServer, let currentSession, let item = selectedItem else { return }
+    guard let jpegData = pipeline.renderFinalJPEG() else {
+      immichLog("[Edit] Failed to render final JPEG")
+      return
+    }
+    Task {
+      do {
+        let filename = "\(item.title.isEmpty ? item.id : item.title).jpg"
+        try await apiClient.replaceAsset(
+          server: connectedServer,
+          session: currentSession,
+          assetId: item.id,
+          imageData: jpegData,
+          filename: filename
+        )
+        immichLog("[Edit] Saved edited image for asset \(item.id)")
+        isEditing = false
+        pipeline.resetAll()
+      } catch {
+        immichLog("[Edit] Save failed: \(error)")
+      }
+    }
+  }
+
+  func exportEditedImage(pipeline: PhotoEditingPipeline) {
+    guard let jpegData = pipeline.renderFinalJPEG() else {
+      immichLog("[Edit] Failed to render for export")
+      return
+    }
+    Task {
+      let panel = NSSavePanel()
+      let defaultName = selectedItem?.title ?? "Edited Photo"
+      panel.nameFieldStringValue = "\(defaultName)_edited.jpg"
+      panel.canCreateDirectories = true
+      panel.allowedContentTypes = [.jpeg, .png]
+      guard let window = NSApp.keyWindow else { return }
+      let response = await panel.beginSheetModal(for: window)
+      if response == .OK, let url = panel.url {
+        do {
+          let dataToWrite: Data
+          if url.pathExtension.lowercased() == "png" {
+            dataToWrite = pipeline.renderFinalPNG() ?? jpegData
+          } else {
+            dataToWrite = jpegData
+          }
+          try dataToWrite.write(to: url)
+          immichLog("[Edit] Exported to \(url.path)")
+        } catch {
+          immichLog("[Edit] Export failed: \(error)")
+        }
+      }
+    }
+  }
 
   func loadTrashedAssets() async {
     guard let connectedServer, let currentSession else { return }

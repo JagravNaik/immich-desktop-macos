@@ -48,6 +48,7 @@ public protocol ImmichAPIClient: Sendable {
   func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws
   func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
   func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
+  func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws
   func startOAuth(server: ImmichServer, redirectUri: String) async throws -> String
   func finishOAuth(server: ImmichServer, oauthCallbackUrl: String) async throws -> UserSession
 }
@@ -466,6 +467,51 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       userID: response.userID,
       userName: response.name
     )
+  }
+
+  public func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws {
+    let boundary = UUID().uuidString
+    let mimeType: String
+    if filename.lowercased().hasSuffix(".png") {
+      mimeType = "image/png"
+    } else {
+      mimeType = "image/jpeg"
+    }
+
+    var body = Data()
+    func appendField(_ name: String, _ value: String) {
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+      body.append("\(value)\r\n".data(using: .utf8)!)
+    }
+    appendField("deviceAssetId", "\(filename)-edited-\(Int(Date().timeIntervalSince1970 * 1000))")
+    appendField("deviceId", "macos-desktop")
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    appendField("fileCreatedAt", isoFormatter.string(from: Date()))
+    appendField("fileModifiedAt", isoFormatter.string(from: Date()))
+
+    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+    body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+    body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
+    body.append(imageData)
+    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets/\(assetId)/original"),
+      session: session
+    )
+    request.httpMethod = "PUT"
+    request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+    request.httpBody = body
+
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(
+        statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0,
+        message: "Replace asset failed"
+      )
+    }
   }
 
   private func fetchAboutInfo(server: ImmichServer, apiKey: String) async throws -> ServerInfo {
