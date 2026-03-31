@@ -45,10 +45,11 @@ struct CollectionsView: View {
           .font(.title2.weight(.semibold))
         Spacer()
         Button("Show All") {
-          // Could navigate to a dedicated people view
+          // TODO: Add a dedicated people browser destination.
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
+        .disabled(true)
       }
 
       ScrollView(.horizontal, showsIndicators: false) {
@@ -73,9 +74,12 @@ struct CollectionsView: View {
         Text("Memories")
           .font(.title2.weight(.semibold))
         Spacer()
-        Button("Show All") {}
+        Button("Show All") {
+          // TODO: Add a dedicated memories browser destination.
+        }
           .buttonStyle(.plain)
           .foregroundStyle(.secondary)
+          .disabled(true)
       }
 
       ScrollView(.horizontal, showsIndicators: false) {

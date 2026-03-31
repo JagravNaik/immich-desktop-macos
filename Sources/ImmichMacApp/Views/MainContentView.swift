@@ -388,12 +388,27 @@ struct MainContentView: View {
 
       // View options
       Menu {
-        Button("Hide Screenshots") {}
-        Button("Show Only Photos") {}
-        Button("Show Only Videos") {}
+        Button("Hide Screenshots") {
+          // TODO: Implement screenshot filtering.
+        }
+        .disabled(true)
+        Button("Show Only Photos") {
+          // TODO: Implement photos-only filtering.
+        }
+        .disabled(true)
+        Button("Show Only Videos") {
+          // TODO: Implement videos-only filtering.
+        }
+        .disabled(true)
         Divider()
-        Button("Sort by Date Captured") {}
-        Button("Sort by Date Added") {}
+        Button("Sort by Date Captured") {
+          // TODO: Implement captured-date sorting.
+        }
+        .disabled(true)
+        Button("Sort by Date Added") {
+          // TODO: Implement added-date sorting.
+        }
+        .disabled(true)
       } label: {
         Image(systemName: "line.3.horizontal.decrease.circle")
       }

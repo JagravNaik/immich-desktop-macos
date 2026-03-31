@@ -577,7 +577,9 @@ struct PhotoGridCell: View {
     }
     .contentShape(Rectangle())
     .highPriorityGesture(TapGesture().onEnded {
-      if !isMultiSelectMode {
+      if isMultiSelectMode {
+        onMultiSelectToggle()
+      } else {
         onSelect()
       }
     })

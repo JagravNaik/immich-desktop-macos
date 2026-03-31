@@ -1,5 +1,4 @@
 import Foundation
-import ImmichAPI
 import ImmichCore
 
 public actor UploadQueue {
