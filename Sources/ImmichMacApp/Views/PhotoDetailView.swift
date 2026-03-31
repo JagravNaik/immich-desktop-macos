@@ -51,7 +51,6 @@ struct PhotoDetailView: View {
         // Keyboard shortcuts (invisible)
         keyboardShortcuts
       }
-      .transition(.opacity)
       .onChange(of: item.id) { _, newID in
         image = initialDisplayImage
           ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext)
@@ -246,6 +245,10 @@ struct PhotoDetailView: View {
 
       Button("") { onDismiss() }
       .keyboardShortcut(.space, modifiers: [])
+      .opacity(0)
+
+      Button("") { onDismiss() }
+      .keyboardShortcut(.return, modifiers: [])
       .opacity(0)
 
       Button("") { appState.selectNextItem() }

@@ -175,14 +175,14 @@ struct MainContentView: View {
 
   private var browserOpacity: Double {
     if heroTransition != nil {
-      return isHeroExpanded ? 0.04 : 1
+      return 1
     }
     return appState.isViewingPhoto ? 0 : 1
   }
 
   private var viewerOpacity: Double {
     if heroTransition != nil {
-      return isHeroExpanded ? 1 : 0
+      return 0
     }
     return appState.isViewingPhoto ? 1 : 0
   }
@@ -640,10 +640,7 @@ struct MainContentView: View {
           if appState.isViewingPhoto {
             closeViewer()
           } else {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-              appState.isViewingLivePhoto = false
-              appState.isViewingPhoto = true
-            }
+            openSelectedItemWithHero()
           }
           return nil
         }
@@ -656,6 +653,18 @@ struct MainContentView: View {
     guard let spacebarMonitor else { return }
     NSEvent.removeMonitor(spacebarMonitor)
     self.spacebarMonitor = nil
+  }
+
+  private func openSelectedItemWithHero() {
+    guard let item = appState.selectedItem else { return }
+
+    let sourceImage =
+      thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .original)
+    let sourceFrame = heroItemFrames[item.id] ?? .zero
+
+    handleOpenAsset(item, sourceFrame: sourceFrame, sourceImage: sourceImage)
   }
 
   private func presentTagEditor(for assetID: String) async {
@@ -943,10 +952,8 @@ private struct HeroOpenOverlay: View {
   }
 
   private func targetFrame(in size: CGSize) -> CGRect {
-    let horizontalInset: CGFloat = 44
-    let verticalInset: CGFloat = 36
-    let maxWidth = max(size.width - horizontalInset * 2, 200)
-    let maxHeight = max(size.height - verticalInset * 2, 200)
+    let maxWidth = max(size.width, 200)
+    let maxHeight = max(size.height, 200)
     let aspectRatio = heroState.aspectRatio.isFinite && heroState.aspectRatio > 0
       ? heroState.aspectRatio
       : 1

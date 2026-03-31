@@ -92,7 +92,11 @@ struct LibraryGridView: View {
       .onKeyPress(.rightArrow) { moveSelection(by: 1, shouldScrollIntoView: true); return .handled }
       .onKeyPress(.upArrow) { moveSelectionVertically(.up, shouldScrollIntoView: true); return .handled }
       .onKeyPress(.downArrow) { moveSelectionVertically(.down, shouldScrollIntoView: true); return .handled }
-      .onKeyPress(.return) { openSelected(); return .handled }
+      .onKeyPress(.return) {
+        guard !appState.isViewingPhoto else { return .ignored }
+        openSelected()
+        return .handled
+      }
       .dropDestination(for: URL.self) { urls, _ in
         appState.importFiles(urls)
         return true
@@ -200,11 +204,16 @@ struct LibraryGridView: View {
   }
 
   private func openSelected() {
-    guard appState.selectedItemID != nil else { return }
-    withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-      appState.isViewingLivePhoto = false
-      appState.isViewingPhoto = true
-    }
+    guard let selectedItemID = appState.selectedItemID,
+          let item = orderedItems.first(where: { $0.id == selectedItemID })
+    else { return }
+
+    let sourceImage =
+      thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
+    let sourceFrame = heroItemFrames[item.id] ?? itemFrames[item.id] ?? .zero
+
+    onOpenAsset(item, sourceFrame, sourceImage)
   }
 
   private var shouldShowSectionedTimeline: Bool {
