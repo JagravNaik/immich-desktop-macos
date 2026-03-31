@@ -24,15 +24,16 @@ The starter app now opens with a server verification screen, then a password log
 ## Build a macOS `.app` bundle
 
 ```bash
-./desktop-macos/scripts/build-app.sh
+cd desktop-macos
+./scripts/build-app.sh
 ```
 
-The bundle is created at `desktop-macos/.build/app/ImmichMacApp.app`.
+The bundle is created at `.build/app/ImmichMacApp.app`.
 
 Useful options:
 
 ```bash
-./desktop-macos/scripts/build-app.sh --open
-./desktop-macos/scripts/build-app.sh --debug
-./desktop-macos/scripts/build-app.sh --output /tmp/immich-macos
+./scripts/build-app.sh --open
+./scripts/build-app.sh --debug
+./scripts/build-app.sh --output /tmp/immich-macos
 ```

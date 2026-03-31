@@ -19,11 +19,15 @@ public struct ImmichServer: Hashable, Sendable {
     }
 
     var pathComponents = components.path.split(separator: "/").map(String.init)
-    if pathComponents.last != "api" {
+    if let apiIndex = pathComponents.firstIndex(of: "api") {
+      pathComponents = Array(pathComponents[...apiIndex])
+    } else {
       pathComponents.append("api")
     }
 
     components.path = "/" + pathComponents.joined(separator: "/")
+    components.query = nil
+    components.fragment = nil
     return components.url ?? endpointURL
   }
 }

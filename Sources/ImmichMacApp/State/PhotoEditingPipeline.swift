@@ -42,13 +42,14 @@ final class PhotoEditingPipeline: ObservableObject {
   @Published private(set) var editedImage: NSImage?
   @Published private(set) var isProcessing = false
 
-  private var sourceImage: CIImage?
   private var sourceNSImage: NSImage?
   private var sourceImageData: Data?
   private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
   private var renderTask: Task<Void, Never>?
+  private var sourceLoadTask: Task<Void, Never>?
   private var parameterCancellable: AnyCancellable?
   private var renderGeneration: UInt64 = 0
+  private var sourceLoadGeneration: UInt64 = 0
   private nonisolated static let backgroundRenderContext = CIContext(options: [.useSoftwareRenderer: false])
 
   private struct RenderSnapshot: Sendable {
@@ -71,6 +72,10 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private struct DetachedRenderResult: @unchecked Sendable {
     let cgImage: CGImage?
+  }
+
+  private struct SourceImageLoadResult: Sendable {
+    let imageData: Data?
   }
 
   private enum EncodedRenderFormat: Sendable {
@@ -149,7 +154,6 @@ final class PhotoEditingPipeline: ObservableObject {
       $rotationSteps.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $flipHorizontal.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $flipVertical.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-      $cropAspectRatio.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $cropRect.dropFirst().map { _ in () }.eraseToAnyPublisher(),
     ]
 
@@ -159,16 +163,28 @@ final class PhotoEditingPipeline: ObservableObject {
   // MARK: - Set Source Image
 
   func setSourceImage(_ nsImage: NSImage) {
+    sourceLoadTask?.cancel()
+    renderTask?.cancel()
+    renderGeneration &+= 1
+    sourceLoadGeneration &+= 1
+    let generation = sourceLoadGeneration
+
     sourceNSImage = nsImage
-    sourceImageData = nsImage.tiffRepresentation
-    if let sourceImageData,
-       let ciImage = CIImage(data: sourceImageData) {
-      sourceImage = ciImage
-    } else {
-      sourceImage = nil
-    }
+    sourceImageData = nil
+    editedImage = nil
+    isProcessing = false
     cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-    scheduleRender()
+
+    sourceLoadTask = Task { [weak self] in
+      let result = await Self.loadSourceImageData(for: nsImage)
+      guard let self else { return }
+      guard !Task.isCancelled, self.sourceLoadGeneration == generation else { return }
+
+      self.sourceImageData = result.imageData
+      if result.imageData != nil {
+        self.scheduleRender()
+      }
+    }
   }
 
   // MARK: - Render Pipeline
@@ -300,6 +316,14 @@ final class PhotoEditingPipeline: ObservableObject {
     return backgroundRenderContext.createCGImage(image, from: extent)
   }
 
+  private nonisolated static func loadSourceImageData(for image: NSImage) async -> SourceImageLoadResult {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global(qos: .userInitiated).async {
+        continuation.resume(returning: SourceImageLoadResult(imageData: image.tiffRepresentation))
+      }
+    }
+  }
+
   // MARK: - Filter Presets (CIFilter-based)
 
   private nonisolated static func applyFilterPreset(to image: CIImage, preset: FilterPreset) -> CIImage {
@@ -360,7 +384,12 @@ final class PhotoEditingPipeline: ObservableObject {
 
   /// Renders a small preview of the source image with only the given filter preset applied.
   func previewImage(for preset: FilterPreset) -> NSImage? {
-    guard let sourceImage else { return sourceNSImage }
+    guard
+      let sourceImageData,
+      let sourceImage = CIImage(data: sourceImageData)
+    else {
+      return sourceNSImage
+    }
     let filtered = Self.applyFilterPreset(to: sourceImage, preset: preset)
     guard let cgImage = ciContext.createCGImage(filtered, from: filtered.extent) else { return sourceNSImage }
     return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))

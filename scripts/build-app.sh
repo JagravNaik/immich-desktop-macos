@@ -114,7 +114,29 @@ resolve_version() {
   printf '%s\n' "0.0.0"
 }
 
-VERSION="$(resolve_version)"
+normalize_short_version() {
+  local raw_version="${1#v}"
+  raw_version="${raw_version%%+*}"
+  raw_version="$(printf '%s' "$raw_version" | sed -E 's/-[0-9]+-g[0-9a-f]+$//; s/[^0-9.].*$//; s/^\.//; s/\.$//')"
+  if [[ -z "$raw_version" ]]; then
+    raw_version="0.0.0"
+  fi
+  printf '%s\n' "$raw_version"
+}
+
+normalize_bundle_version() {
+  local short_version
+  short_version="$(normalize_short_version "$1")"
+  if [[ ! "$short_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+    printf '%s\n' "1"
+    return
+  fi
+  printf '%s\n' "$short_version"
+}
+
+RAW_VERSION="$(resolve_version)"
+SHORT_VERSION="$(normalize_short_version "$RAW_VERSION")"
+BUNDLE_VERSION="$(normalize_bundle_version "$RAW_VERSION")"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -175,9 +197,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>${VERSION}</string>
+  <string>${SHORT_VERSION}</string>
   <key>CFBundleVersion</key>
-  <string>${VERSION}</string>
+  <string>${BUNDLE_VERSION}</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.photography</string>
   <key>LSMinimumSystemVersion</key>

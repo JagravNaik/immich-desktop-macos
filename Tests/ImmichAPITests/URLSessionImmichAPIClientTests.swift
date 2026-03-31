@@ -305,6 +305,13 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertEqual(server.baseURL.absoluteString, "https://demo.immich.app/api")
   }
 
+  func testImmichServerStripsQueryAndFragmentWhenNormalizingAPIEndpoint() throws {
+    let server = ImmichServer(
+      endpointURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api?foo=bar#debug"))
+    )
+    XCTAssertEqual(server.baseURL.absoluteString, "https://demo.immich.app/api")
+  }
+
   private func makeSession(handler: @escaping StubURLProtocol.Handler) -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [StubURLProtocol.self]
