@@ -24,6 +24,7 @@ public final class ThumbnailLoader: @unchecked Sendable {
 
   public init() {}
 
+  @MainActor
   public func loadThumbnail(for fileURL: URL, maxPixelSize: ThumbnailPixelSize = 256) async -> PlatformImage? {
     let cacheKey = makeCacheKey(for: fileURL, maxPixelSize: maxPixelSize)
     if let cached = cache.object(forKey: cacheKey) {
@@ -54,14 +55,11 @@ public final class ThumbnailLoader: @unchecked Sendable {
       return nil
     }
 
-    let image = await MainActor.run { () -> NSImage in
-      let image = NSImage(
-        cgImage: cgImage,
-        size: NSSize(width: cgImage.width, height: cgImage.height)
-      )
-      cache.setObject(image, forKey: cacheKey)
-      return image
-    }
+    let image = NSImage(
+      cgImage: cgImage,
+      size: NSSize(width: cgImage.width, height: cgImage.height)
+    )
+    cache.setObject(image, forKey: cacheKey)
     return image
   }
 

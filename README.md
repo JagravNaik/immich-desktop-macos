@@ -1,16 +1,17 @@
-# Immich macOS (native SwiftUI scaffold)
+# Immich macOS (native SwiftUI app)
 
-This directory contains an initial, monorepo-first scaffold for a native SwiftUI macOS app.
+This directory contains the native SwiftUI macOS app that lives directly inside the Immich monorepo.
 
 ## What's included
 
-- `ImmichMacApp` executable target (SwiftUI app shell).
+- `ImmichMacApp` executable target for the macOS Photos-style client.
 - Modular Swift packages for:
   - `ImmichCore`
   - `ImmichAPI`
   - `ImmichPersistence`
   - `ImmichMedia`
   - `ImmichSync`
+- A packaged app build script that produces `ImmichMacApp.app`.
 
 ## Run locally
 
@@ -19,7 +20,7 @@ cd desktop-macos
 swift run ImmichMacApp
 ```
 
-The starter app now opens with a server verification screen, then a password login screen that uses Immich's `/api/auth/login` flow. After sign-in it shows the authenticated macOS scaffold, which is still a foundation for timeline and upload milestones rather than a full remote library implementation.
+The app opens with server verification and sign-in, then presents the native macOS library experience with timeline browsing, hero-style viewer transitions, keyboard navigation, editing tools, collections surfaces, management sheets, and desktop-specific polish built on the shared SwiftPM modules in this directory.
 
 ## Build a macOS `.app` bundle
 

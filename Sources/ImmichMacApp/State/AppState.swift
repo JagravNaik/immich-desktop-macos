@@ -91,8 +91,8 @@ final class AppState: ObservableObject {
   @Published var authMethod: AuthMethod = AppState.initialAuthMethod()
   @Published var serverURLText = UserDefaults.standard.string(forKey: "immich.serverURL") ?? ""
   @Published var emailText = UserDefaults.standard.string(forKey: "immich.email") ?? ""
-  @Published var passwordText = KeychainHelper.load(account: "immich.password") ?? ""
-  @Published var apiKeyText = KeychainHelper.load(account: "immich.apiKey") ?? ""
+  @Published var passwordText = (try? KeychainHelper.load(account: "immich.password")) ?? ""
+  @Published var apiKeyText = (try? KeychainHelper.load(account: "immich.apiKey")) ?? ""
   @Published var statusText = "Enter your Immich server URL to continue."
   @Published var isConnecting = false
   @Published var isSigningIn = false
@@ -414,7 +414,7 @@ final class AppState: ObservableObject {
        let method = AuthMethod(rawValue: rawValue) {
       return method
     }
-    if let savedKey = KeychainHelper.load(account: "immich.apiKey"), !savedKey.isEmpty {
+    if let savedKey = try? KeychainHelper.load(account: "immich.apiKey"), !savedKey.isEmpty {
       return .apiKey
     }
     return .password
@@ -431,8 +431,8 @@ final class AppState: ObservableObject {
     let hasSavedServer = UserDefaults.standard.string(forKey: "immich.serverURL") != nil
     let hasSavedPasswordLogin =
       UserDefaults.standard.string(forKey: "immich.email") != nil &&
-      (KeychainHelper.load(account: "immich.password")?.isEmpty == false)
-    let hasSavedAPIKey = KeychainHelper.load(account: "immich.apiKey")?.isEmpty == false
+      ((try? KeychainHelper.load(account: "immich.password"))?.isEmpty == false)
+    let hasSavedAPIKey = (try? KeychainHelper.load(account: "immich.apiKey"))?.isEmpty == false
 
     if hasSavedServer && (hasSavedPasswordLogin || hasSavedAPIKey) {
       return .launching

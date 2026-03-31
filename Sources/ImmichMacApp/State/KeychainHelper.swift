@@ -49,7 +49,7 @@ enum KeychainHelper {
     }
   }
 
-  static func load(account: String) -> String? {
+  static func load(account: String) throws -> String? {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
@@ -62,7 +62,9 @@ enum KeychainHelper {
     if status == errSecItemNotFound {
       return nil
     }
-    guard status == errSecSuccess, let data = result as? Data else { return nil }
+    guard status == errSecSuccess, let data = result as? Data else {
+      throw KeychainHelperError.operationFailed(operation: "load", account: account, status: status)
+    }
     return String(data: data, encoding: .utf8)
   }
 
