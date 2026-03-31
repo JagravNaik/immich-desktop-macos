@@ -40,11 +40,12 @@ final class PhotoEditingPipeline: ObservableObject {
   // MARK: - Source & Output
 
   @Published private(set) var editedImage: NSImage?
+  @Published private(set) var filterPreviewCacheVersion: UInt64 = 0
   @Published private(set) var isProcessing = false
 
   private var sourceNSImage: NSImage?
   private var sourceImageData: Data?
-  private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+  private var filterPreviewCache: [FilterPreset: NSImage] = [:]
   private var renderTask: Task<Void, Never>?
   private var sourceLoadTask: Task<Void, Never>?
   private var parameterCancellable: AnyCancellable?
@@ -82,6 +83,11 @@ final class PhotoEditingPipeline: ObservableObject {
     let cgImage: CGImage
   }
 
+  private struct FilterPreviewSnapshot: Sendable {
+    let sourceImageData: Data
+    let preset: FilterPreset
+  }
+
   private enum EncodedRenderFormat: Sendable {
     case jpeg(Double)
     case png
@@ -98,7 +104,7 @@ final class PhotoEditingPipeline: ObservableObject {
 
   // MARK: - Filter Presets
 
-  enum FilterPreset: String, CaseIterable, Identifiable, Hashable {
+  enum FilterPreset: String, CaseIterable, Identifiable, Hashable, Sendable {
     case original = "Original"
     case vivid = "Vivid"
     case dramatic = "Dramatic"
@@ -176,6 +182,8 @@ final class PhotoEditingPipeline: ObservableObject {
     sourceNSImage = nsImage
     sourceImageData = nil
     editedImage = nil
+    filterPreviewCache.removeAll()
+    filterPreviewCacheVersion &+= 1
     isProcessing = false
     cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
@@ -186,6 +194,7 @@ final class PhotoEditingPipeline: ObservableObject {
 
       self.sourceImageData = result.imageData
       if result.imageData != nil {
+        self.filterPreviewCacheVersion &+= 1
         self.scheduleRender()
       }
     }
@@ -413,17 +422,56 @@ final class PhotoEditingPipeline: ObservableObject {
 
   // MARK: - Actions
 
-  /// Renders a small preview of the source image with only the given filter preset applied.
-  func previewImage(for preset: FilterPreset) -> NSImage? {
-    guard
-      let sourceImageData,
-      let sourceImage = CIImage(data: sourceImageData)
-    else {
-      return sourceNSImage
+  func cachedFilterPreview(for preset: FilterPreset) -> NSImage? {
+    filterPreviewCache[preset] ?? (preset == .original ? sourceNSImage : nil)
+  }
+
+  /// Renders and caches a small preview of the source image with only the given filter preset applied.
+  func loadFilterPreview(for preset: FilterPreset) async -> NSImage? {
+    if let cached = filterPreviewCache[preset] {
+      return cached
     }
-    let filtered = Self.applyFilterPreset(to: sourceImage, preset: preset)
-    guard let cgImage = ciContext.createCGImage(filtered, from: filtered.extent) else { return sourceNSImage }
-    return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+
+    guard let sourceImageData else {
+      return preset == .original ? sourceNSImage : nil
+    }
+
+    let snapshot = FilterPreviewSnapshot(sourceImageData: sourceImageData, preset: preset)
+    let result = await Task.detached(priority: .utility) { () -> DetachedRenderResult in
+      DetachedRenderResult(cgImage: Self.renderFilterPreviewCGImage(from: snapshot))
+    }.value
+
+    guard !Task.isCancelled, let cgImage = result.cgImage else {
+      return nil
+    }
+
+    let image = NSImage(
+      cgImage: cgImage,
+      size: NSSize(width: cgImage.width, height: cgImage.height)
+    )
+    filterPreviewCache[preset] = image
+    return image
+  }
+
+  private nonisolated static func renderFilterPreviewCGImage(from snapshot: FilterPreviewSnapshot) -> CGImage? {
+    guard var image = CIImage(data: snapshot.sourceImageData) else {
+      return nil
+    }
+
+    let extent = image.extent
+    let maxDimension = max(extent.width, extent.height)
+    if maxDimension > 192 {
+      let scale = 192 / maxDimension
+      image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    }
+
+    image = applyFilterPreset(to: image, preset: snapshot.preset)
+    let outputExtent = image.extent.integral
+    guard outputExtent.width > 0, outputExtent.height > 0 else {
+      return nil
+    }
+
+    return backgroundRenderContext.createCGImage(image, from: outputExtent)
   }
 
   func autoEnhance() {

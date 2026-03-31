@@ -9,6 +9,59 @@ import ImageIO
 
 @MainActor
 final class ThumbnailStore: ObservableObject {
+  private final class InFlightRegistry: @unchecked Sendable {
+    private struct InFlightLoad {
+      let task: Task<NSImage?, Never>
+      var waiterIDs: Set<UUID>
+    }
+
+    private let lock = NSLock()
+    private var loads: [String: InFlightLoad] = [:]
+
+    func existingTask(cacheKey: String, waiterID: UUID) -> Task<NSImage?, Never>? {
+      lock.lock()
+      defer { lock.unlock() }
+
+      guard var load = loads[cacheKey] else {
+        return nil
+      }
+
+      load.waiterIDs.insert(waiterID)
+      loads[cacheKey] = load
+      return load.task
+    }
+
+    func insert(task: Task<NSImage?, Never>, cacheKey: String, waiterID: UUID) {
+      lock.lock()
+      loads[cacheKey] = InFlightLoad(task: task, waiterIDs: [waiterID])
+      lock.unlock()
+    }
+
+    func clear(cacheKey: String) {
+      lock.lock()
+      loads[cacheKey] = nil
+      lock.unlock()
+    }
+
+    func releaseWaiter(cacheKey: String, waiterID: UUID, cancelTask: Bool) {
+      lock.lock()
+      defer { lock.unlock() }
+
+      guard var load = loads[cacheKey] else {
+        return
+      }
+
+      load.waiterIDs.remove(waiterID)
+      if cancelTask && load.waiterIDs.isEmpty {
+        load.task.cancel()
+        loads[cacheKey] = nil
+        return
+      }
+
+      loads[cacheKey] = load
+    }
+  }
+
   private let cache: NSCache<NSString, NSImage> = {
     let c = NSCache<NSString, NSImage>()
     c.countLimit = 2000
@@ -16,7 +69,7 @@ final class ThumbnailStore: ObservableObject {
     return c
   }()
   private let localThumbnailLoader = ThumbnailLoader()
-  private var inFlightLoads: [String: Task<NSImage?, Never>] = [:]
+  private let inFlightRegistry = InFlightRegistry()
 
   private struct DecodedImageResult: @unchecked Sendable {
     let cgImage: CGImage?
@@ -37,45 +90,62 @@ final class ThumbnailStore: ObservableObject {
     context: AppState.ThumbnailContext?,
     size: ThumbnailSize = .thumbnail
   ) async -> NSImage? {
+    guard !Task.isCancelled else { return nil }
+
     let cacheKey = cacheKey(for: item, context: context, size: size)
     if let cached = cache.object(forKey: cacheKey as NSString) {
       return cached
     }
 
-    if let task = inFlightLoads[cacheKey] {
-      return await task.value
-    }
+    let waiterID = UUID()
+    let task = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID) ?? {
+      let task = Task<NSImage?, Never> { [item, context, size, localThumbnailLoader] in
+        guard !Task.isCancelled else { return nil }
 
-    let task = Task<NSImage?, Never> { [item, context, size, localThumbnailLoader] in
-      switch item.source {
-      case .localFile(let fileURL):
-        if size == .original {
-          return await Self.loadFullResolutionImage(from: fileURL)
+        switch item.source {
+        case .localFile(let fileURL):
+          if size == .original {
+            return await Self.loadFullResolutionImage(from: fileURL)
+          }
+          return await localThumbnailLoader.loadThumbnail(
+            for: fileURL,
+            maxPixelSize: size.maxPixelSize
+          )
+        case .remoteAsset(let assetID):
+          guard let context else { return nil }
+          return await Self.loadRemoteImage(
+            assetID: assetID,
+            context: context,
+            size: size
+          )
         }
-        return await localThumbnailLoader.loadThumbnail(
-          for: fileURL,
-          maxPixelSize: size.maxPixelSize
-        )
-      case .remoteAsset(let assetID):
-        guard let context else { return nil }
-        return await Self.loadRemoteImage(
-          assetID: assetID,
-          context: context,
-          size: size
-        )
       }
-    }
 
-    inFlightLoads[cacheKey] = task
-    let image = await task.value
-    inFlightLoads[cacheKey] = nil
+      inFlightRegistry.insert(task: task, cacheKey: cacheKey, waiterID: waiterID)
+      return task
+    }()
 
-    if let image {
-      let cost = Int(image.size.width * image.size.height * 4)
-      cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
-    }
+    return await withTaskCancellationHandler(
+      operation: {
+        let image = await task.value
+        guard !Task.isCancelled else {
+          inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
+          return nil
+        }
 
-    return image
+        inFlightRegistry.clear(cacheKey: cacheKey)
+
+        if let image {
+          let cost = Int(image.size.width * image.size.height * 4)
+          cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
+        }
+
+        return image
+      },
+      onCancel: {
+        inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
+      }
+    )
   }
 
   private func cacheKey(

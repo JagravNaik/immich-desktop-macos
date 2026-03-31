@@ -73,7 +73,7 @@ struct APIKeysSheet: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("API Keys")
             .font(.title2.weight(.semibold))
-          Text("Create keys for scripts, automation, or alternate mac sign-in.")
+          Text("Create keys for scripts, automation, or alternate Mac sign-in.")
             .foregroundStyle(.secondary)
         }
         Spacer()

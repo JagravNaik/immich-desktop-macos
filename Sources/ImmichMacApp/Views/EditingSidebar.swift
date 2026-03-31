@@ -223,14 +223,15 @@ struct FilterPreviewThumbnail: View {
   @ObservedObject var pipeline: PhotoEditingPipeline
   let preset: PhotoEditingPipeline.FilterPreset
   let isSelected: Bool
+  @State private var previewImage: NSImage?
 
   var body: some View {
     ZStack {
       RoundedRectangle(cornerRadius: 8)
         .fill(.quaternary)
 
-      if let img = pipeline.previewImage(for: preset) {
-        Image(nsImage: img)
+      if let image = previewImage ?? pipeline.cachedFilterPreview(for: preset) {
+        Image(nsImage: image)
           .resizable()
           .scaledToFill()
           .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -243,6 +244,17 @@ struct FilterPreviewThumbnail: View {
           .strokeBorder(Color.accentColor, lineWidth: 2)
       }
     }
+    .task(id: previewTaskID) {
+      previewImage = nil
+      previewImage = pipeline.cachedFilterPreview(for: preset)
+      if previewImage == nil {
+        previewImage = await pipeline.loadFilterPreview(for: preset)
+      }
+    }
+  }
+
+  private var previewTaskID: String {
+    "\(pipeline.filterPreviewCacheVersion)::\(preset.rawValue)"
   }
 }
 #endif
