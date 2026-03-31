@@ -45,6 +45,7 @@ final class PhotoEditingPipeline: ObservableObject {
   private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
   private var renderTask: Task<Void, Never>?
   private var parameterCancellable: AnyCancellable?
+  private var renderGeneration: UInt64 = 0
   private nonisolated static let backgroundRenderContext = CIContext(options: [.useSoftwareRenderer: false])
 
   private struct RenderSnapshot: @unchecked Sendable {
@@ -68,6 +69,11 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private struct RenderResult: @unchecked Sendable {
     let image: NSImage?
+  }
+
+  private enum EncodedRenderFormat: Sendable {
+    case jpeg(Double)
+    case png
   }
 
   var hasEdits: Bool {
@@ -164,15 +170,17 @@ final class PhotoEditingPipeline: ObservableObject {
   private func scheduleRender() {
     renderTask?.cancel()
     let snapshot = makeRenderSnapshot()
-    renderTask = Task { [weak self, snapshot] in
-      guard let self else { return }
-      self.isProcessing = true
-      defer { self.isProcessing = false }
+    renderGeneration &+= 1
+    let generation = renderGeneration
+    isProcessing = true
+    renderTask = Task { [weak self, snapshot, generation] in
       let result = await Task.detached(priority: .userInitiated) {
         RenderResult(image: Self.renderEditedImage(from: snapshot))
       }.value
-      guard !Task.isCancelled else { return }
+      guard let self else { return }
+      guard !Task.isCancelled, self.renderGeneration == generation else { return }
       self.editedImage = result.image
+      self.isProcessing = false
     }
   }
 
@@ -201,10 +209,9 @@ final class PhotoEditingPipeline: ObservableObject {
     Self.renderEditedImage(from: makeRenderSnapshot())
   }
 
-  private nonisolated static func renderEditedImage(from snapshot: RenderSnapshot) -> NSImage? {
-    guard var image = snapshot.sourceImage else { return snapshot.sourceNSImage }
+  private nonisolated static func renderCGImage(from snapshot: RenderSnapshot) -> CGImage? {
+    guard var image = snapshot.sourceImage else { return nil }
 
-    // 1. Exposure
     if snapshot.exposure != 0 {
       let filter = CIFilter.exposureAdjust()
       filter.inputImage = image
@@ -212,55 +219,47 @@ final class PhotoEditingPipeline: ObservableObject {
       if let output = filter.outputImage { image = output }
     }
 
-    // 2. Color Controls (brightness, contrast, saturation)
     if snapshot.brightness != 0 || snapshot.contrast != 0 || snapshot.saturation != 0 {
       let filter = CIFilter.colorControls()
       filter.inputImage = image
       filter.brightness = Float(snapshot.brightness)
-      filter.contrast = Float(1.0 + snapshot.contrast) // CIFilter expects 0…2 centered at 1
-      filter.saturation = Float(1.0 + snapshot.saturation) // CIFilter expects 0…2 centered at 1
+      filter.contrast = Float(1.0 + snapshot.contrast)
+      filter.saturation = Float(1.0 + snapshot.saturation)
       if let output = filter.outputImage { image = output }
     }
 
-    // 3. Highlights & Shadows
     if snapshot.highlights != 0 || snapshot.shadows != 0 {
       let filter = CIFilter.highlightShadowAdjust()
       filter.inputImage = image
-      filter.highlightAmount = Float(1.0 - snapshot.highlights) // higher value = less highlights
-      filter.shadowAmount = Float(snapshot.shadows + 1.0) // 0…2 centered at 1
+      filter.highlightAmount = Float(1.0 - snapshot.highlights)
+      filter.shadowAmount = Float(snapshot.shadows + 1.0)
       if let output = filter.outputImage { image = output }
     }
 
-    // 4. Temperature (warmth)
     if snapshot.warmth != 0 {
       let filter = CIFilter.temperatureAndTint()
       filter.inputImage = image
-      // Neutral is 6500K. Shift ±1500K based on warmth slider
       let kelvin = 6500 + snapshot.warmth * 1500
       filter.neutral = CIVector(x: CGFloat(kelvin), y: 0)
       filter.targetNeutral = CIVector(x: 6500, y: 0)
       if let output = filter.outputImage { image = output }
     }
 
-    // 5. Sharpness
     if snapshot.sharpness > 0 {
       let filter = CIFilter.sharpenLuminance()
       filter.inputImage = image
-      filter.sharpness = Float(snapshot.sharpness * 2.0) // 0…2 effective range
+      filter.sharpness = Float(snapshot.sharpness * 2.0)
       if let output = filter.outputImage { image = output }
     }
 
-    // 6. Filter preset
     image = applyFilterPreset(to: image, preset: snapshot.selectedFilter)
 
-    // 7. Geometry: rotation (straighten + 90° steps)
     let totalRotation = snapshot.rotation + Double(snapshot.rotationSteps) * 90.0
     if totalRotation != 0 {
       let radians = totalRotation * .pi / 180.0
       image = image.transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
     }
 
-    // 8. Flip
     if snapshot.flipHorizontal {
       image = image.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
         .translatedBy(x: -image.extent.width, y: 0))
@@ -270,7 +269,6 @@ final class PhotoEditingPipeline: ObservableObject {
         .translatedBy(x: 0, y: -image.extent.height))
     }
 
-    // 9. Crop (if not full frame)
     if snapshot.cropRect != CGRect(x: 0, y: 0, width: 1, height: 1) &&
         snapshot.cropRect.width > 0 &&
         snapshot.cropRect.height > 0 {
@@ -284,14 +282,17 @@ final class PhotoEditingPipeline: ObservableObject {
       image = image.cropped(to: cropCGRect)
     }
 
-    // Render to NSImage
     let extent = image.extent
-    guard extent.width > 0, extent.height > 0,
-          let cgImage = backgroundRenderContext.createCGImage(image, from: extent) else {
+    guard extent.width > 0, extent.height > 0 else { return nil }
+    return backgroundRenderContext.createCGImage(image, from: extent)
+  }
+
+  private nonisolated static func renderEditedImage(from snapshot: RenderSnapshot) -> NSImage? {
+    guard let cgImage = renderCGImage(from: snapshot) else {
       return snapshot.sourceNSImage
     }
 
-    return NSImage(cgImage: cgImage, size: NSSize(width: extent.width, height: extent.height))
+    return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
   }
 
   // MARK: - Filter Presets (CIFilter-based)
@@ -392,27 +393,34 @@ final class PhotoEditingPipeline: ObservableObject {
   // MARK: - Export
 
   /// Renders the final edited image as JPEG data suitable for upload/save.
-  func renderFinalJPEG(compressionQuality: CGFloat = 0.92) -> Data? {
+  func renderFinalJPEG(compressionQuality: CGFloat = 0.92) async -> Data? {
     guard sourceImage != nil else { return nil }
-
-    // Re-run the full pipeline at original resolution
-    // (Same as renderEditedImage but returns Data instead of NSImage)
-    let rendered = renderEditedImage()
-    guard let rendered,
-          let tiffData = rendered.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
-
-    return bitmap.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality])
+    let snapshot = makeRenderSnapshot()
+    let quality = Double(compressionQuality)
+    return await Task.detached(priority: .userInitiated) {
+      Self.renderEncodedData(from: snapshot, format: .jpeg(quality))
+    }.value
   }
 
   /// Renders the final edited image as PNG data (lossless).
-  func renderFinalPNG() -> Data? {
-    let rendered = renderEditedImage()
-    guard let rendered,
-          let tiffData = rendered.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
+  func renderFinalPNG() async -> Data? {
+    guard sourceImage != nil else { return nil }
+    let snapshot = makeRenderSnapshot()
+    return await Task.detached(priority: .userInitiated) {
+      Self.renderEncodedData(from: snapshot, format: .png)
+    }.value
+  }
 
-    return bitmap.representation(using: .png, properties: [:])
+  private nonisolated static func renderEncodedData(from snapshot: RenderSnapshot, format: EncodedRenderFormat) -> Data? {
+    guard let cgImage = renderCGImage(from: snapshot) else { return nil }
+    let bitmap = NSBitmapImageRep(cgImage: cgImage)
+
+    switch format {
+    case .jpeg(let quality):
+      return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
+    case .png:
+      return bitmap.representation(using: .png, properties: [:])
+    }
   }
 }
 #endif

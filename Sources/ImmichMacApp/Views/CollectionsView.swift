@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 import ImmichCore
 
-// MARK: - Collections View (macOS 26 Photos-style)
+// MARK: - Collections View (Photos-style)
 
 struct CollectionsView: View {
   @ObservedObject var appState: AppState

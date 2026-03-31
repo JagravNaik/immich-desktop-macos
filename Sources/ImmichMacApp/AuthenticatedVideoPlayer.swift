@@ -5,7 +5,9 @@ import SwiftUI
 import AppKit
 import AVKit
 
-private let avURLAssetHTTPHeaderFieldsOptionKey = "AVURLAssetHTTPHeaderFieldsKey"
+// AVFoundation does not expose a Swift symbol for this option on macOS, so we centralize the
+// framework-defined key here instead of scattering raw literals through the code.
+private let AVURLAssetHTTPHeaderFieldsKey = "AVURLAssetHTTPHeaderFieldsKey"
 
 struct AuthenticatedVideoPlayer: View {
   let url: URL
@@ -43,7 +45,7 @@ struct AuthenticatedVideoPlayer: View {
     }
     .task(id: url) {
       // Configure AVURLAsset to pass the Authorization header
-      let options: [String: Any] = [avURLAssetHTTPHeaderFieldsOptionKey: authHeaderFields]
+      let options: [String: Any] = [AVURLAssetHTTPHeaderFieldsKey: authHeaderFields]
       let asset = AVURLAsset(url: url, options: options)
       let playerItem = AVPlayerItem(asset: asset)
       let newPlayer = AVPlayer(playerItem: playerItem)

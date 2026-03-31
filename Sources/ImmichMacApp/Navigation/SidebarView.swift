@@ -264,7 +264,7 @@ struct SidebarView: View {
       }
       .buttonStyle(.plain)
 
-      if let session = appState.currentSession, session.isAdmin || session.usesAPIKey || appState.hasAdminAccess {
+      if let session = appState.currentSession, session.isAdmin || appState.hasAdminAccess {
         Button("Admin Users") {
           appState.showAdminUsersSheet = true
         }

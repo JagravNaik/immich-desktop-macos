@@ -533,7 +533,7 @@ final class AppState: ObservableObject {
       }
       currentSession = session
       resetLibraryState()
-      hasAdminAccess = session.isAdmin || session.usesAPIKey
+      hasAdminAccess = session.isAdmin
       appPhase = .library
       statusText = "Connected with API key"
       await loadInitialData()
@@ -1265,11 +1265,8 @@ final class AppState: ObservableObject {
 
   func saveEditedImage(pipeline: PhotoEditingPipeline) {
     guard let connectedServer, let currentSession, let item = selectedItem else { return }
-    guard let jpegData = pipeline.renderFinalJPEG() else {
-      immichLog("[Edit] Failed to render final JPEG")
-      return
-    }
     Task {
+      guard let jpegData = await pipeline.renderFinalJPEG() else { return }
       do {
         let filename = "\(item.title.isEmpty ? item.id : item.title).jpg"
         try await apiClient.replaceAsset(
@@ -1289,10 +1286,6 @@ final class AppState: ObservableObject {
   }
 
   func exportEditedImage(pipeline: PhotoEditingPipeline) {
-    guard let jpegData = pipeline.renderFinalJPEG() else {
-      immichLog("[Edit] Failed to render for export")
-      return
-    }
     Task {
       let panel = NSSavePanel()
       let defaultName = selectedItem?.title ?? "Edited Photo"
@@ -1305,8 +1298,15 @@ final class AppState: ObservableObject {
         do {
           let dataToWrite: Data
           if url.pathExtension.lowercased() == "png" {
-            dataToWrite = pipeline.renderFinalPNG() ?? jpegData
+            if let pngData = await pipeline.renderFinalPNG() {
+              dataToWrite = pngData
+            } else if let jpegFallback = await pipeline.renderFinalJPEG() {
+              dataToWrite = jpegFallback
+            } else {
+              return
+            }
           } else {
+            guard let jpegData = await pipeline.renderFinalJPEG() else { return }
             dataToWrite = jpegData
           }
           try dataToWrite.write(to: url)
