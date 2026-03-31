@@ -54,11 +54,14 @@ public final class ThumbnailLoader: @unchecked Sendable {
       return nil
     }
 
-    let image = NSImage(
-      cgImage: cgImage,
-      size: NSSize(width: cgImage.width, height: cgImage.height)
-    )
-    cache.setObject(image, forKey: cacheKey)
+    let image = await MainActor.run { () -> NSImage in
+      let image = NSImage(
+        cgImage: cgImage,
+        size: NSSize(width: cgImage.width, height: cgImage.height)
+      )
+      cache.setObject(image, forKey: cacheKey)
+      return image
+    }
     return image
   }
 

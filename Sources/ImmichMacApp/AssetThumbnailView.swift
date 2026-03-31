@@ -1,9 +1,11 @@
 #if canImport(SwiftUI)
 import Foundation
 import SwiftUI
+import ImmichMedia
 
 #if canImport(AppKit)
 import AppKit
+import ImageIO
 
 @MainActor
 final class ThumbnailStore: ObservableObject {
@@ -13,6 +15,12 @@ final class ThumbnailStore: ObservableObject {
     c.totalCostLimit = 512 * 1024 * 1024 // 512 MB
     return c
   }()
+  private let localThumbnailLoader = ThumbnailLoader()
+  private var inFlightLoads: [String: Task<NSImage?, Never>] = [:]
+
+  private struct DecodedImageResult: @unchecked Sendable {
+    let cgImage: CGImage?
+  }
 
   /// Synchronous cache-only lookup — returns nil if not cached, never triggers a network fetch.
   func cachedImage(
@@ -34,38 +42,33 @@ final class ThumbnailStore: ObservableObject {
       return cached
     }
 
-    let image: NSImage?
-    switch item.source {
-    case .localFile(let fileURL):
-      image = NSImage(contentsOf: fileURL)
-    case .remoteAsset(let assetID):
-      guard let context else { return nil }
+    if let task = inFlightLoads[cacheKey] {
+      return await task.value
+    }
 
-      let url: URL?
-      if size == .original {
-        url = Self.originalURL(baseURL: context.baseURL, assetID: assetID)
-      } else {
-        url = Self.thumbnailURL(baseURL: context.baseURL, assetID: assetID, size: size)
-      }
-      guard let url else { return nil }
-
-      var request = URLRequest(url: url)
-      context.apply(to: &request)
-
-      do {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard
-          let httpResponse = response as? HTTPURLResponse,
-          (200...299).contains(httpResponse.statusCode)
-        else {
-          return nil
+    let task = Task<NSImage?, Never> { [item, context, size, localThumbnailLoader] in
+      switch item.source {
+      case .localFile(let fileURL):
+        if size == .original {
+          return await Self.loadFullResolutionImage(from: fileURL)
         }
-
-        image = NSImage(data: data)
-      } catch {
-        return nil
+        return await localThumbnailLoader.loadThumbnail(
+          for: fileURL,
+          maxPixelSize: size.maxPixelSize
+        )
+      case .remoteAsset(let assetID):
+        guard let context else { return nil }
+        return await Self.loadRemoteImage(
+          assetID: assetID,
+          context: context,
+          size: size
+        )
       }
     }
+
+    inFlightLoads[cacheKey] = task
+    let image = await task.value
+    inFlightLoads[cacheKey] = nil
 
     if let image {
       let cost = Int(image.size.width * image.size.height * 4)
@@ -82,9 +85,84 @@ final class ThumbnailStore: ObservableObject {
   ) -> String {
     switch item.source {
     case .localFile(let fileURL):
-      return "local::\(fileURL.path)"
+      return "local::\(fileURL.path)::\(size.rawValue)"
     case .remoteAsset(let assetID):
       return "remote::\(context?.baseURL.absoluteString ?? "")::\(assetID)::\(size.rawValue)"
+    }
+  }
+
+  private static func loadRemoteImage(
+    assetID: String,
+    context: AppState.ThumbnailContext,
+    size: ThumbnailSize
+  ) async -> NSImage? {
+    let url: URL?
+    if size == .original {
+      url = originalURL(baseURL: context.baseURL, assetID: assetID)
+    } else {
+      url = thumbnailURL(baseURL: context.baseURL, assetID: assetID, size: size)
+    }
+    guard let url else { return nil }
+
+    var request = URLRequest(url: url)
+    context.apply(to: &request)
+
+    do {
+      let (data, response) = try await URLSession.shared.data(for: request)
+      guard
+        let httpResponse = response as? HTTPURLResponse,
+        (200...299).contains(httpResponse.statusCode)
+      else {
+        return nil
+      }
+
+      return await decodeImage(from: data)
+    } catch {
+      return nil
+    }
+  }
+
+  private static func loadFullResolutionImage(from fileURL: URL) async -> NSImage? {
+    let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
+      guard
+        let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
+        let cgImage = CGImageSourceCreateImageAtIndex(
+          source,
+          0,
+          [kCGImageSourceShouldCache: false] as CFDictionary
+        )
+      else {
+        return DecodedImageResult(cgImage: nil)
+      }
+
+      return DecodedImageResult(cgImage: cgImage)
+    }.value
+
+    guard let cgImage = result.cgImage else { return nil }
+    return await MainActor.run {
+      NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+  }
+
+  private static func decodeImage(from data: Data) async -> NSImage? {
+    let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
+      guard
+        let source = CGImageSourceCreateWithData(data as CFData, nil),
+        let cgImage = CGImageSourceCreateImageAtIndex(
+          source,
+          0,
+          [kCGImageSourceShouldCache: false] as CFDictionary
+        )
+      else {
+        return DecodedImageResult(cgImage: nil)
+      }
+
+      return DecodedImageResult(cgImage: cgImage)
+    }.value
+
+    guard let cgImage = result.cgImage else { return nil }
+    return await MainActor.run {
+      NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
   }
 
@@ -116,6 +194,17 @@ final class ThumbnailStore: ObservableObject {
     case thumbnail = "thumbnail"
     case preview = "preview"
     case original = "original"
+
+    var maxPixelSize: ThumbnailPixelSize {
+      switch self {
+      case .thumbnail:
+        return 512
+      case .preview:
+        return 2048
+      case .original:
+        return 4096
+      }
+    }
   }
 }
 

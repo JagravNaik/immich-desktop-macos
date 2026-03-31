@@ -3,8 +3,10 @@ import Foundation
 import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import ImageIO
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 /// A CoreImage-backed photo editing pipeline that applies adjustment sliders,
 /// filter presets, and geometric transforms to produce an edited NSImage in real time.
@@ -42,15 +44,15 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private var sourceImage: CIImage?
   private var sourceNSImage: NSImage?
+  private var sourceImageData: Data?
   private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
   private var renderTask: Task<Void, Never>?
   private var parameterCancellable: AnyCancellable?
   private var renderGeneration: UInt64 = 0
   private nonisolated static let backgroundRenderContext = CIContext(options: [.useSoftwareRenderer: false])
 
-  private struct RenderSnapshot: @unchecked Sendable {
-    let sourceImage: CIImage?
-    let sourceNSImage: NSImage?
+  private struct RenderSnapshot: Sendable {
+    let sourceImageData: Data?
     let exposure: Double
     let brightness: Double
     let contrast: Double
@@ -67,8 +69,8 @@ final class PhotoEditingPipeline: ObservableObject {
     let cropRect: CGRect
   }
 
-  private struct RenderResult: @unchecked Sendable {
-    let image: NSImage?
+  private struct DetachedRenderResult: @unchecked Sendable {
+    let cgImage: CGImage?
   }
 
   private enum EncodedRenderFormat: Sendable {
@@ -158,9 +160,13 @@ final class PhotoEditingPipeline: ObservableObject {
 
   func setSourceImage(_ nsImage: NSImage) {
     sourceNSImage = nsImage
-    guard let tiffData = nsImage.tiffRepresentation,
-          let ciImage = CIImage(data: tiffData) else { return }
-    sourceImage = ciImage
+    sourceImageData = nsImage.tiffRepresentation
+    if let sourceImageData,
+       let ciImage = CIImage(data: sourceImageData) {
+      sourceImage = ciImage
+    } else {
+      sourceImage = nil
+    }
     cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     scheduleRender()
   }
@@ -175,19 +181,25 @@ final class PhotoEditingPipeline: ObservableObject {
     isProcessing = true
     renderTask = Task { [weak self, snapshot, generation] in
       let result = await Task.detached(priority: .userInitiated) {
-        RenderResult(image: Self.renderEditedImage(from: snapshot))
+        DetachedRenderResult(cgImage: Self.renderCGImage(from: snapshot))
       }.value
       guard let self else { return }
       guard !Task.isCancelled, self.renderGeneration == generation else { return }
-      self.editedImage = result.image
+      if let cgImage = result.cgImage {
+        self.editedImage = NSImage(
+          cgImage: cgImage,
+          size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
+      } else {
+        self.editedImage = self.sourceNSImage
+      }
       self.isProcessing = false
     }
   }
 
   private func makeRenderSnapshot() -> RenderSnapshot {
     RenderSnapshot(
-      sourceImage: sourceImage,
-      sourceNSImage: sourceNSImage,
+      sourceImageData: sourceImageData,
       exposure: exposure,
       brightness: brightness,
       contrast: contrast,
@@ -205,12 +217,13 @@ final class PhotoEditingPipeline: ObservableObject {
     )
   }
 
-  private func renderEditedImage() -> NSImage? {
-    Self.renderEditedImage(from: makeRenderSnapshot())
-  }
-
   private nonisolated static func renderCGImage(from snapshot: RenderSnapshot) -> CGImage? {
-    guard var image = snapshot.sourceImage else { return nil }
+    guard
+      let sourceImageData = snapshot.sourceImageData,
+      var image = CIImage(data: sourceImageData)
+    else {
+      return nil
+    }
 
     if snapshot.exposure != 0 {
       let filter = CIFilter.exposureAdjust()
@@ -285,14 +298,6 @@ final class PhotoEditingPipeline: ObservableObject {
     let extent = image.extent
     guard extent.width > 0, extent.height > 0 else { return nil }
     return backgroundRenderContext.createCGImage(image, from: extent)
-  }
-
-  private nonisolated static func renderEditedImage(from snapshot: RenderSnapshot) -> NSImage? {
-    guard let cgImage = renderCGImage(from: snapshot) else {
-      return snapshot.sourceNSImage
-    }
-
-    return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
   }
 
   // MARK: - Filter Presets (CIFilter-based)
@@ -394,7 +399,7 @@ final class PhotoEditingPipeline: ObservableObject {
 
   /// Renders the final edited image as JPEG data suitable for upload/save.
   func renderFinalJPEG(compressionQuality: CGFloat = 0.92) async -> Data? {
-    guard sourceImage != nil else { return nil }
+    guard sourceImageData != nil else { return nil }
     let snapshot = makeRenderSnapshot()
     let quality = Double(compressionQuality)
     return await Task.detached(priority: .userInitiated) {
@@ -404,7 +409,7 @@ final class PhotoEditingPipeline: ObservableObject {
 
   /// Renders the final edited image as PNG data (lossless).
   func renderFinalPNG() async -> Data? {
-    guard sourceImage != nil else { return nil }
+    guard sourceImageData != nil else { return nil }
     let snapshot = makeRenderSnapshot()
     return await Task.detached(priority: .userInitiated) {
       Self.renderEncodedData(from: snapshot, format: .png)
@@ -413,14 +418,33 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private nonisolated static func renderEncodedData(from snapshot: RenderSnapshot, format: EncodedRenderFormat) -> Data? {
     guard let cgImage = renderCGImage(from: snapshot) else { return nil }
-    let bitmap = NSBitmapImageRep(cgImage: cgImage)
-
+    let mutableData = NSMutableData()
+    let destinationType: CFString
+    let properties: CFDictionary
     switch format {
     case .jpeg(let quality):
-      return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
+      destinationType = UTType.jpeg.identifier as CFString
+      properties = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
     case .png:
-      return bitmap.representation(using: .png, properties: [:])
+      destinationType = UTType.png.identifier as CFString
+      properties = [:] as CFDictionary
     }
+
+    guard let destination = CGImageDestinationCreateWithData(
+      mutableData,
+      destinationType,
+      1,
+      nil
+    ) else {
+      return nil
+    }
+
+    CGImageDestinationAddImage(destination, cgImage, properties)
+    guard CGImageDestinationFinalize(destination) else {
+      return nil
+    }
+
+    return mutableData as Data
   }
 }
 #endif

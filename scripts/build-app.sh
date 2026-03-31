@@ -77,17 +77,44 @@ ICONSET_DIR="${OUTPUT_ROOT}/${APP_NAME}.iconset"
 EXECUTABLE_PATH="${PROJECT_DIR}/.build/${BUILD_CONFIGURATION}/${APP_NAME}"
 ICON_SOURCE="${REPO_DIR}/design/immich-logo.png"
 
-for tool in node swift sips iconutil plutil codesign; do
+for tool in swift sips iconutil plutil codesign; do
   require_tool "$tool"
 done
 
 require_file "$ICON_SOURCE"
-require_file "${REPO_DIR}/package.json"
 
-VERSION="$(
-  node -e 'const fs = require("node:fs"); const path = process.argv[1]; console.log(JSON.parse(fs.readFileSync(path, "utf8")).version);' \
-    "${REPO_DIR}/package.json"
-)"
+resolve_version() {
+  if [[ -n "${VERSION:-}" ]]; then
+    printf '%s\n' "$VERSION"
+    return
+  fi
+
+  if [[ -n "${CF_BUNDLE_VERSION:-}" ]]; then
+    printf '%s\n' "$CF_BUNDLE_VERSION"
+    return
+  fi
+
+  if command -v node >/dev/null 2>&1 && [[ -f "${REPO_DIR}/package.json" ]]; then
+    node -e 'const fs = require("node:fs"); const path = process.argv[1]; const version = JSON.parse(fs.readFileSync(path, "utf8")).version; if (version) console.log(version);' \
+      "${REPO_DIR}/package.json"
+    return
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    local git_version
+    git_version="$(
+      cd "${REPO_DIR}" && git describe --tags --always 2>/dev/null || true
+    )"
+    if [[ -n "$git_version" ]]; then
+      printf '%s\n' "$git_version"
+      return
+    fi
+  fi
+
+  printf '%s\n' "0.0.0"
+}
+
+VERSION="$(resolve_version)"
 
 mkdir -p "$OUTPUT_ROOT"
 
