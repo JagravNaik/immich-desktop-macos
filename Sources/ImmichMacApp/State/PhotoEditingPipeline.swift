@@ -45,6 +45,30 @@ final class PhotoEditingPipeline: ObservableObject {
   private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
   private var renderTask: Task<Void, Never>?
   private var parameterCancellable: AnyCancellable?
+  private nonisolated static let backgroundRenderContext = CIContext(options: [.useSoftwareRenderer: false])
+
+  private struct RenderSnapshot: @unchecked Sendable {
+    let sourceImage: CIImage?
+    let sourceNSImage: NSImage?
+    let exposure: Double
+    let brightness: Double
+    let contrast: Double
+    let highlights: Double
+    let shadows: Double
+    let saturation: Double
+    let warmth: Double
+    let sharpness: Double
+    let selectedFilter: FilterPreset
+    let rotation: Double
+    let rotationSteps: Int
+    let flipHorizontal: Bool
+    let flipVertical: Bool
+    let cropRect: CGRect
+  }
+
+  private struct RenderResult: @unchecked Sendable {
+    let image: NSImage?
+  }
 
   var hasEdits: Bool {
     exposure != 0 || brightness != 0 || contrast != 0 ||
@@ -117,93 +141,123 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private func scheduleRender() {
     renderTask?.cancel()
-    renderTask = Task { [weak self] in
+    let snapshot = makeRenderSnapshot()
+    renderTask = Task { [weak self, snapshot] in
       guard let self else { return }
       self.isProcessing = true
-      let result = self.renderEditedImage()
+      defer { self.isProcessing = false }
+      let result = await Task.detached(priority: .userInitiated) {
+        RenderResult(image: Self.renderEditedImage(from: snapshot))
+      }.value
       guard !Task.isCancelled else { return }
-      self.editedImage = result
-      self.isProcessing = false
+      self.editedImage = result.image
     }
   }
 
+  private func makeRenderSnapshot() -> RenderSnapshot {
+    RenderSnapshot(
+      sourceImage: sourceImage,
+      sourceNSImage: sourceNSImage,
+      exposure: exposure,
+      brightness: brightness,
+      contrast: contrast,
+      highlights: highlights,
+      shadows: shadows,
+      saturation: saturation,
+      warmth: warmth,
+      sharpness: sharpness,
+      selectedFilter: selectedFilter,
+      rotation: rotation,
+      rotationSteps: rotationSteps,
+      flipHorizontal: flipHorizontal,
+      flipVertical: flipVertical,
+      cropRect: cropRect
+    )
+  }
+
   private func renderEditedImage() -> NSImage? {
-    guard var image = sourceImage else { return sourceNSImage }
+    Self.renderEditedImage(from: makeRenderSnapshot())
+  }
+
+  private nonisolated static func renderEditedImage(from snapshot: RenderSnapshot) -> NSImage? {
+    guard var image = snapshot.sourceImage else { return snapshot.sourceNSImage }
 
     // 1. Exposure
-    if exposure != 0 {
+    if snapshot.exposure != 0 {
       let filter = CIFilter.exposureAdjust()
       filter.inputImage = image
-      filter.ev = Float(exposure)
+      filter.ev = Float(snapshot.exposure)
       if let output = filter.outputImage { image = output }
     }
 
     // 2. Color Controls (brightness, contrast, saturation)
-    if brightness != 0 || contrast != 0 || saturation != 0 {
+    if snapshot.brightness != 0 || snapshot.contrast != 0 || snapshot.saturation != 0 {
       let filter = CIFilter.colorControls()
       filter.inputImage = image
-      filter.brightness = Float(brightness)
-      filter.contrast = Float(1.0 + contrast) // CIFilter expects 0…2 centered at 1
-      filter.saturation = Float(1.0 + saturation) // CIFilter expects 0…2 centered at 1
+      filter.brightness = Float(snapshot.brightness)
+      filter.contrast = Float(1.0 + snapshot.contrast) // CIFilter expects 0…2 centered at 1
+      filter.saturation = Float(1.0 + snapshot.saturation) // CIFilter expects 0…2 centered at 1
       if let output = filter.outputImage { image = output }
     }
 
     // 3. Highlights & Shadows
-    if highlights != 0 || shadows != 0 {
+    if snapshot.highlights != 0 || snapshot.shadows != 0 {
       let filter = CIFilter.highlightShadowAdjust()
       filter.inputImage = image
-      filter.highlightAmount = Float(1.0 - highlights) // higher value = less highlights
-      filter.shadowAmount = Float(shadows + 1.0) // 0…2 centered at 1
+      filter.highlightAmount = Float(1.0 - snapshot.highlights) // higher value = less highlights
+      filter.shadowAmount = Float(snapshot.shadows + 1.0) // 0…2 centered at 1
       if let output = filter.outputImage { image = output }
     }
 
     // 4. Temperature (warmth)
-    if warmth != 0 {
+    if snapshot.warmth != 0 {
       let filter = CIFilter.temperatureAndTint()
       filter.inputImage = image
       // Neutral is 6500K. Shift ±1500K based on warmth slider
-      let kelvin = 6500 + warmth * 1500
+      let kelvin = 6500 + snapshot.warmth * 1500
       filter.neutral = CIVector(x: CGFloat(kelvin), y: 0)
       filter.targetNeutral = CIVector(x: 6500, y: 0)
       if let output = filter.outputImage { image = output }
     }
 
     // 5. Sharpness
-    if sharpness > 0 {
+    if snapshot.sharpness > 0 {
       let filter = CIFilter.sharpenLuminance()
       filter.inputImage = image
-      filter.sharpness = Float(sharpness * 2.0) // 0…2 effective range
+      filter.sharpness = Float(snapshot.sharpness * 2.0) // 0…2 effective range
       if let output = filter.outputImage { image = output }
     }
 
     // 6. Filter preset
-    image = applyFilterPreset(to: image)
+    image = applyFilterPreset(to: image, preset: snapshot.selectedFilter)
 
     // 7. Geometry: rotation (straighten + 90° steps)
-    let totalRotation = rotation + Double(rotationSteps) * 90.0
+    let totalRotation = snapshot.rotation + Double(snapshot.rotationSteps) * 90.0
     if totalRotation != 0 {
       let radians = totalRotation * .pi / 180.0
       image = image.transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
     }
 
     // 8. Flip
-    if flipHorizontal {
+    if snapshot.flipHorizontal {
       image = image.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
         .translatedBy(x: -image.extent.width, y: 0))
     }
-    if flipVertical {
+    if snapshot.flipVertical {
       image = image.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
         .translatedBy(x: 0, y: -image.extent.height))
     }
 
     // 9. Crop (if not full frame)
-    if cropRect != CGRect(x: 0, y: 0, width: 1, height: 1) && cropRect.width > 0 && cropRect.height > 0 {
+    if snapshot.cropRect != CGRect(x: 0, y: 0, width: 1, height: 1) &&
+        snapshot.cropRect.width > 0 &&
+        snapshot.cropRect.height > 0 {
       let extent = image.extent
       let cropCGRect = CGRect(
-        x: extent.origin.x + cropRect.origin.x * extent.width,
-        y: extent.origin.y + cropRect.origin.y * extent.height,
-        width: cropRect.width * extent.width,
-        height: cropRect.height * extent.height
+        x: extent.origin.x + snapshot.cropRect.origin.x * extent.width,
+        y: extent.origin.y + snapshot.cropRect.origin.y * extent.height,
+        width: snapshot.cropRect.width * extent.width,
+        height: snapshot.cropRect.height * extent.height
       )
       image = image.cropped(to: cropCGRect)
     }
@@ -211,8 +265,8 @@ final class PhotoEditingPipeline: ObservableObject {
     // Render to NSImage
     let extent = image.extent
     guard extent.width > 0, extent.height > 0,
-          let cgImage = ciContext.createCGImage(image, from: extent) else {
-      return sourceNSImage
+          let cgImage = backgroundRenderContext.createCGImage(image, from: extent) else {
+      return snapshot.sourceNSImage
     }
 
     return NSImage(cgImage: cgImage, size: NSSize(width: extent.width, height: extent.height))
@@ -220,8 +274,8 @@ final class PhotoEditingPipeline: ObservableObject {
 
   // MARK: - Filter Presets (CIFilter-based)
 
-  private func applyFilterPreset(to image: CIImage, preset: FilterPreset? = nil) -> CIImage {
-    switch preset ?? selectedFilter {
+  private nonisolated static func applyFilterPreset(to image: CIImage, preset: FilterPreset) -> CIImage {
+    switch preset {
     case .original:
       return image
 
@@ -279,7 +333,7 @@ final class PhotoEditingPipeline: ObservableObject {
   /// Renders a small preview of the source image with only the given filter preset applied.
   func previewImage(for preset: FilterPreset) -> NSImage? {
     guard let sourceImage else { return sourceNSImage }
-    let filtered = applyFilterPreset(to: sourceImage, preset: preset)
+    let filtered = Self.applyFilterPreset(to: sourceImage, preset: preset)
     guard let cgImage = ciContext.createCGImage(filtered, from: filtered.extent) else { return sourceNSImage }
     return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
   }

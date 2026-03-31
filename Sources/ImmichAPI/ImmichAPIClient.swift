@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 import ImmichCore
 
-private let debugLogURL = URL(fileURLWithPath: "/tmp/immich-debug.log")
+private let debugLogURL = makeImmichDebugLogURL()
 
 private let isImmichDebugLoggingEnabled: Bool = {
   #if DEBUG
@@ -16,14 +16,45 @@ private let isImmichDebugLoggingEnabled: Bool = {
 
 private let immichDebugLogMaxSize: UInt64 = 5 * 1024 * 1024 // 5 MB
 
+private func makeImmichDebugLogURL() -> URL {
+  let fileManager = FileManager.default
+  let appSupportURL = (try? fileManager.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+  )) ?? fileManager.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library", isDirectory: true)
+    .appendingPathComponent("Application Support", isDirectory: true)
+
+  let logsDirectoryURL = appSupportURL
+    .appendingPathComponent("ImmichMacApp", isDirectory: true)
+    .appendingPathComponent("Logs", isDirectory: true)
+
+  try? fileManager.createDirectory(
+    at: logsDirectoryURL,
+    withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700]
+  )
+
+  return logsDirectoryURL.appendingPathComponent("immich-debug.log", isDirectory: false)
+}
+
 public func immichLog(_ message: String) {
   guard isImmichDebugLoggingEnabled else { return }
 
-  let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  let line = "\(formatter.string(from: Date())) \(message)\n"
   guard let data = line.data(using: .utf8) else { return }
 
   let fileManager = FileManager.default
   let path = debugLogURL.path
+  try? fileManager.createDirectory(
+    at: debugLogURL.deletingLastPathComponent(),
+    withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700]
+  )
 
   if fileManager.fileExists(atPath: path) {
     if let attrs = try? fileManager.attributesOfItem(atPath: path),
@@ -40,8 +71,117 @@ public func immichLog(_ message: String) {
       try? handle.close()
     }
   } else {
-    try? data.write(to: debugLogURL)
+    if fileManager.createFile(
+      atPath: path,
+      contents: data,
+      attributes: [.posixPermissions: 0o600]
+    ) == false {
+      try? data.write(to: debugLogURL, options: .atomic)
+      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+    }
   }
+}
+
+private struct MultipartFormField {
+  let name: String
+  let value: String
+}
+
+private struct MultipartBodyFile {
+  let url: URL
+  let contentLength: UInt64
+}
+
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  private let onProgress: @Sendable (Double) -> Void
+
+  init(onProgress: @escaping @Sendable (Double) -> Void) {
+    self.onProgress = onProgress
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    didSendBodyData bytesSent: Int64,
+    totalBytesSent: Int64,
+    totalBytesExpectedToSend: Int64
+  ) {
+    guard totalBytesExpectedToSend > 0 else { return }
+    let progress = min(max(Double(totalBytesSent) / Double(totalBytesExpectedToSend), 0), 1)
+    onProgress(progress)
+  }
+}
+
+private func buildMultipartBodyFile(
+  boundary: String,
+  fields: [MultipartFormField],
+  fileFieldName: String,
+  fileURL: URL,
+  filename: String,
+  mimeType: String
+) throws -> MultipartBodyFile {
+  let fileManager = FileManager.default
+  let directoryURL = fileManager.temporaryDirectory.appendingPathComponent("ImmichMacApp", isDirectory: true)
+  try fileManager.createDirectory(
+    at: directoryURL,
+    withIntermediateDirectories: true,
+    attributes: [.posixPermissions: 0o700]
+  )
+
+  let multipartURL = directoryURL.appendingPathComponent("upload-\(UUID().uuidString).multipart")
+  guard fileManager.createFile(
+    atPath: multipartURL.path,
+    contents: nil,
+    attributes: [.posixPermissions: 0o600]
+  ) else {
+    throw ImmichAPIError.requestFailed(statusCode: 0, message: "Failed to prepare upload body.")
+  }
+
+  let outputHandle = try FileHandle(forWritingTo: multipartURL)
+  defer { try? outputHandle.close() }
+
+  for field in fields {
+    try writeMultipartString("--\(boundary)\r\n", to: outputHandle)
+    try writeMultipartString("Content-Disposition: form-data; name=\"\(field.name)\"\r\n\r\n", to: outputHandle)
+    try writeMultipartString("\(field.value)\r\n", to: outputHandle)
+  }
+
+  try writeMultipartString("--\(boundary)\r\n", to: outputHandle)
+  try writeMultipartString(
+    "Content-Disposition: form-data; name=\"\(fileFieldName)\"; filename=\"\(filename)\"\r\n",
+    to: outputHandle
+  )
+  try writeMultipartString("Content-Type: \(mimeType)\r\n\r\n", to: outputHandle)
+  try copyFileContents(from: fileURL, to: outputHandle)
+  try writeMultipartString("\r\n--\(boundary)--\r\n", to: outputHandle)
+
+  let attributes = try fileManager.attributesOfItem(atPath: multipartURL.path)
+  let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+  return MultipartBodyFile(url: multipartURL, contentLength: size)
+}
+
+private func writeMultipartString(_ string: String, to handle: FileHandle) throws {
+  guard let data = string.data(using: .utf8) else { return }
+  try handle.write(contentsOf: data)
+}
+
+private func copyFileContents(from fileURL: URL, to handle: FileHandle) throws {
+  let inputHandle = try FileHandle(forReadingFrom: fileURL)
+  defer { try? inputHandle.close() }
+
+  while true {
+    let chunk = try inputHandle.read(upToCount: 64 * 1024) ?? Data()
+    if chunk.isEmpty {
+      break
+    }
+    try handle.write(contentsOf: chunk)
+  }
+}
+
+private func uploadTimestampString(for date: Date) -> String {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter.string(from: date)
 }
 
 public protocol ImmichAPIClient: Sendable {
@@ -66,7 +206,7 @@ public protocol ImmichAPIClient: Sendable {
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
   func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]])
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String)
-  func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @Sendable (Double) -> Void) async throws -> String
+  func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String
   func createAlbum(server: ImmichServer, session: UserSession, name: String, description: String, assetIds: [String]) async throws -> Album
   func renameAlbum(server: ImmichServer, session: UserSession, albumId: String, newName: String) async throws
   func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws
@@ -426,53 +566,63 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   // MARK: - Upload Asset
 
-  public func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @Sendable (Double) -> Void) async throws -> String {
+  public func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String {
     let boundary = UUID().uuidString
-    let fileData = try Data(contentsOf: fileURL)
     let filename = fileURL.lastPathComponent
     let mimeType = fileURL.mimeType
 
     // Get file creation date
     let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
     let createdDate = (attrs?[.creationDate] as? Date) ?? Date()
-    let isoFormatter = ISO8601DateFormatter()
-    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let deviceAssetId = "\(filename)-\(Int(createdDate.timeIntervalSince1970 * 1000))"
+    let multipartBody = try buildMultipartBodyFile(
+      boundary: boundary,
+      fields: [
+        MultipartFormField(name: "deviceAssetId", value: deviceAssetId),
+        MultipartFormField(name: "deviceId", value: "macos-desktop"),
+        MultipartFormField(name: "fileCreatedAt", value: uploadTimestampString(for: createdDate)),
+        MultipartFormField(name: "fileModifiedAt", value: uploadTimestampString(for: Date())),
+        MultipartFormField(name: "isFavorite", value: "false"),
+      ],
+      fileFieldName: "assetData",
+      fileURL: fileURL,
+      filename: filename,
+      mimeType: mimeType
+    )
+    defer { try? FileManager.default.removeItem(at: multipartBody.url) }
 
-    var body = Data()
-    func appendField(_ name: String, _ value: String) {
-      body.append("--\(boundary)\r\n".data(using: .utf8)!)
-      body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-      body.append("\(value)\r\n".data(using: .utf8)!)
+    guard let bodyStream = InputStream(url: multipartBody.url) else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Failed to prepare upload stream.")
     }
-    appendField("deviceAssetId", deviceAssetId)
-    appendField("deviceId", "macos-desktop")
-    appendField("fileCreatedAt", isoFormatter.string(from: createdDate))
-    appendField("fileModifiedAt", isoFormatter.string(from: Date()))
-    appendField("isFavorite", "false")
-
-    body.append("--\(boundary)\r\n".data(using: .utf8)!)
-    body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-    body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
-    body.append(fileData)
-    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
     var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
     request.httpMethod = "POST"
     request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-    request.httpBody = body
+    request.addValue(String(multipartBody.contentLength), forHTTPHeaderField: "Content-Length")
+    request.httpBodyStream = bodyStream
 
-    onProgress(0.5) // halfway after building body
-    let (data, response) = try await urlSession.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Upload failed")
+    onProgress(0)
+    let progressDelegate = UploadProgressDelegate(onProgress: onProgress)
+    let (data, response) = try await urlSession.data(for: request, delegate: progressDelegate)
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw ImmichAPIError.invalidResponse(url: request.url?.absoluteString ?? "unknown")
     }
-    onProgress(1.0)
+    guard (200...299).contains(httpResponse.statusCode) else {
+      throw apiError(from: data, statusCode: httpResponse.statusCode)
+    }
 
-    if let json = try? JSONDecoder().decode(UploadResponse.self, from: data) {
+    do {
+      let json = try JSONDecoder().decode(UploadResponse.self, from: data)
+      guard !json.id.isEmpty else {
+        throw ImmichAPIError.requestFailed(statusCode: httpResponse.statusCode, message: "Invalid upload response")
+      }
+      onProgress(1)
       return json.id
+    } catch let error as ImmichAPIError {
+      throw error
+    } catch {
+      throw ImmichAPIError.requestFailed(statusCode: httpResponse.statusCode, message: "Invalid upload response")
     }
-    return ""
   }
 
   // MARK: - Album CRUD
@@ -1101,21 +1251,33 @@ private enum TimelineBucketMapper {
     "yyyy-MM-dd'T'HH:mm:ss.SSS",
     "yyyy-MM-dd'T'HH:mm:ss"
   ]
+  private nonisolated(unsafe) static let iso8601WithFractionalSeconds: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+  private nonisolated(unsafe) static let iso8601WithoutFractionalSeconds: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter
+  }()
+  private static let fallbackFormatterLock = NSLock()
+  private static let fallbackDateFormatters: [DateFormatter] = dateFormats.map { format in
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .iso8601)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    formatter.dateFormat = format
+    return formatter
+  }
 
   static func parseDate(_ value: String) -> Date? {
-    // ISO8601DateFormatter is thread-safe unlike DateFormatter
-    let iso = ISO8601DateFormatter()
-    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = iso.date(from: value) { return date }
-    iso.formatOptions = [.withInternetDateTime]
-    if let date = iso.date(from: value) { return date }
-    // Fall back to per-call DateFormatter instances for non-standard formats
-    for format in dateFormats {
-      let formatter = DateFormatter()
-      formatter.calendar = Calendar(identifier: .iso8601)
-      formatter.locale = Locale(identifier: "en_US_POSIX")
-      formatter.timeZone = TimeZone(secondsFromGMT: 0)
-      formatter.dateFormat = format
+    if let date = iso8601WithFractionalSeconds.date(from: value) { return date }
+    if let date = iso8601WithoutFractionalSeconds.date(from: value) { return date }
+
+    fallbackFormatterLock.lock()
+    defer { fallbackFormatterLock.unlock() }
+    for formatter in fallbackDateFormatters {
       if let date = formatter.date(from: value) { return date }
     }
     return nil

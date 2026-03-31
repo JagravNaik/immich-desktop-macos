@@ -491,7 +491,11 @@ final class AppState: ObservableObject {
       authMethod = .password
       UserDefaults.standard.set(AuthMethod.password.rawValue, forKey: "immich.authMethod")
       UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
-      KeychainHelper.save(account: "immich.password", password: passwordText)
+      do {
+        try KeychainHelper.save(account: "immich.password", password: passwordText)
+      } catch {
+        immichLog("[Auth] Failed to save password to keychain: \(error.localizedDescription)")
+      }
       currentSession = session
       resetLibraryState()
       hasAdminAccess = session.isAdmin
@@ -518,7 +522,11 @@ final class AppState: ObservableObject {
       let session = try await apiClient.loginWithAPIKey(server: connectedServer, apiKey: trimmedKey)
       authMethod = .apiKey
       UserDefaults.standard.set(AuthMethod.apiKey.rawValue, forKey: "immich.authMethod")
-      KeychainHelper.save(account: "immich.apiKey", password: trimmedKey)
+      do {
+        try KeychainHelper.save(account: "immich.apiKey", password: trimmedKey)
+      } catch {
+        immichLog("[Auth] Failed to save API key to keychain: \(error.localizedDescription)")
+      }
       if session.userEmail != "API key session" {
         UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
         emailText = session.userEmail
@@ -1756,9 +1764,10 @@ final class AppState: ObservableObject {
       // Replace local item with remote asset reference
       if let idx = libraryItems.firstIndex(where: { $0.source == .localFile(item.fileURL) }) {
         let old = libraryItems[idx]
+        let oldID = old.id
         libraryItems[idx] = PhotoItem(
-          id: remoteID.isEmpty ? old.id : remoteID,
-          source: remoteID.isEmpty ? old.source : .remoteAsset(id: remoteID),
+          id: remoteID,
+          source: .remoteAsset(id: remoteID),
           title: old.title,
           date: old.date,
           isFavorite: old.isFavorite,
@@ -1775,12 +1784,12 @@ final class AppState: ObservableObject {
           projectionType: old.projectionType,
           aspectRatio: old.aspectRatio
         )
+        remapSelection(from: oldID, to: remoteID)
         rebuildLibrarySections()
       }
       immichLog("[Upload] Completed: \(item.fileURL.lastPathComponent) -> \(remoteID)")
     } catch {
-      // UploadQueue only exposes markDone (no markFailed); clearing it here so the queue can proceed
-      await uploadQueue.markDone(item)
+      await uploadQueue.markFailed(item, reason: error.localizedDescription)
       updateUploadRow(id: item.id, progress: 0, state: .failed(reason: error.localizedDescription))
       immichLog("[Upload] Failed: \(error)")
     }
@@ -1790,6 +1799,15 @@ final class AppState: ObservableObject {
     guard let idx = uploadRows.firstIndex(where: { $0.id == id }) else { return }
     uploadRows[idx].progress = progress
     uploadRows[idx].state = state
+  }
+
+  private func remapSelection(from oldID: String, to newID: String) {
+    if selectedItemID == oldID {
+      selectedItemID = newID
+    }
+    if selectedItemIDs.remove(oldID) != nil {
+      selectedItemIDs.insert(newID)
+    }
   }
 
   private func mergeTags(_ incomingTags: [ImmichTag]) {
