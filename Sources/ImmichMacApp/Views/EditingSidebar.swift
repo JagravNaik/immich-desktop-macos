@@ -173,16 +173,9 @@ struct EditingSidebar: View {
         .font(.caption.weight(.medium))
         .foregroundStyle(.secondary)
 
-      LazyVGrid(columns: [GridItem(.adaptive(minimum: 60))], spacing: 8) {
-        ForEach(PhotoEditingPipeline.CropAspect.allCases) { aspect in
-          Button(aspect.rawValue) {
-            pipeline.cropAspectRatio = aspect
-          }
-          .buttonStyle(.bordered)
-          .controlSize(.small)
-          .tint(pipeline.cropAspectRatio == aspect ? .accentColor : nil)
-        }
-      }
+      Text("Coming soon")
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
 
       Divider()
 

@@ -345,7 +345,11 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
 
   private func makeTempFile(named name: String, contents: String) throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ImmichAPITests", isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true,
+      attributes: nil
+    )
     let fileURL = directory.appendingPathComponent("\(UUID().uuidString)-\(name)")
     try Data(contents.utf8).write(to: fileURL)
     return fileURL
