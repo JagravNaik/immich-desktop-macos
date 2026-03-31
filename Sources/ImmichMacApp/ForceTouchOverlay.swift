@@ -21,28 +21,42 @@ struct ForceTouchOverlay: NSViewRepresentable {
   }
 }
 
+private final class ForceTouchEventMonitor {
+  private var monitor: Any?
+
+  deinit {
+    remove()
+  }
+
+  func replace(with monitor: Any?) {
+    remove()
+    self.monitor = monitor
+  }
+
+  func remove() {
+    guard let monitor else { return }
+    NSEvent.removeMonitor(monitor)
+    self.monitor = nil
+  }
+}
+
 final class ForceTouchNSView: NSView {
   var onPressureChange: ((Int, Double) -> Void)?
-  private var monitor: Any?
+  private let eventMonitor = ForceTouchEventMonitor()
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
     immichLog("[Pressure] ForceTouchNSView moved to window: \(window != nil)")
-    
-    // Remove existing monitor if any
-    if let monitor = self.monitor {
-      NSEvent.removeMonitor(monitor)
-      self.monitor = nil
-    }
-    
-    // Add a new monitor for the current window's lifecycle
+
+    eventMonitor.remove()
+
     if window != nil {
-      monitor = NSEvent.addLocalMonitorForEvents(matching: [.pressure]) { [weak self] event in
+      let monitor = NSEvent.addLocalMonitorForEvents(matching: [.pressure]) { [weak self] event in
         guard let self = self else { return event }
-        // Pass the stage and pressure to the callback
         self.onPressureChange?(event.stage, Double(event.pressure))
         return event
       }
+      eventMonitor.replace(with: monitor)
     }
   }
 }

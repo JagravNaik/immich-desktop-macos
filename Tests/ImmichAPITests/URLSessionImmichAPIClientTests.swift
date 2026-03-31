@@ -4,22 +4,25 @@ import XCTest
 import ImmichCore
 
 final class URLSessionImmichAPIClientTests: XCTestCase {
+  private var handlerSessionIDs: [String] = []
+
   override func tearDown() {
-    StubURLProtocol.requestHandler = nil
+    for sessionID in handlerSessionIDs {
+      StubURLProtocol.removeRequestHandler(for: sessionID)
+    }
+    handlerSessionIDs.removeAll()
     super.tearDown()
   }
 
   func testFetchServerInfoWithoutAPIKeyUsesVersionEndpoint() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/server/version")
       XCTAssertNil(request.value(forHTTPHeaderField: "x-api-key"))
 
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
       let data = #"{"major":1,"minor":118,"patch":2}"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let info = try await client.fetchServerInfo(
       server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
       apiKey: nil
@@ -30,16 +33,14 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testFetchServerInfoWithAPIKeyUsesAboutEndpoint() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/server/about")
       XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
 
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
       let data = #"{"version":"1.118.2","repository":"immich-app/immich"}"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let info = try await client.fetchServerInfo(
       server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
       apiKey: "secret"
@@ -50,7 +51,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testFetchLoginConfigurationLoadsServerFeaturesAndConfig() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
 
       switch request.url?.path {
@@ -64,9 +65,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
         XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
         return (response, Data())
       }
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let configuration = try await client.fetchLoginConfiguration(
       server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api")))
     )
@@ -80,7 +79,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testLoginUsesAuthLoginEndpoint() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/auth/login")
       XCTAssertEqual(request.httpMethod, "POST")
       XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
@@ -93,9 +92,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 201, httpVersion: nil, headerFields: nil)!
       let data = #"{"accessToken":"token","isAdmin":false,"isOnboarded":true,"name":"Demo User","profileImagePath":"","shouldChangePassword":false,"userEmail":"demo@immich.app","userId":"user-1"}"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = try await client.login(
       server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
       email: "demo@immich.app",
@@ -110,7 +107,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testLoginWithAPIKeyUsesCurrentKeyAndUserEndpoints() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       let url = try XCTUnwrap(request.url)
       let responseHeaders = ["Content-Type": "application/json"]
 
@@ -136,9 +133,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
         let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: responseHeaders)!
         return (response, Data())
       }
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = try await client.loginWithAPIKey(
       server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
       apiKey: "secret"
@@ -153,7 +148,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testTimelineBucketsWithAPIKeySessionUseAPIKeyHeader() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/timeline/buckets")
       XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
       XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
@@ -161,9 +156,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
       let data = #"[]"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = UserSession(
       apiKey: "secret",
       isAdmin: false,
@@ -185,7 +178,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     let fileURL = try makeTempFile(named: "sample.jpg", contents: "image-data")
     defer { try? FileManager.default.removeItem(at: fileURL) }
 
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/assets")
       XCTAssertEqual(request.httpMethod, "POST")
       XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
@@ -206,9 +199,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 201, httpVersion: nil, headerFields: nil)!
       let data = #"{"id":"asset-123"}"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = UserSession(
       accessToken: "token",
       isAdmin: false,
@@ -236,13 +227,11 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     let fileURL = try makeTempFile(named: "sample.jpg", contents: "image-data")
     defer { try? FileManager.default.removeItem(at: fileURL) }
 
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 201, httpVersion: nil, headerFields: nil)!
       let data = #"{"unexpected":"shape"}"#.data(using: .utf8)!
       return (response, data)
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = UserSession(
       accessToken: "token",
       isAdmin: false,
@@ -270,7 +259,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   func testReplaceAssetUsesExpectedEndpointAndMultipartBody() async throws {
-    StubURLProtocol.requestHandler = { request in
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/assets/asset-1/original")
       XCTAssertEqual(request.httpMethod, "PUT")
       XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
@@ -287,9 +276,7 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
 
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
       return (response, Data())
-    }
-
-    let client = URLSessionImmichAPIClient(session: makeSession())
+    })
     let session = UserSession(
       accessToken: "token",
       isAdmin: false,
@@ -318,9 +305,13 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertEqual(server.baseURL.absoluteString, "https://demo.immich.app/api")
   }
 
-  private func makeSession() -> URLSession {
+  private func makeSession(handler: @escaping StubURLProtocol.Handler) -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [StubURLProtocol.self]
+    let sessionID = UUID().uuidString
+    configuration.httpAdditionalHeaders = [StubURLProtocol.handlerSessionHeader: sessionID]
+    StubURLProtocol.setRequestHandler(handler, for: sessionID)
+    handlerSessionIDs.append(sessionID)
     return URLSession(configuration: configuration)
   }
 
@@ -365,28 +356,38 @@ private final class RequestHandlerStore: @unchecked Sendable {
   typealias Handler = (URLRequest) throws -> (HTTPURLResponse, Data)
 
   private let lock = NSLock()
-  private var handler: Handler?
+  private var handlers: [String: Handler] = [:]
 
-  func set(_ handler: Handler?) {
-    lock.lock()
-    self.handler = handler
-    lock.unlock()
-  }
-
-  func get() -> Handler? {
+  func set(_ handler: @escaping Handler, for sessionID: String) {
     lock.lock()
     defer { lock.unlock() }
-    return handler
+    handlers[sessionID] = handler
+  }
+
+  func get(for sessionID: String) -> Handler? {
+    lock.lock()
+    defer { lock.unlock() }
+    return handlers[sessionID]
+  }
+
+  func remove(for sessionID: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    handlers.removeValue(forKey: sessionID)
   }
 }
 
 private final class StubURLProtocol: URLProtocol {
   typealias Handler = RequestHandlerStore.Handler
   private static let requestHandlerStore = RequestHandlerStore()
+  static let handlerSessionHeader = "X-Immich-Test-Session-ID"
 
-  static var requestHandler: Handler? {
-    get { requestHandlerStore.get() }
-    set { requestHandlerStore.set(newValue) }
+  static func setRequestHandler(_ handler: @escaping Handler, for sessionID: String) {
+    requestHandlerStore.set(handler, for: sessionID)
+  }
+
+  static func removeRequestHandler(for sessionID: String) {
+    requestHandlerStore.remove(for: sessionID)
   }
 
   override class func canInit(with request: URLRequest) -> Bool {
@@ -398,7 +399,8 @@ private final class StubURLProtocol: URLProtocol {
   }
 
   override func startLoading() {
-    guard let handler = Self.requestHandler else {
+    guard let sessionID = request.value(forHTTPHeaderField: Self.handlerSessionHeader),
+          let handler = Self.requestHandlerStore.get(for: sessionID) else {
       XCTFail("Missing request handler")
       return
     }

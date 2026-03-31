@@ -137,6 +137,7 @@ struct LibraryGridView: View {
 
   private func moveSelectionVertically(_ direction: VerticalSelectionDirection, shouldScrollIntoView: Bool = false) {
     let items = orderedItems
+    let itemIndices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
     guard !items.isEmpty else { return }
     guard let currentID = appState.selectedItemID,
           let currentFrame = itemFrames[currentID]
@@ -183,8 +184,7 @@ struct LibraryGridView: View {
         return lhsVertical < rhsVertical
       }
 
-      return orderedItems.firstIndex(where: { $0.id == lhs.id }) ?? 0
-        < orderedItems.firstIndex(where: { $0.id == rhs.id }) ?? 0
+      return itemIndices[lhs.id] ?? 0 < itemIndices[rhs.id] ?? 0
     }
 
     if let bestMatch {
