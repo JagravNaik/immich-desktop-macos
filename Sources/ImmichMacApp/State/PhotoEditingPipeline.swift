@@ -317,11 +317,8 @@ final class PhotoEditingPipeline: ObservableObject {
   }
 
   private nonisolated static func loadSourceImageData(for image: NSImage) async -> SourceImageLoadResult {
-    await withCheckedContinuation { continuation in
-      DispatchQueue.global(qos: .userInitiated).async {
-        continuation.resume(returning: SourceImageLoadResult(imageData: image.tiffRepresentation))
-      }
-    }
+    let imageData = await MainActor.run { image.tiffRepresentation }
+    return SourceImageLoadResult(imageData: imageData)
   }
 
   // MARK: - Filter Presets (CIFilter-based)
