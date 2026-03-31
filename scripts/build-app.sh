@@ -12,6 +12,22 @@ usage() {
   echo "Usage: $0 [--debug|--release] [--open] [--output <directory>]" >&2
 }
 
+require_tool() {
+  local tool="$1"
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Required tool not found: ${tool}" >&2
+    exit 1
+  fi
+}
+
+require_file() {
+  local path="$1"
+  if [[ ! -f "$path" ]]; then
+    echo "Required file not found: ${path}" >&2
+    exit 1
+  fi
+}
+
 OUTPUT_ROOT=""
 
 while (($# > 0)); do
@@ -61,10 +77,12 @@ ICONSET_DIR="${OUTPUT_ROOT}/${APP_NAME}.iconset"
 EXECUTABLE_PATH="${PROJECT_DIR}/.build/${BUILD_CONFIGURATION}/${APP_NAME}"
 ICON_SOURCE="${REPO_DIR}/design/immich-logo.png"
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "Node.js is required to read the app version from package.json." >&2
-  exit 1
-fi
+for tool in node swift sips iconutil plutil codesign; do
+  require_tool "$tool"
+done
+
+require_file "$ICON_SOURCE"
+require_file "${REPO_DIR}/package.json"
 
 VERSION="$(
   node -e 'const fs = require("node:fs"); const path = process.argv[1]; console.log(JSON.parse(fs.readFileSync(path, "utf8")).version);' \

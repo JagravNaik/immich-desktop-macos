@@ -18,7 +18,12 @@ enum KeychainHelperError: LocalizedError {
 }
 
 enum KeychainHelper {
-  private static let service = "com.immich.desktop"
+  private static let service: String = {
+    if let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty {
+      return bundleID
+    }
+    return "app.immich.desktop.macos"
+  }()
 
   static func save(account: String, password: String) throws {
     guard let data = password.data(using: .utf8) else {
@@ -57,10 +62,7 @@ enum KeychainHelper {
     if status == errSecItemNotFound {
       return nil
     }
-    guard status == errSecSuccess, let data = result as? Data else {
-      logFailure(operation: "load", account: account, status: status)
-      return nil
-    }
+    guard status == errSecSuccess, let data = result as? Data else { return nil }
     return String(data: data, encoding: .utf8)
   }
 
@@ -76,9 +78,5 @@ enum KeychainHelper {
     }
   }
 
-  private static func logFailure(operation: String, account: String, status: OSStatus) {
-    let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
-    NSLog("[ImmichMacApp] Keychain \(operation) failed for \(account): \(message)")
-  }
 }
 #endif

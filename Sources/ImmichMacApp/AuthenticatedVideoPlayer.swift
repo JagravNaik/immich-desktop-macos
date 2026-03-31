@@ -5,6 +5,8 @@ import SwiftUI
 import AppKit
 import AVKit
 
+private let avURLAssetHTTPHeaderFieldsOptionKey = "AVURLAssetHTTPHeaderFieldsKey"
+
 struct AuthenticatedVideoPlayer: View {
   let url: URL
   let authHeaderFields: [String: String]
@@ -41,7 +43,7 @@ struct AuthenticatedVideoPlayer: View {
     }
     .task(id: url) {
       // Configure AVURLAsset to pass the Authorization header
-      let options: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": authHeaderFields]
+      let options: [String: Any] = [avURLAssetHTTPHeaderFieldsOptionKey: authHeaderFields]
       let asset = AVURLAsset(url: url, options: options)
       let playerItem = AVPlayerItem(asset: asset)
       let newPlayer = AVPlayer(playerItem: playerItem)

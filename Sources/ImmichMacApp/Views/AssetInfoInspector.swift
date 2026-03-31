@@ -2,7 +2,6 @@
 import SwiftUI
 import MapKit
 import ImmichCore
-import ImmichAPI
 
 // MARK: - Asset Info Inspector (Photos-style detail panel)
 

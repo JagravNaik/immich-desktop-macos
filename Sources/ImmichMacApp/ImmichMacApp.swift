@@ -19,8 +19,6 @@ import Foundation
 
 @main
 struct ImmichMacApp {
-  static func main() {
-    print("ImmichMacApp is only available when SwiftUI is supported (macOS).")
-  }
+  static func main() {}
 }
 #endif

@@ -4,82 +4,7 @@ import FoundationNetworking
 #endif
 import ImmichCore
 
-private let debugLogURL = makeImmichDebugLogURL()
-
-private let isImmichDebugLoggingEnabled: Bool = {
-  #if DEBUG
-  return true
-  #else
-  return ProcessInfo.processInfo.environment["IMMICH_DEBUG_LOG"] == "1"
-  #endif
-}()
-
-private let immichDebugLogMaxSize: UInt64 = 5 * 1024 * 1024 // 5 MB
-
-private func makeImmichDebugLogURL() -> URL {
-  let fileManager = FileManager.default
-  let appSupportURL = (try? fileManager.url(
-    for: .applicationSupportDirectory,
-    in: .userDomainMask,
-    appropriateFor: nil,
-    create: true
-  )) ?? fileManager.homeDirectoryForCurrentUser
-    .appendingPathComponent("Library", isDirectory: true)
-    .appendingPathComponent("Application Support", isDirectory: true)
-
-  let logsDirectoryURL = appSupportURL
-    .appendingPathComponent("ImmichMacApp", isDirectory: true)
-    .appendingPathComponent("Logs", isDirectory: true)
-
-  try? fileManager.createDirectory(
-    at: logsDirectoryURL,
-    withIntermediateDirectories: true,
-    attributes: [.posixPermissions: 0o700]
-  )
-
-  return logsDirectoryURL.appendingPathComponent("immich-debug.log", isDirectory: false)
-}
-
-public func immichLog(_ message: String) {
-  guard isImmichDebugLoggingEnabled else { return }
-
-  let formatter = ISO8601DateFormatter()
-  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  let line = "\(formatter.string(from: Date())) \(message)\n"
-  guard let data = line.data(using: .utf8) else { return }
-
-  let fileManager = FileManager.default
-  let path = debugLogURL.path
-  try? fileManager.createDirectory(
-    at: debugLogURL.deletingLastPathComponent(),
-    withIntermediateDirectories: true,
-    attributes: [.posixPermissions: 0o700]
-  )
-
-  if fileManager.fileExists(atPath: path) {
-    if let attrs = try? fileManager.attributesOfItem(atPath: path),
-       let size = attrs[.size] as? NSNumber,
-       size.uint64Value > immichDebugLogMaxSize {
-      try? fileManager.removeItem(at: debugLogURL)
-    }
-  }
-
-  if fileManager.fileExists(atPath: path) {
-    if let handle = try? FileHandle(forWritingTo: debugLogURL) {
-      handle.seekToEndOfFile()
-      handle.write(data)
-      try? handle.close()
-    }
-  } else {
-    if fileManager.createFile(
-      atPath: path,
-      contents: data,
-      attributes: [.posixPermissions: 0o600]
-    ) == false {
-      try? data.write(to: debugLogURL, options: .atomic)
-      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
-    }
-  }
+public func immichLog(_: @autoclosure () -> String) {
 }
 
 private struct MultipartFormField {
@@ -952,28 +877,18 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
     let requestURL = request.url?.absoluteString ?? "unknown"
-    immichLog("[ImmichAPI] Request: \(request.httpMethod ?? "GET") \(requestURL)")
     let (data, response) = try await urlSession.data(for: request)
     guard let httpResponse = response as? HTTPURLResponse else {
       throw ImmichAPIError.invalidResponse(url: requestURL)
     }
 
-    immichLog("[ImmichAPI] Response: \(httpResponse.statusCode) from \(requestURL) (\(data.count) bytes)")
-
     guard (200...299).contains(httpResponse.statusCode) else {
-      let bodySnippet = String(data: data.prefix(200), encoding: .utf8) ?? "<binary>"
-      immichLog("[ImmichAPI] Error body: \(bodySnippet)")
       throw apiError(from: data, statusCode: httpResponse.statusCode)
     }
 
     do {
-      let result = try JSONDecoder().decode(Response.self, from: data)
-      immichLog("[ImmichAPI] Decoded \(String(describing: Response.self)) successfully")
-      return result
+      return try JSONDecoder().decode(Response.self, from: data)
     } catch {
-      let bodySnippet = String(data: data.prefix(500), encoding: .utf8) ?? "<binary>"
-      immichLog("[ImmichAPI] Decode FAILED for \(requestURL): \(error)")
-      immichLog("[ImmichAPI] Body (500 chars): \(bodySnippet)")
       throw ImmichAPIError.decodingFailed(url: requestURL, detail: error.localizedDescription)
     }
   }

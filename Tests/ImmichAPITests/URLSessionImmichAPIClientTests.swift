@@ -391,7 +391,7 @@ private final class StubURLProtocol: URLProtocol {
   }
 
   override class func canInit(with request: URLRequest) -> Bool {
-    true
+    request.value(forHTTPHeaderField: Self.handlerSessionHeader) != nil
   }
 
   override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -402,6 +402,12 @@ private final class StubURLProtocol: URLProtocol {
     guard let sessionID = request.value(forHTTPHeaderField: Self.handlerSessionHeader),
           let handler = Self.requestHandlerStore.get(for: sessionID) else {
       XCTFail("Missing request handler")
+      let error = NSError(
+        domain: "StubURLProtocolError",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Missing request handler for test session header \(Self.handlerSessionHeader)"]
+      )
+      client?.urlProtocol(self, didFailWithError: error)
       return
     }
 

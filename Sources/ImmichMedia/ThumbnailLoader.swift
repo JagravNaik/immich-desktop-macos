@@ -20,12 +20,13 @@ private struct DetachedThumbnailResult: @unchecked Sendable {
 }
 
 public final class ThumbnailLoader: @unchecked Sendable {
-  private let cache = NSCache<NSURL, NSImage>()
+  private let cache = NSCache<NSString, NSImage>()
 
   public init() {}
 
   public func loadThumbnail(for fileURL: URL, maxPixelSize: ThumbnailPixelSize = 256) async -> PlatformImage? {
-    if let cached = cache.object(forKey: fileURL as NSURL) {
+    let cacheKey = makeCacheKey(for: fileURL, maxPixelSize: maxPixelSize)
+    if let cached = cache.object(forKey: cacheKey) {
       return cached
     }
 
@@ -57,8 +58,13 @@ public final class ThumbnailLoader: @unchecked Sendable {
       cgImage: cgImage,
       size: NSSize(width: cgImage.width, height: cgImage.height)
     )
-    cache.setObject(image, forKey: fileURL as NSURL)
+    cache.setObject(image, forKey: cacheKey)
     return image
+  }
+
+  private func makeCacheKey(for fileURL: URL, maxPixelSize: ThumbnailPixelSize) -> NSString {
+    let normalizedSize = Int(ceil(Double(maxPixelSize)))
+    return "\(fileURL.absoluteString)#\(normalizedSize)" as NSString
   }
 }
 

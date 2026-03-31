@@ -471,8 +471,12 @@ struct AssetTagEditorSheet: View {
     defer { isWorking = false }
 
     do {
+      let tagNames = newTagsText
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
       let added = try await appState.applyTags(
-        named: newTagsText.split(separator: ",").map(String.init),
+        named: tagNames,
         to: appState.activeTagEditorAssetIDs
       )
       mergeCurrentTags(with: added)

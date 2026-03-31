@@ -3,7 +3,6 @@ import SwiftUI
 
 #if canImport(AppKit)
 import AppKit
-import ImmichAPI
 
 /// A transparent view that catches all pressure (force touch) events 
 /// on the current window and forwards them to the provided callback.
@@ -46,7 +45,6 @@ final class ForceTouchNSView: NSView {
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    immichLog("[Pressure] ForceTouchNSView moved to window: \(window != nil)")
 
     eventMonitor.remove()
 
