@@ -61,7 +61,15 @@ ICONSET_DIR="${OUTPUT_ROOT}/${APP_NAME}.iconset"
 EXECUTABLE_PATH="${PROJECT_DIR}/.build/${BUILD_CONFIGURATION}/${APP_NAME}"
 ICON_SOURCE="${REPO_DIR}/design/immich-logo.png"
 
-VERSION="$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "${REPO_DIR}/package.json")"
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js is required to read the app version from package.json." >&2
+  exit 1
+fi
+
+VERSION="$(
+  node -e 'const fs = require("node:fs"); const path = process.argv[1]; console.log(JSON.parse(fs.readFileSync(path, "utf8")).version);' \
+    "${REPO_DIR}/package.json"
+)"
 
 mkdir -p "$OUTPUT_ROOT"
 

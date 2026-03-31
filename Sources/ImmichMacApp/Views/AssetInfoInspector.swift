@@ -203,6 +203,9 @@ struct AssetInfoInspector: View {
   // MARK: - Helpers
 
   private func loadDetail() async {
+    detail = nil
+    isLoading = false
+
     guard case .remoteAsset(let id) = item.source,
           appState.thumbnailContext != nil,
           appState.currentSession != nil else { return }
@@ -211,7 +214,7 @@ struct AssetInfoInspector: View {
     do {
       detail = try await appState.fetchAssetDetail(id)
     } catch {
-      // Silently fail — just show what we have
+      detail = nil
     }
   }
 
