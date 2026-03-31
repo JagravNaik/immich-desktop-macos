@@ -118,12 +118,34 @@ final class PhotoEditingPipeline: ObservableObject {
   // MARK: - Init
 
   init() {
-    // Observe all published properties and debounce re-renders
-    parameterCancellable = objectWillChange
+    // Observe only render-affecting inputs so output updates do not reschedule renders.
+    parameterCancellable = renderTriggerPublisher()
       .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
       .sink { [weak self] _ in
         self?.scheduleRender()
       }
+  }
+
+  private func renderTriggerPublisher() -> AnyPublisher<Void, Never> {
+    let publishers: [AnyPublisher<Void, Never>] = [
+      $exposure.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $brightness.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $contrast.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $highlights.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $shadows.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $saturation.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $warmth.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $sharpness.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $selectedFilter.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $rotation.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $rotationSteps.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $flipHorizontal.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $flipVertical.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $cropAspectRatio.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $cropRect.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+    ]
+
+    return Publishers.MergeMany(publishers).eraseToAnyPublisher()
   }
 
   // MARK: - Set Source Image

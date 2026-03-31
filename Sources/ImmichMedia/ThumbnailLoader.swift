@@ -15,6 +15,10 @@ import ImageIO
 
 public typealias PlatformImage = NSImage
 
+private struct DetachedThumbnailResult: @unchecked Sendable {
+  let cgImage: CGImage?
+}
+
 public final class ThumbnailLoader: @unchecked Sendable {
   private let cache = NSCache<NSURL, NSImage>()
 
@@ -27,7 +31,7 @@ public final class ThumbnailLoader: @unchecked Sendable {
 
     let url = fileURL
     let pixelSize = maxPixelSize
-    let result: NSImage? = await Task.detached(priority: .userInitiated) {
+    let result = await Task.detached(priority: .userInitiated) { () -> DetachedThumbnailResult in
       guard
         let source = CGImageSourceCreateWithURL(url as CFURL, nil),
         let cgImage = CGImageSourceCreateThumbnailAtIndex(
@@ -40,16 +44,21 @@ public final class ThumbnailLoader: @unchecked Sendable {
           ] as CFDictionary
         )
       else {
-        return nil
+        return DetachedThumbnailResult(cgImage: nil)
       }
-      let size = NSSize(width: cgImage.width, height: cgImage.height)
-      return NSImage(cgImage: cgImage, size: size)
+      return DetachedThumbnailResult(cgImage: cgImage)
     }.value
 
-    if let result {
-      cache.setObject(result, forKey: fileURL as NSURL)
+    guard let cgImage = result.cgImage else {
+      return nil
     }
-    return result
+
+    let image = NSImage(
+      cgImage: cgImage,
+      size: NSSize(width: cgImage.width, height: cgImage.height)
+    )
+    cache.setObject(image, forKey: fileURL as NSURL)
+    return image
   }
 }
 
