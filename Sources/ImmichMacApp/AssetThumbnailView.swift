@@ -116,7 +116,7 @@ final class ThumbnailStore: ObservableObject {
         return nil
       }
 
-      return await decodeImage(from: data)
+      return await decodeImage(from: data, size: size)
     } catch {
       return nil
     }
@@ -124,18 +124,11 @@ final class ThumbnailStore: ObservableObject {
 
   private static func loadFullResolutionImage(from fileURL: URL) async -> NSImage? {
     let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
-      guard
-        let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil),
-        let cgImage = CGImageSourceCreateImageAtIndex(
-          source,
-          0,
-          [kCGImageSourceShouldCache: false] as CFDictionary
-        )
-      else {
+      guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
         return DecodedImageResult(cgImage: nil)
       }
 
-      return DecodedImageResult(cgImage: cgImage)
+      return makeDecodedImageResult(from: source, maxPixelSize: maxPixelSize(for: source, size: .original))
     }.value
 
     guard let cgImage = result.cgImage else { return nil }
@@ -144,26 +137,50 @@ final class ThumbnailStore: ObservableObject {
     }
   }
 
-  private static func decodeImage(from data: Data) async -> NSImage? {
+  private static func decodeImage(from data: Data, size: ThumbnailSize) async -> NSImage? {
     let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
-      guard
-        let source = CGImageSourceCreateWithData(data as CFData, nil),
-        let cgImage = CGImageSourceCreateImageAtIndex(
-          source,
-          0,
-          [kCGImageSourceShouldCache: false] as CFDictionary
-        )
-      else {
+      guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
         return DecodedImageResult(cgImage: nil)
       }
 
-      return DecodedImageResult(cgImage: cgImage)
+      return makeDecodedImageResult(from: source, maxPixelSize: maxPixelSize(for: source, size: size))
     }.value
 
     guard let cgImage = result.cgImage else { return nil }
     return await MainActor.run {
       NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
+  }
+
+  private nonisolated static func makeDecodedImageResult(from source: CGImageSource, maxPixelSize: Int) -> DecodedImageResult {
+    let options: CFDictionary = [
+      kCGImageSourceShouldCache: false,
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+    ] as CFDictionary
+
+    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else {
+      return DecodedImageResult(cgImage: nil)
+    }
+
+    return DecodedImageResult(cgImage: cgImage)
+  }
+
+  private nonisolated static func maxPixelSize(for source: CGImageSource, size: ThumbnailSize) -> Int {
+    if size != .original {
+      return Int(ceil(Double(size.maxPixelSize)))
+    }
+
+    guard
+      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let pixelWidth = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+      let pixelHeight = properties[kCGImagePropertyPixelHeight] as? NSNumber
+    else {
+      return Int(ceil(Double(size.maxPixelSize)))
+    }
+
+    return max(pixelWidth.intValue, pixelHeight.intValue)
   }
 
   private static func thumbnailURL(baseURL: URL, assetID: String, size: ThumbnailSize = .thumbnail) -> URL? {
