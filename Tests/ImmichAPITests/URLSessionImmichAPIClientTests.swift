@@ -109,6 +109,78 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertFalse(session.isAdmin)
   }
 
+  func testLoginWithAPIKeyUsesCurrentKeyAndUserEndpoints() async throws {
+    StubURLProtocol.requestHandler = { request in
+      let url = try XCTUnwrap(request.url)
+      let responseHeaders = ["Content-Type": "application/json"]
+
+      switch url.path {
+      case "/api/api-keys/me":
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: responseHeaders)!
+        let data = #"{"createdAt":"2026-03-30T12:00:00.000Z","id":"key-1","name":"Desktop Automation","permissions":["all"],"updatedAt":"2026-03-30T12:00:00.000Z"}"#.data(using: .utf8)!
+        return (response, data)
+      case "/api/users/me":
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: responseHeaders)!
+        let data = #"{"avatarColor":"primary","email":"demo@immich.app","id":"user-1","name":"Demo User","profileChangedAt":"2026-03-30T12:00:00.000Z","profileImagePath":""}"#.data(using: .utf8)!
+        return (response, data)
+      case "/api/admin/users":
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: responseHeaders)!
+        let data = #"[]"#.data(using: .utf8)!
+        return (response, data)
+      default:
+        XCTFail("Unexpected request path: \(url.path)")
+        let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: responseHeaders)!
+        return (response, Data())
+      }
+    }
+
+    let client = URLSessionImmichAPIClient(session: makeSession())
+    let session = try await client.loginWithAPIKey(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      apiKey: "secret"
+    )
+
+    XCTAssertTrue(session.usesAPIKey)
+    XCTAssertEqual(session.apiKey, "secret")
+    XCTAssertEqual(session.userName, "Demo User")
+    XCTAssertEqual(session.userEmail, "demo@immich.app")
+    XCTAssertEqual(session.userID, "user-1")
+    XCTAssertTrue(session.isAdmin)
+  }
+
+  func testTimelineBucketsWithAPIKeySessionUseAPIKeyHeader() async throws {
+    StubURLProtocol.requestHandler = { request in
+      XCTAssertEqual(request.url?.path, "/api/timeline/buckets")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
+      XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"[]"#.data(using: .utf8)!
+      return (response, data)
+    }
+
+    let client = URLSessionImmichAPIClient(session: makeSession())
+    let session = UserSession(
+      apiKey: "secret",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "API key session",
+      userID: "key-1",
+      userName: "Automation"
+    )
+
+    let buckets = try await client.fetchTimelineBuckets(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session
+    )
+
+    XCTAssertTrue(buckets.isEmpty)
+  }
+
   func testImmichServerNormalizesRootEndpointToAPIBaseURL() throws {
     let server = ImmichServer(endpointURL: try XCTUnwrap(URL(string: "https://demo.immich.app")))
     XCTAssertEqual(server.baseURL.absoluteString, "https://demo.immich.app/api")

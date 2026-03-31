@@ -2,40 +2,101 @@
 import SwiftUI
 import AppKit
 
+private let photoGridCoordinateSpace = "ImmichPhotoGrid"
+
+private struct PhotoGridItemFramePreferenceKey: PreferenceKey {
+  static let defaultValue: [String: CGRect] = [:]
+
+  static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+    value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+  }
+}
+
+struct PhotoHeroSourceFramePreferenceKey: PreferenceKey {
+  static let defaultValue: [String: CGRect] = [:]
+
+  static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+    value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+  }
+}
+
 // MARK: - Library Grid View (Photos-style chronological timeline)
 
 struct LibraryGridView: View {
   @ObservedObject var appState: AppState
   @ObservedObject var thumbnailStore: ThumbnailStore
+  let heroHiddenItemID: String?
+  let onOpenAsset: (AppState.PhotoItem, CGRect, NSImage?) -> Void
+  let onHeroFramesChanged: ([String: CGRect]) -> Void
+  @State private var itemFrames: [String: CGRect] = [:]
+  @State private var heroItemFrames: [String: CGRect] = [:]
+  @State private var dragSelectionState: DragSelectionState?
+  @State private var keyboardScrollTargetID: String?
 
-  private let gridColumns = [
-    GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 2),
-  ]
+  private struct DragSelectionState {
+    let mode: DragSelectionMode
+    var visitedItemIDs: Set<String> = []
+  }
+
+  private enum DragSelectionMode {
+    case select
+    case deselect
+  }
+
+  private var gridColumns: [GridItem] {
+    [
+      GridItem(
+        .adaptive(
+          minimum: appState.photoGridThumbnailWidth,
+          maximum: appState.photoGridThumbnailWidth
+        ),
+        spacing: appState.photoGridSpacing
+      ),
+    ]
+  }
 
   var body: some View {
-    Group {
-      if appState.filteredItems.isEmpty {
-        if appState.isLoadingTimeline {
-          loadingView
+    ScrollViewReader { proxy in
+      Group {
+        if appState.filteredItems.isEmpty {
+          if appState.isLoadingTimeline {
+            loadingView
+          } else {
+            emptyView
+          }
+        } else if shouldShowSectionedTimeline {
+          sectionedTimeline
         } else {
-          emptyView
+          flatGrid
         }
-      } else if shouldShowSectionedTimeline {
-        sectionedTimeline
-      } else {
-        flatGrid
       }
-    }
-    .focusable()
-    .focusEffectDisabled()
-    .onKeyPress(.leftArrow) { moveSelection(by: -1); return .handled }
-    .onKeyPress(.rightArrow) { moveSelection(by: 1); return .handled }
-    .onKeyPress(.upArrow) { moveSelection(by: -columnsEstimate); return .handled }
-    .onKeyPress(.downArrow) { moveSelection(by: columnsEstimate); return .handled }
-    .onKeyPress(.return) { openSelected(); return .handled }
-    .dropDestination(for: URL.self) { urls, _ in
-      appState.importFiles(urls)
-      return true
+      .focusable()
+      .focusEffectDisabled()
+      .onChange(of: appState.isMultiSelectMode) { _, isEnabled in
+        if !isEnabled {
+          dragSelectionState = nil
+        }
+      }
+      .onChange(of: keyboardScrollTargetID) { _, targetID in
+        guard let targetID else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+          proxy.scrollTo(targetID, anchor: .center)
+        }
+        DispatchQueue.main.async {
+          if keyboardScrollTargetID == targetID {
+            keyboardScrollTargetID = nil
+          }
+        }
+      }
+      .onKeyPress(.leftArrow) { moveSelection(by: -1, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.rightArrow) { moveSelection(by: 1, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.upArrow) { moveSelectionVertically(.up, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.downArrow) { moveSelectionVertically(.down, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.return) { openSelected(); return .handled }
+      .dropDestination(for: URL.self) { urls, _ in
+        appState.importFiles(urls)
+        return true
+      }
     }
   }
 
@@ -47,21 +108,95 @@ struct LibraryGridView: View {
     return appState.filteredItems
   }
 
-  /// Rough estimate of columns visible in the adaptive grid (minimum 140pt).
+  /// Rough estimate of columns visible in the adaptive grid for arrow-key navigation.
   private var columnsEstimate: Int {
-    max(Int(NSApp.mainWindow?.frame.width ?? 900) / 160, 1)
+    let windowWidth = NSApp.mainWindow?.contentLayoutRect.width ?? 900
+    let availableWidth = max(windowWidth - (appState.photoGridPadding * 2), appState.photoGridThumbnailWidth)
+    let slotWidth = appState.photoGridThumbnailWidth + appState.photoGridSpacing
+    return max(Int((availableWidth + appState.photoGridSpacing) / slotWidth), 1)
   }
 
-  private func moveSelection(by offset: Int) {
+  private enum VerticalSelectionDirection {
+    case up
+    case down
+  }
+
+  private func moveSelection(by offset: Int, shouldScrollIntoView: Bool = false) {
     let items = orderedItems
     guard !items.isEmpty else { return }
     guard let currentID = appState.selectedItemID,
           let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
-      appState.selectedItemID = items.first?.id
+      if let firstID = items.first?.id {
+        setSelection(firstID, shouldScrollIntoView: shouldScrollIntoView)
+      }
       return
     }
     let newIndex = min(max(currentIndex + offset, 0), items.count - 1)
-    appState.selectedItemID = items[newIndex].id
+    setSelection(items[newIndex].id, shouldScrollIntoView: shouldScrollIntoView)
+  }
+
+  private func moveSelectionVertically(_ direction: VerticalSelectionDirection, shouldScrollIntoView: Bool = false) {
+    let items = orderedItems
+    guard !items.isEmpty else { return }
+    guard let currentID = appState.selectedItemID,
+          let currentFrame = itemFrames[currentID]
+    else {
+      moveSelection(by: direction == .up ? -columnsEstimate : columnsEstimate, shouldScrollIntoView: shouldScrollIntoView)
+      return
+    }
+
+    let directionalCandidates = items.compactMap { item -> (id: String, frame: CGRect)? in
+      guard item.id != currentID, let frame = itemFrames[item.id] else { return nil }
+
+      switch direction {
+      case .up where frame.midY < currentFrame.midY:
+        return (item.id, frame)
+      case .down where frame.midY > currentFrame.midY:
+        return (item.id, frame)
+      default:
+        return nil
+      }
+    }
+
+    guard !directionalCandidates.isEmpty else { return }
+
+    let overlappingCandidates = directionalCandidates.filter {
+      $0.frame.maxX > currentFrame.minX && $0.frame.minX < currentFrame.maxX
+    }
+
+    let pool = overlappingCandidates.isEmpty ? directionalCandidates : overlappingCandidates
+    let currentMidX = currentFrame.midX
+    let currentMidY = currentFrame.midY
+
+    let bestMatch = pool.min { lhs, rhs in
+      let lhsHorizontal = abs(lhs.frame.midX - currentMidX)
+      let rhsHorizontal = abs(rhs.frame.midX - currentMidX)
+
+      if abs(lhsHorizontal - rhsHorizontal) > 1 {
+        return lhsHorizontal < rhsHorizontal
+      }
+
+      let lhsVertical = abs(lhs.frame.midY - currentMidY)
+      let rhsVertical = abs(rhs.frame.midY - currentMidY)
+
+      if abs(lhsVertical - rhsVertical) > 1 {
+        return lhsVertical < rhsVertical
+      }
+
+      return orderedItems.firstIndex(where: { $0.id == lhs.id }) ?? 0
+        < orderedItems.firstIndex(where: { $0.id == rhs.id }) ?? 0
+    }
+
+    if let bestMatch {
+      setSelection(bestMatch.id, shouldScrollIntoView: shouldScrollIntoView)
+    }
+  }
+
+  private func setSelection(_ itemID: String, shouldScrollIntoView: Bool) {
+    appState.selectedItemID = itemID
+    if shouldScrollIntoView {
+      keyboardScrollTargetID = itemID
+    }
   }
 
   private func openSelected() {
@@ -75,6 +210,58 @@ struct LibraryGridView: View {
   private var shouldShowSectionedTimeline: Bool {
     (appState.sidebarSelection == .library || appState.sidebarSelection == nil)
     && appState.searchText.isEmpty
+  }
+
+  private func applyScrubSelection(to itemID: String) {
+    guard var dragSelectionState else { return }
+    guard dragSelectionState.visitedItemIDs.insert(itemID).inserted else { return }
+
+    withAnimation(.easeOut(duration: 0.08)) {
+      appState.setItemSelection(itemID, isSelected: dragSelectionState.mode == .select)
+    }
+    appState.selectedItemID = itemID
+    self.dragSelectionState = dragSelectionState
+  }
+
+  private func itemID(at location: CGPoint) -> String? {
+    orderedItems.first(where: { item in
+      itemFrames[item.id]?.contains(location) == true
+    })?.id
+  }
+
+  private func startScrubSelectionIfNeeded(at location: CGPoint) {
+    guard dragSelectionState == nil else { return }
+    guard let startItemID = itemID(at: location) else { return }
+
+    let mode: DragSelectionMode = appState.selectedItemIDs.contains(startItemID) ? .deselect : .select
+    dragSelectionState = DragSelectionState(mode: mode)
+    applyScrubSelection(to: startItemID)
+  }
+
+  private var scrubSelectionGesture: some Gesture {
+    DragGesture(
+      minimumDistance: appState.isMultiSelectMode ? 0 : .greatestFiniteMagnitude,
+      coordinateSpace: .named(photoGridCoordinateSpace)
+    )
+    .onChanged { value in
+      guard appState.isMultiSelectMode else { return }
+      startScrubSelectionIfNeeded(at: value.startLocation)
+
+      guard let currentItemID = itemID(at: value.location) else { return }
+      applyScrubSelection(to: currentItemID)
+    }
+    .onEnded { _ in
+      dragSelectionState = nil
+    }
+  }
+
+  @ViewBuilder
+  private var scrubSelectionOverlay: some View {
+    if appState.isMultiSelectMode {
+      Color.clear
+        .contentShape(Rectangle())
+        .gesture(scrubSelectionGesture)
+    }
   }
 
   // MARK: - Sectioned Timeline
@@ -94,22 +281,20 @@ struct LibraryGridView: View {
               .padding(.top, 4)
 
             // Photo grid
-            LazyVGrid(columns: gridColumns, spacing: 2) {
+            LazyVGrid(columns: gridColumns, spacing: appState.photoGridSpacing) {
               ForEach(section.items) { item in
                 PhotoGridCell(
                   item: item,
                   isSelected: item.id == selectedID,
                   isMultiSelected: appState.selectedItemIDs.contains(item.id),
                   isMultiSelectMode: appState.isMultiSelectMode,
+                  heroHidden: heroHiddenItemID == item.id,
                   context: context,
                   thumbnailStore: thumbnailStore,
                   onSelect: { appState.selectedItemID = item.id },
-                  onOpen: {
+                  onOpen: { item, sourceFrame, sourceImage in
                     appState.selectedItemID = item.id
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                      appState.isViewingLivePhoto = false
-                      appState.isViewingPhoto = true
-                    }
+                    onOpenAsset(item, heroItemFrames[item.id] ?? sourceFrame, sourceImage)
                   },
                   onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
                   onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
@@ -117,8 +302,12 @@ struct LibraryGridView: View {
                   onAddToAlbum: {
                     appState.selectedItemIDs = [item.id]
                     appState.showAddToAlbumSheet = true
+                  },
+                  onEditTags: {
+                    appState.presentTagEditor(for: [item.id], currentTags: [], title: "Edit Tags")
                   }
                 )
+                .id(item.id)
               }
             }
           }
@@ -143,9 +332,17 @@ struct LibraryGridView: View {
           .padding(.vertical, 16)
         }
       }
-      .padding(.horizontal, 2)
-      .padding(.vertical, 4)
+      .padding(.horizontal, appState.photoGridPadding)
+      .padding(.vertical, appState.photoGridPadding)
     }
+    .overlay { scrubSelectionOverlay }
+    .coordinateSpace(name: photoGridCoordinateSpace)
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { itemFrames = $0 }
+    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
+      heroItemFrames = frames
+      onHeroFramesChanged(frames)
+    }
+    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
   }
 
   // MARK: - Flat Grid
@@ -154,22 +351,20 @@ struct LibraryGridView: View {
     let context = appState.thumbnailContext
     let selectedID = appState.selectedItemID
     return ScrollView {
-      LazyVGrid(columns: gridColumns, spacing: 2) {
+      LazyVGrid(columns: gridColumns, spacing: appState.photoGridSpacing) {
         ForEach(appState.filteredItems) { item in
           PhotoGridCell(
             item: item,
             isSelected: item.id == selectedID,
             isMultiSelected: appState.selectedItemIDs.contains(item.id),
             isMultiSelectMode: appState.isMultiSelectMode,
+            heroHidden: heroHiddenItemID == item.id,
             context: context,
             thumbnailStore: thumbnailStore,
             onSelect: { appState.selectedItemID = item.id },
-            onOpen: {
+            onOpen: { item, sourceFrame, sourceImage in
               appState.selectedItemID = item.id
-              withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                appState.isViewingLivePhoto = false
-                appState.isViewingPhoto = true
-              }
+              onOpenAsset(item, heroItemFrames[item.id] ?? sourceFrame, sourceImage)
             },
             onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
             onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
@@ -177,13 +372,25 @@ struct LibraryGridView: View {
             onAddToAlbum: {
               appState.selectedItemIDs = [item.id]
               appState.showAddToAlbumSheet = true
+            },
+            onEditTags: {
+              appState.presentTagEditor(for: [item.id], currentTags: [], title: "Edit Tags")
             }
           )
+          .id(item.id)
         }
       }
-      .padding(.horizontal, 2)
-      .padding(.vertical, 4)
+      .padding(.horizontal, appState.photoGridPadding)
+      .padding(.vertical, appState.photoGridPadding)
     }
+    .overlay { scrubSelectionOverlay }
+    .coordinateSpace(name: photoGridCoordinateSpace)
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { itemFrames = $0 }
+    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
+      heroItemFrames = frames
+      onHeroFramesChanged(frames)
+    }
+    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
   }
 
   // MARK: - Empty / Loading
@@ -242,76 +449,41 @@ struct PhotoGridCell: View {
   let isSelected: Bool
   let isMultiSelected: Bool
   let isMultiSelectMode: Bool
+  let heroHidden: Bool
   let context: AppState.ThumbnailContext?
   let thumbnailStore: ThumbnailStore
   let onSelect: () -> Void
-  let onOpen: () -> Void
+  let onOpen: (AppState.PhotoItem, CGRect, NSImage?) -> Void
   let onFavoriteToggle: () -> Void
   let onMultiSelectToggle: () -> Void
   var onDownload: (() -> Void)?
   var onAddToAlbum: (() -> Void)?
+  var onEditTags: (() -> Void)?
 
   @State private var isHovered = false
+  private let cornerRadius: CGFloat = 10
 
   var body: some View {
-    ZStack {
-      // Thumbnail (edge-to-edge, Photos style)
-      AssetThumbnailView(
-        item: item,
-        context: context,
-        store: thumbnailStore
-      )
-      .aspectRatio(1, contentMode: .fit)
-
-      // Video duration badge (bottom-trailing, macOS Photos style)
-      if item.isVideo, !item.timeLabel.isEmpty {
-        VStack {
-          Spacer()
-          HStack {
-            Spacer()
-            Text(item.timeLabel)
-              .font(.caption2.weight(.medium).monospacedDigit())
-              .foregroundStyle(.white)
-              .padding(.horizontal, 5)
-              .padding(.vertical, 2)
-              .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
-              .padding(4)
-          }
-        }
-      }
-
-      // Bottom-leading badges (favorite, live photo, stack)
-      VStack {
-        Spacer()
-        HStack(spacing: 3) {
-          if item.isFavorite {
-            Image(systemName: "heart.fill")
-              .foregroundStyle(.white)
-          }
-          if item.isVideo {
-            Image(systemName: "video.fill")
-              .foregroundStyle(.white)
-          } else if item.isLivePhoto {
-            Image(systemName: "livephoto")
-              .foregroundStyle(.white)
-          }
-          if let count = item.stackCount, count > 0 {
-            Image(systemName: "square.stack")
-            Text("+\(count)").font(.caption2)
-          }
-          Spacer()
-        }
-        .font(.caption2)
-        .foregroundStyle(.white)
-        .padding(4)
-        .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+    contentLayer
+    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    .background {
+      GeometryReader { proxy in
+        Color.clear.preference(
+          key: PhotoGridItemFramePreferenceKey.self,
+          value: [item.id: proxy.frame(in: .named(photoGridCoordinateSpace))]
+        )
+        .preference(
+          key: PhotoHeroSourceFramePreferenceKey.self,
+          value: [item.id: proxy.frame(in: .named(photoHeroCoordinateSpaceName))]
+        )
       }
     }
     .overlay {
-      // Selection ring
-      if isSelected || isMultiSelected {
-        RoundedRectangle(cornerRadius: 2)
-          .strokeBorder(Color.accentColor, lineWidth: 3)
+      // Keep normal single-item selection visible, but reserve multi-select
+      // checkboxes and multi-selection for explicit selection mode only.
+      if isSelected || (isMultiSelectMode && isMultiSelected) {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+          .strokeBorder(Color.accentColor, lineWidth: isMultiSelectMode && isMultiSelected ? 3 : 2)
       }
     }
     .overlay(alignment: .topLeading) {
@@ -322,13 +494,12 @@ struct PhotoGridCell: View {
           .foregroundStyle(isMultiSelected ? Color.accentColor : .white)
           .shadow(color: .black.opacity(0.5), radius: 2)
           .padding(6)
-          .contentShape(Rectangle())
-          .onTapGesture { onMultiSelectToggle() }
+          .allowsHitTesting(false)
       }
     }
     .overlay(alignment: .topTrailing) {
       // Hover favorite button
-      if isHovered {
+      if isHovered && !isMultiSelectMode {
         Button {
           onFavoriteToggle()
         } label: {
@@ -344,26 +515,81 @@ struct PhotoGridCell: View {
       }
     }
     .onHover { isHovered = $0 }
-    .contentShape(Rectangle())
-    .onTapGesture(count: 2) {
-      if !isMultiSelectMode { onOpen() }
-    }
-    .onTapGesture(count: 1) {
-      if isMultiSelectMode {
-        onMultiSelectToggle()
-      } else {
-        onSelect()
-      }
-    }
     .contextMenu {
-      Button("Open") { onOpen() }
+      Button("Open") {
+        onOpen(
+          item,
+          .zero,
+          thumbnailStore.cachedImage(for: item, context: context, size: .thumbnail)
+        )
+      }
       Button(item.isFavorite ? "Unfavorite" : "Favorite") { onFavoriteToggle() }
       Divider()
       Button("Download Original") { onDownload?() }
       Button("Add to Album…") { onAddToAlbum?() }
+      Button("Edit Tags…") { onEditTags?() }
       Divider()
       Button("Get Info") { onSelect() }
     }
+  }
+
+  private var contentLayer: some View {
+    AssetThumbnailView(
+      item: item,
+      context: context,
+      store: thumbnailStore
+    )
+    .aspectRatio(item.gridAspectRatio, contentMode: .fit)
+    .opacity(heroHidden ? 0 : 1)
+    .overlay(alignment: .bottomTrailing) {
+      if item.isVideo, !item.timeLabel.isEmpty {
+        Text(item.timeLabel)
+          .font(.caption2.weight(.medium).monospacedDigit())
+          .foregroundStyle(.white)
+          .padding(.horizontal, 5)
+          .padding(.vertical, 2)
+          .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+          .padding(4)
+      }
+    }
+    .overlay(alignment: .bottomLeading) {
+      HStack(spacing: 3) {
+        if item.isFavorite {
+          Image(systemName: "heart.fill")
+            .foregroundStyle(.white)
+        }
+        if item.isVideo {
+          Image(systemName: "video.fill")
+            .foregroundStyle(.white)
+        } else if item.isLivePhoto {
+          Image(systemName: "livephoto")
+            .foregroundStyle(.white)
+        }
+        if let count = item.stackCount, count > 0 {
+          Image(systemName: "square.stack")
+          Text("+\(count)").font(.caption2)
+        }
+      }
+      .font(.caption2)
+      .foregroundStyle(.white)
+      .padding(4)
+      .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+    }
+    .contentShape(Rectangle())
+    .highPriorityGesture(TapGesture().onEnded {
+      if !isMultiSelectMode {
+        onSelect()
+      }
+    })
+    .simultaneousGesture(TapGesture(count: 2).onEnded {
+      if !isMultiSelectMode {
+        onOpen(
+          item,
+          .zero,
+          thumbnailStore.cachedImage(for: item, context: context, size: .thumbnail)
+        )
+      }
+    })
   }
 }
 #endif

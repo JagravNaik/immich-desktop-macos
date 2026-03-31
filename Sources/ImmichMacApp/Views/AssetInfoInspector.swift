@@ -23,6 +23,11 @@ struct AssetInfoInspector: View {
         cameraSection
           .padding(16)
 
+        Divider()
+
+        tagsSection
+          .padding(16)
+
         if let lat = item.latitude, let lon = item.longitude {
           Divider()
           mapSection(lat: lat, lon: lon)
@@ -33,6 +38,10 @@ struct AssetInfoInspector: View {
     .background(.ultraThinMaterial)
     .task(id: item.id) {
       await loadDetail()
+    }
+    .onChange(of: appState.showTagEditorSheet) { _, isPresented in
+      guard !isPresented else { return }
+      Task { await loadDetail() }
     }
   }
 
@@ -132,6 +141,41 @@ struct AssetInfoInspector: View {
     }
   }
 
+  // MARK: - Tags
+
+  private var tagsSection: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        Label("Tags", systemImage: "tag")
+          .font(.headline)
+        Spacer()
+        Button("Edit Tags…") {
+          appState.presentTagEditor(for: [item.id], currentTags: detail?.tags ?? [], title: "Edit Tags")
+        }
+        .buttonStyle(.plain)
+      }
+
+      if let tags = detail?.tags, !tags.isEmpty {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
+          ForEach(tags) { tag in
+            TagPill(title: tag.value, colorHex: tag.color)
+          }
+        }
+      } else if isLoading {
+        HStack {
+          ProgressView().controlSize(.small)
+          Text("Loading tags…")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      } else {
+        Text("No tags on this item.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+
   // MARK: - Map
 
   private func mapSection(lat: Double, lon: Double) -> some View {
@@ -160,16 +204,12 @@ struct AssetInfoInspector: View {
 
   private func loadDetail() async {
     guard case .remoteAsset(let id) = item.source,
-          let server = appState.thumbnailContext,
-          let session = appState.currentSession else { return }
+          appState.thumbnailContext != nil,
+          appState.currentSession != nil else { return }
     isLoading = true
     defer { isLoading = false }
-    // Build server/session from context
-    let serverObj = ImmichServer(baseURL: server.baseURL)
     do {
-      detail = try await URLSessionImmichAPIClient().fetchAssetDetail(
-        server: serverObj, session: session, assetId: id
-      )
+      detail = try await appState.fetchAssetDetail(id)
     } catch {
       // Silently fail — just show what we have
     }

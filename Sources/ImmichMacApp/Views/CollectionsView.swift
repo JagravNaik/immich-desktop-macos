@@ -142,6 +142,9 @@ struct CollectionsView: View {
         MediaTypeCard(title: "Live Photos", icon: "livephoto", count: appState.livePhotosCount, color: .orange) {
           appState.sidebarSelection = .livePhotos
         }
+        MediaTypeCard(title: "Panoramas", icon: "pano", count: appState.panoramasCount, color: .teal) {
+          appState.sidebarSelection = .panoramas
+        }
         MediaTypeCard(title: "Recently Deleted", icon: "trash", count: nil, color: .gray) {
           appState.sidebarSelection = .recentlyDeleted
         }
@@ -187,7 +190,7 @@ struct PersonCard: View {
       guard let context else { return }
       let url = context.baseURL.appending(path: "people").appending(path: person.id).appending(path: "thumbnail")
       var request = URLRequest(url: url)
-      request.addValue("Bearer \(context.accessToken)", forHTTPHeaderField: "Authorization")
+      context.apply(to: &request)
       if let (data, response) = try? await URLSession.shared.data(for: request),
          let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
         self.thumbnail = NSImage(data: data)
@@ -265,7 +268,8 @@ struct MemoryCard: View {
         country: nil,
         stackCount: nil,
         timeBucketKey: "",
-        projectionType: nil
+        projectionType: nil,
+        aspectRatio: 1
       )
       coverImage = await thumbnailStore.loadImage(for: item, context: context, size: .thumbnail)
     }
@@ -328,7 +332,7 @@ struct AlbumCard: View {
       components?.queryItems = [URLQueryItem(name: "size", value: "preview")]
       guard let url = components?.url else { return }
       var request = URLRequest(url: url)
-      request.addValue("Bearer \(context.accessToken)", forHTTPHeaderField: "Authorization")
+      context.apply(to: &request)
       if let (data, response) = try? await URLSession.shared.data(for: request),
          let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
         self.coverImage = NSImage(data: data)

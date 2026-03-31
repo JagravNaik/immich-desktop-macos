@@ -8,6 +8,9 @@ struct PhotoDetailView: View {
   @ObservedObject var appState: AppState
   @ObservedObject var thumbnailStore: ThumbnailStore
   @ObservedObject var editingPipeline: PhotoEditingPipeline
+  let initialDisplayImage: NSImage?
+  let isHeroTransitioning: Bool
+  let onDismiss: () -> Void
 
   @State private var image: NSImage?
   @State private var currentItemID: String?
@@ -22,35 +25,60 @@ struct PhotoDetailView: View {
           .ignoresSafeArea()
 
         // Main content
-        contentView(for: item)
-          .overlay(alignment: .topLeading) {
-            if item.isLivePhoto {
-              liveBadge
-                .padding(16)
-            }
+        Group {
+          if item.isPanorama {
+            contentView(for: item)
+              .overlay(alignment: .topLeading) {
+                if item.isLivePhoto {
+                  liveBadge
+                    .padding(16)
+                }
+              }
+              .offset(dragOffset)
+          } else {
+            contentView(for: item)
+              .overlay(alignment: .topLeading) {
+                if item.isLivePhoto {
+                  liveBadge
+                    .padding(16)
+                }
+              }
+              .offset(dragOffset)
+              .gesture(dismissDragGesture)
           }
-          .offset(dragOffset)
-          .gesture(dismissDragGesture)
+        }
 
         // Keyboard shortcuts (invisible)
         keyboardShortcuts
       }
-      .transition(.opacity.combined(with: .scale(scale: 0.95)))
+      .transition(.opacity)
       .onChange(of: item.id) { _, newID in
-        // Show cached thumbnail immediately to avoid blank frame
-        if let cached = thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext) {
-          image = cached
-        }
+        image = initialDisplayImage
+          ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext)
         currentItemID = newID
         isLoading = true
       }
-      .task(id: item.id) {
+      .task(id: "\(item.id)::\(isHeroTransitioning)") {
         currentItemID = item.id
         isLoading = true
+
+        if let initialDisplayImage {
+          self.image = initialDisplayImage
+        } else if let cached = thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext) {
+          self.image = cached
+        }
+
         defer {
           if currentItemID == item.id {
             isLoading = false
           }
+        }
+
+        if isHeroTransitioning {
+          if let img = self.image {
+            editingPipeline.setSourceImage(img)
+          }
+          return
         }
 
         // Step 1: Show cached thumbnail immediately (already loaded from grid)
@@ -95,8 +123,21 @@ struct PhotoDetailView: View {
           .resizable()
           .scaledToFit()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else if let image {
-        Image(nsImage: image)
+      } else if item.isPanorama, let image, !isHeroTransitioning {
+        ZStack(alignment: .bottomLeading) {
+          PanoramaSceneView(image: image)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+          Label("Drag to look around. Scroll to zoom.", systemImage: "pano")
+            .font(.caption)
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.4), in: Capsule())
+            .padding(18)
+        }
+      } else if let displayImage = displayImage(for: item) {
+        Image(nsImage: displayImage)
           .resizable()
           .scaledToFit()
           .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -111,22 +152,22 @@ struct PhotoDetailView: View {
       }
 
       // Video layer
-      if item.isVideo {
+      if item.isVideo, !isHeroTransitioning {
         // Regular video: always show the player
         if let videoURL = videoPlaybackURL(for: item) {
           AuthenticatedVideoPlayer(
             url: videoURL,
-            accessToken: appState.thumbnailContext?.accessToken ?? "",
+            authHeaderFields: appState.thumbnailContext?.assetHeaderFields ?? [:],
             showControls: true,
             onPlaybackEnded: nil
           )
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-      } else if item.isLivePhoto, let videoURL = livePhotoPlaybackURL(for: item) {
+      } else if item.isLivePhoto, let videoURL = livePhotoPlaybackURL(for: item), !isHeroTransitioning {
         // Live photo: keep player mounted, fade with opacity
         AuthenticatedVideoPlayer(
           url: videoURL,
-          accessToken: appState.thumbnailContext?.accessToken ?? "",
+          authHeaderFields: appState.thumbnailContext?.assetHeaderFields ?? [:],
           showControls: false,
           isPlaying: appState.isViewingLivePhoto,
           onPlaybackEnded: {
@@ -141,6 +182,16 @@ struct PhotoDetailView: View {
         .allowsHitTesting(appState.isViewingLivePhoto)
       }
     }
+  }
+
+  private func displayImage(for item: AppState.PhotoItem) -> NSImage? {
+    if let image {
+      return image
+    }
+    if let initialDisplayImage {
+      return initialDisplayImage
+    }
+    return thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
   }
 
   // MARK: - Live Photo Badge
@@ -177,10 +228,7 @@ struct PhotoDetailView: View {
       .onEnded { value in
         let magnitude = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
         if magnitude > 120 {
-          withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-            appState.isViewingPhoto = false
-            appState.isViewingLivePhoto = false
-          }
+          onDismiss()
         }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
           dragOffset = .zero
@@ -192,21 +240,11 @@ struct PhotoDetailView: View {
 
   private var keyboardShortcuts: some View {
     Group {
-      Button("") {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-          appState.isViewingPhoto = false
-          appState.isViewingLivePhoto = false
-        }
-      }
+      Button("") { onDismiss() }
       .keyboardShortcut(.escape, modifiers: [])
       .opacity(0)
 
-      Button("") {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-          appState.isViewingPhoto = false
-          appState.isViewingLivePhoto = false
-        }
-      }
+      Button("") { onDismiss() }
       .keyboardShortcut(.space, modifiers: [])
       .opacity(0)
 

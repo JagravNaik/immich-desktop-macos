@@ -127,7 +127,16 @@ struct LoginCard: View {
           .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
       }
 
-      if appState.passwordLoginEnabled {
+      Picker("Sign in with", selection: $appState.authMethod) {
+        ForEach(AppState.AuthMethod.allCases) { method in
+          Text(method.rawValue).tag(method)
+        }
+      }
+      .pickerStyle(.segmented)
+
+      if appState.authMethod == .apiKey {
+        apiKeyFields
+      } else if appState.passwordLoginEnabled {
         passwordFields
       } else {
         noPasswordLogin
@@ -173,6 +182,33 @@ struct LoginCard: View {
         .disabled(appState.isSigningIn)
       }
     }
+  }
+
+  private var apiKeyFields: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text("Use an Immich API key to sign in without a password.")
+        .font(.callout)
+        .foregroundStyle(.secondary)
+
+      SecureField("API Key", text: $appState.apiKeyText)
+        .textFieldStyle(.roundedBorder)
+
+      Button {
+        Task { await appState.signInWithAPIKey() }
+      } label: {
+        if appState.isSigningIn {
+          ProgressView().frame(maxWidth: .infinity)
+        } else {
+          Text("Use API Key").frame(maxWidth: .infinity)
+        }
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .disabled(appState.isSigningIn)
+    }
+    .padding(16)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
   }
 
   private var noPasswordLogin: some View {

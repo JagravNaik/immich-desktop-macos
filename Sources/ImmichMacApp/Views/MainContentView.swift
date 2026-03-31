@@ -2,6 +2,8 @@
 import SwiftUI
 import AppKit
 
+let photoHeroCoordinateSpaceName = "ImmichPhotoHero"
+
 // MARK: - Main Content View (Photos-style three-pane layout)
 
 struct MainContentView: View {
@@ -9,6 +11,29 @@ struct MainContentView: View {
   @StateObject private var thumbnailStore = ThumbnailStore()
   @StateObject private var editingPipeline = PhotoEditingPipeline()
   @State private var spacebarMonitor: Any?
+  @State private var heroTransition: HeroTransitionState?
+  @State private var heroItemFrames: [String: CGRect] = [:]
+  @State private var isHeroExpanded = false
+
+  struct HeroTransitionState: Equatable {
+    enum Direction: Equatable {
+      case opening
+      case closing
+    }
+
+    let itemID: String
+    let direction: Direction
+    let sourceFrame: CGRect
+    let image: NSImage
+    let aspectRatio: CGFloat
+
+    static func == (lhs: HeroTransitionState, rhs: HeroTransitionState) -> Bool {
+      lhs.itemID == rhs.itemID
+        && lhs.direction == rhs.direction
+        && lhs.sourceFrame == rhs.sourceFrame
+        && lhs.aspectRatio == rhs.aspectRatio
+    }
+  }
 
   var body: some View {
     ZStack {
@@ -54,6 +79,7 @@ struct MainContentView: View {
     .navigationSplitViewStyle(.balanced)
     .background(SplitViewDividerConfigurator())
     .onChange(of: appState.sidebarSelection) { _, _ in
+      heroItemFrames = [:]
       dismissViewer()
     }
     .sheet(isPresented: $appState.showCreateAlbumSheet) {
@@ -61,6 +87,18 @@ struct MainContentView: View {
     }
     .sheet(isPresented: $appState.showAddToAlbumSheet) {
       AddToAlbumSheet(appState: appState)
+    }
+    .sheet(isPresented: $appState.showAPIKeysSheet) {
+      APIKeysSheet(appState: appState)
+    }
+    .sheet(isPresented: $appState.showTagsSheet) {
+      TagsSheet(appState: appState)
+    }
+    .sheet(isPresented: $appState.showTagEditorSheet) {
+      AssetTagEditorSheet(appState: appState)
+    }
+    .sheet(isPresented: $appState.showAdminUsersSheet) {
+      AdminUsersSheet(appState: appState)
     }
   }
 
@@ -70,6 +108,8 @@ struct MainContentView: View {
       appState.isViewingLivePhoto = false
       appState.isEditing = false
     }
+    heroTransition = nil
+    isHeroExpanded = false
   }
 
   // MARK: - Detail Area
@@ -77,42 +117,79 @@ struct MainContentView: View {
   @ViewBuilder
   private var detailArea: some View {
     ZStack {
-      if appState.isViewingPhoto, let item = appState.selectedItem {
-        // Photo viewer with hero transition
+      VStack(spacing: 0) {
+        contentHeader
+        routedContentView
+      }
+      .background(.background)
+      .opacity(browserOpacity)
+      .allowsHitTesting(!shouldPresentViewer)
+
+      if shouldPresentViewer, let item = appState.selectedItem {
         PhotoDetailView(
           appState: appState,
           thumbnailStore: thumbnailStore,
-          editingPipeline: editingPipeline
+          editingPipeline: editingPipeline,
+          initialDisplayImage: heroSeedImage(for: item),
+          isHeroTransitioning: heroTransition?.itemID == item.id,
+          onDismiss: closeViewer
         )
+        .opacity(viewerOpacity)
+        .allowsHitTesting(appState.isViewingPhoto && heroTransition == nil)
 
-        // Editing sidebar (right side, slides in)
         if appState.isEditing {
           HStack(spacing: 0) {
             Spacer()
             EditingSidebar(appState: appState, pipeline: editingPipeline, item: item)
               .transition(.move(edge: .trailing))
           }
+          .opacity(viewerOpacity)
         }
-      } else {
-        // Browser view
-        VStack(spacing: 0) {
-          contentHeader
-          routedContentView
-        }
-        .background(.background)
+      }
+
+      if let heroTransition {
+        HeroOpenOverlay(
+          heroState: heroTransition,
+          isExpanded: isHeroExpanded
+        )
+        .zIndex(3)
       }
     }
+    .coordinateSpace(name: photoHeroCoordinateSpaceName)
     .searchable(text: $appState.searchText, placement: .toolbar, prompt: "Search")
     .onChange(of: appState.searchText) { _, newValue in
       appState.performSmartSearch(query: newValue)
     }
     .toolbar {
-      if appState.isViewingPhoto {
+      if shouldPresentViewer {
         viewerToolbar
       } else {
         browserToolbar
       }
     }
+  }
+
+  private var shouldPresentViewer: Bool {
+    appState.isViewingPhoto || heroTransition != nil
+  }
+
+  private var browserOpacity: Double {
+    if heroTransition != nil {
+      return isHeroExpanded ? 0.04 : 1
+    }
+    return appState.isViewingPhoto ? 0 : 1
+  }
+
+  private var viewerOpacity: Double {
+    if heroTransition != nil {
+      return isHeroExpanded ? 1 : 0
+    }
+    return appState.isViewingPhoto ? 1 : 0
+  }
+
+  private var activeHeroHiddenItemID: String? {
+    guard heroTransition?.direction == .opening else { return nil }
+    return heroTransition?.itemID
   }
 
   // MARK: - Content Header (Photos-style)
@@ -166,21 +243,57 @@ struct MainContentView: View {
     case .allAlbums:
       AllAlbumsView(appState: appState, thumbnailStore: thumbnailStore)
     case .album(let id), .pinnedAlbum(let id):
-      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
         .task(id: id) { await appState.loadAlbum(id) }
     case .person(let id):
-      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
         .task(id: id) { await appState.loadPerson(id) }
     case .sharedLink(let id):
-      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
         .task(id: id) { appState.loadSharedLink(id) }
     case .memory(let id):
-      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
         .task(id: id) { appState.loadMemory(id) }
     case .recentlyDeleted:
-      RecentlyDeletedView(appState: appState, thumbnailStore: thumbnailStore)
+      RecentlyDeletedView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
     default:
-      LibraryGridView(appState: appState, thumbnailStore: thumbnailStore)
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
     }
   }
 
@@ -230,6 +343,18 @@ struct MainContentView: View {
         .disabled(appState.selectedItemIDs.isEmpty)
 
         Button {
+          appState.presentTagEditor(
+            for: Array(appState.selectedItemIDs),
+            currentTags: [],
+            title: "Tag Selected Items"
+          )
+        } label: {
+          Image(systemName: "tag")
+        }
+        .help("Add Tags")
+        .disabled(appState.selectedItemIDs.isEmpty)
+
+        Button {
           appState.batchTrash()
         } label: {
           Image(systemName: "trash")
@@ -252,6 +377,15 @@ struct MainContentView: View {
       }
       .help("Import Files")
 
+      if showsPhotoGridZoomControl {
+        PhotoGridZoomControl(
+          canZoomOut: appState.canZoomOutPhotoGrid,
+          canZoomIn: appState.canZoomInPhotoGrid,
+          onZoomOut: appState.zoomOutPhotoGrid,
+          onZoomIn: appState.zoomInPhotoGrid
+        )
+      }
+
       // View options
       Menu {
         Button("Hide Screenshots") {}
@@ -273,11 +407,7 @@ struct MainContentView: View {
   private var viewerToolbar: some ToolbarContent {
     ToolbarItem(placement: .navigation) {
       Button {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-          appState.isViewingPhoto = false
-          appState.isViewingLivePhoto = false
-          appState.isEditing = false
-        }
+        closeViewer()
       } label: {
         Image(systemName: "chevron.left")
           .font(.system(size: 16, weight: .medium))
@@ -326,6 +456,15 @@ struct MainContentView: View {
         }
 
         Button {
+          Task {
+            await presentTagEditor(for: item.id)
+          }
+        } label: {
+          Image(systemName: "tag")
+        }
+        .help("Edit Tags")
+
+        Button {
           appState.downloadAsset(item.id)
         } label: {
           Image(systemName: "arrow.down.circle")
@@ -358,6 +497,122 @@ struct MainContentView: View {
     }
   }
 
+  private func handleOpenAsset(_ item: AppState.PhotoItem, sourceFrame: CGRect, sourceImage: NSImage?) {
+    appState.selectedItemID = item.id
+    appState.isViewingLivePhoto = false
+    appState.isEditing = false
+
+    guard let sourceImage, sourceFrame != .zero else {
+      withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+        appState.isViewingPhoto = true
+      }
+      return
+    }
+
+    heroTransition = HeroTransitionState(
+      itemID: item.id,
+      direction: .opening,
+      sourceFrame: sourceFrame,
+      image: sourceImage,
+      aspectRatio: preferredHeroAspectRatio(for: item, image: sourceImage)
+    )
+    isHeroExpanded = false
+
+    withAnimation(.easeOut(duration: 0.12)) {
+      appState.isViewingPhoto = true
+    }
+
+    DispatchQueue.main.async {
+      guard heroTransition?.itemID == item.id else { return }
+      withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+        isHeroExpanded = true
+      }
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+      guard heroTransition?.itemID == item.id else { return }
+      heroTransition = nil
+      isHeroExpanded = false
+    }
+  }
+
+  private func closeViewer() {
+    guard appState.isViewingPhoto else { return }
+
+    appState.isViewingLivePhoto = false
+    appState.isEditing = false
+
+    guard let item = appState.selectedItem,
+          let destinationFrame = heroItemFrames[item.id],
+          destinationFrame != .zero,
+          let heroImage = bestAvailableHeroImage(for: item)
+    else {
+      withAnimation(.easeOut(duration: 0.18)) {
+        appState.isViewingPhoto = false
+      }
+      return
+    }
+
+    heroTransition = HeroTransitionState(
+      itemID: item.id,
+      direction: .closing,
+      sourceFrame: destinationFrame,
+      image: heroImage,
+      aspectRatio: preferredHeroAspectRatio(for: item, image: heroImage)
+    )
+    isHeroExpanded = true
+
+    DispatchQueue.main.async {
+      guard heroTransition?.itemID == item.id else { return }
+      withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
+        appState.isViewingPhoto = false
+        isHeroExpanded = false
+      }
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
+      guard heroTransition?.itemID == item.id else { return }
+      heroTransition = nil
+      isHeroExpanded = false
+    }
+  }
+
+  private func heroSeedImage(for item: AppState.PhotoItem) -> NSImage? {
+    guard heroTransition?.itemID == item.id else { return nil }
+    return heroTransition?.image
+  }
+
+  private func bestAvailableHeroImage(for item: AppState.PhotoItem) -> NSImage? {
+    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .original)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
+      ?? heroTransition?.image
+  }
+
+  private func preferredHeroAspectRatio(for item: AppState.PhotoItem, image: NSImage?) -> CGFloat {
+    if let image {
+      let size = image.size
+      if size.width > 0, size.height > 0 {
+        return size.width / size.height
+      }
+    }
+
+    if item.aspectRatio.isFinite, item.aspectRatio > 0 {
+      return item.aspectRatio
+    }
+
+    return item.gridAspectRatio
+  }
+
+  private var showsPhotoGridZoomControl: Bool {
+    switch appState.sidebarSelection {
+    case .collections, .sharedLinks, .allAlbums:
+      return false
+    default:
+      return true
+    }
+  }
+
   private func installSpacebarHandler() {
     guard spacebarMonitor == nil else { return }
     spacebarMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -367,13 +622,12 @@ struct MainContentView: View {
           return event
         }
         if appState.appPhase == .library, appState.selectedItem != nil {
-          withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-            if !appState.isViewingPhoto {
+          if appState.isViewingPhoto {
+            closeViewer()
+          } else {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
               appState.isViewingLivePhoto = false
-            }
-            appState.isViewingPhoto.toggle()
-            if !appState.isViewingPhoto {
-              appState.isEditing = false
+              appState.isViewingPhoto = true
             }
           }
           return nil
@@ -387,6 +641,15 @@ struct MainContentView: View {
     guard let spacebarMonitor else { return }
     NSEvent.removeMonitor(spacebarMonitor)
     self.spacebarMonitor = nil
+  }
+
+  private func presentTagEditor(for assetID: String) async {
+    do {
+      let detail = try await appState.fetchAssetDetail(assetID)
+      appState.presentTagEditor(for: [assetID], currentTags: detail.tags, title: "Edit Tags")
+    } catch {
+      appState.presentTagEditor(for: [assetID], currentTags: [], title: "Edit Tags")
+    }
   }
 }
 
@@ -526,10 +789,21 @@ struct AllAlbumsView: View {
 struct RecentlyDeletedView: View {
   @ObservedObject var appState: AppState
   @ObservedObject var thumbnailStore: ThumbnailStore
+  let heroHiddenItemID: String?
+  let onOpenAsset: (AppState.PhotoItem, CGRect, NSImage?) -> Void
+  let onHeroFramesChanged: ([String: CGRect]) -> Void
 
-  private let gridColumns = [
-    GridItem(.adaptive(minimum: 160, maximum: 240), spacing: 2),
-  ]
+  private var gridColumns: [GridItem] {
+    [
+      GridItem(
+        .adaptive(
+          minimum: appState.photoGridThumbnailWidth,
+          maximum: appState.photoGridThumbnailWidth
+        ),
+        spacing: appState.photoGridSpacing
+      ),
+    ]
+  }
 
   var body: some View {
     Group {
@@ -557,22 +831,18 @@ struct RecentlyDeletedView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         ScrollView {
-          LazyVGrid(columns: gridColumns, spacing: 2) {
+          LazyVGrid(columns: gridColumns, spacing: appState.photoGridSpacing) {
             ForEach(appState.trashedItems) { item in
               PhotoGridCell(
                 item: item,
                 isSelected: item.id == appState.selectedItemID,
                 isMultiSelected: false,
                 isMultiSelectMode: false,
+                heroHidden: heroHiddenItemID == item.id,
                 context: appState.thumbnailContext,
                 thumbnailStore: thumbnailStore,
                 onSelect: { appState.selectedItemID = item.id },
-                onOpen: {
-                  appState.selectedItemID = item.id
-                  withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
-                    appState.isViewingPhoto = true
-                  }
-                },
+                onOpen: { _, sourceFrame, sourceImage in onOpenAsset(item, sourceFrame, sourceImage) },
                 onFavoriteToggle: {},
                 onMultiSelectToggle: {}
               )
@@ -581,11 +851,101 @@ struct RecentlyDeletedView: View {
               }
             }
           }
-          .padding(12)
+          .padding(.horizontal, appState.photoGridPadding)
+          .padding(.vertical, appState.photoGridPadding)
         }
+        .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { onHeroFramesChanged($0) }
       }
     }
     .task { await appState.loadTrashedAssets() }
+  }
+}
+
+struct PhotoGridZoomControl: View {
+  let canZoomOut: Bool
+  let canZoomIn: Bool
+  let onZoomOut: () -> Void
+  let onZoomIn: () -> Void
+
+  var body: some View {
+    HStack(spacing: 0) {
+      toolbarButton(systemName: "minus", isEnabled: canZoomOut, action: onZoomOut)
+        .help("Show More Photos")
+
+      Rectangle()
+        .fill(.quaternary)
+        .frame(width: 1, height: 16)
+
+      toolbarButton(systemName: "plus", isEnabled: canZoomIn, action: onZoomIn)
+        .help("Show Fewer Photos")
+    }
+    .padding(2)
+    .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+    .overlay {
+      Capsule(style: .continuous)
+        .strokeBorder(.quaternary.opacity(0.9))
+    }
+  }
+
+  private func toolbarButton(systemName: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: systemName)
+        .font(.system(size: 11, weight: .semibold))
+        .frame(width: 28, height: 24)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+    .disabled(!isEnabled)
+  }
+}
+
+private struct HeroOpenOverlay: View {
+  let heroState: MainContentView.HeroTransitionState
+  let isExpanded: Bool
+
+  var body: some View {
+    GeometryReader { proxy in
+      let targetFrame = targetFrame(in: proxy.size)
+      let activeFrame = isExpanded ? targetFrame : heroState.sourceFrame
+
+      ZStack(alignment: .topLeading) {
+        Color.black
+          .opacity(isExpanded ? 0.96 : 0)
+          .ignoresSafeArea()
+
+        Image(nsImage: heroState.image)
+          .resizable()
+          .scaledToFit()
+          .frame(width: activeFrame.width, height: activeFrame.height)
+          .clipShape(RoundedRectangle(cornerRadius: isExpanded ? 0 : 10, style: .continuous))
+          .shadow(color: .black.opacity(isExpanded ? 0 : 0.08), radius: isExpanded ? 0 : 8, y: isExpanded ? 0 : 4)
+          .position(x: activeFrame.midX, y: activeFrame.midY)
+      }
+      .animation(nil, value: heroState.itemID)
+    }
+    .allowsHitTesting(false)
+  }
+
+  private func targetFrame(in size: CGSize) -> CGRect {
+    let horizontalInset: CGFloat = 44
+    let verticalInset: CGFloat = 36
+    let maxWidth = max(size.width - horizontalInset * 2, 200)
+    let maxHeight = max(size.height - verticalInset * 2, 200)
+    let aspectRatio = heroState.aspectRatio.isFinite && heroState.aspectRatio > 0
+      ? heroState.aspectRatio
+      : 1
+
+    var width = maxWidth
+    var height = width / aspectRatio
+
+    if height > maxHeight {
+      height = maxHeight
+      width = height * aspectRatio
+    }
+
+    let origin = CGPoint(x: (size.width - width) / 2, y: (size.height - height) / 2)
+    return CGRect(origin: origin, size: CGSize(width: width, height: height))
   }
 }
 

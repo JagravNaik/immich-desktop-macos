@@ -236,6 +236,9 @@ struct SidebarView: View {
           Text(session.userEmail)
             .font(.caption)
             .foregroundStyle(.secondary)
+          Label(session.authenticationModeLabel, systemImage: session.usesAPIKey ? "key.fill" : "person.crop.circle.badge.checkmark")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
         }
       }
 
@@ -249,6 +252,23 @@ struct SidebarView: View {
         Label("Immich \(version)", systemImage: "checkmark.seal")
           .font(.caption)
           .foregroundStyle(.secondary)
+      }
+
+      Button("API Keys") {
+        appState.showAPIKeysSheet = true
+      }
+      .buttonStyle(.plain)
+
+      Button("Tags") {
+        appState.showTagsSheet = true
+      }
+      .buttonStyle(.plain)
+
+      if let session = appState.currentSession, session.isAdmin || session.usesAPIKey || appState.hasAdminAccess {
+        Button("Admin Users") {
+          appState.showAdminUsersSheet = true
+        }
+        .buttonStyle(.plain)
       }
 
       Button("Sign Out", role: .destructive) {

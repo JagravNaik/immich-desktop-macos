@@ -48,6 +48,7 @@ public protocol ImmichAPIClient: Sendable {
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo
   func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration
   func login(server: ImmichServer, email: String, password: String) async throws -> UserSession
+  func loginWithAPIKey(server: ImmichServer, apiKey: String) async throws -> UserSession
   func fetchTimelineBuckets(server: ImmichServer, session: UserSession) async throws -> [TimelineBucketSummary]
   func fetchTimelineBucket(server: ImmichServer, session: UserSession, timeBucket: String) async throws -> [RemoteTimelineAsset]
   func fetchAlbums(server: ImmichServer, session: UserSession) async throws -> [Album]
@@ -72,6 +73,29 @@ public protocol ImmichAPIClient: Sendable {
   func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
   func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
   func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws
+  func fetchAPIKeys(server: ImmichServer, session: UserSession) async throws -> [ImmichAPIKey]
+  func createAPIKey(server: ImmichServer, session: UserSession, name: String, permissions: [String]) async throws -> CreatedAPIKey
+  func deleteAPIKey(server: ImmichServer, session: UserSession, id: String) async throws
+  func fetchTags(server: ImmichServer, session: UserSession) async throws -> [ImmichTag]
+  func upsertTags(server: ImmichServer, session: UserSession, tagNames: [String]) async throws -> [ImmichTag]
+  func tagAssets(server: ImmichServer, session: UserSession, assetIDs: [String], tagIDs: [String]) async throws
+  func untagAssets(server: ImmichServer, session: UserSession, tagID: String, assetIDs: [String]) async throws
+  func deleteTag(server: ImmichServer, session: UserSession, id: String) async throws
+  func fetchAdminUsers(server: ImmichServer, session: UserSession, includeDeleted: Bool) async throws -> [AdminUser]
+  func createAdminUser(
+    server: ImmichServer,
+    session: UserSession,
+    name: String,
+    email: String,
+    password: String,
+    isAdmin: Bool,
+    shouldChangePassword: Bool,
+    quotaSizeInBytes: Int?,
+    storageLabel: String?,
+    notify: Bool
+  ) async throws -> AdminUser
+  func deleteAdminUser(server: ImmichServer, session: UserSession, id: String, force: Bool) async throws -> AdminUser
+  func restoreAdminUser(server: ImmichServer, session: UserSession, id: String) async throws -> AdminUser
   func startOAuth(server: ImmichServer, redirectUri: String) async throws -> String
   func finishOAuth(server: ImmichServer, oauthCallbackUrl: String) async throws -> UserSession
 }
@@ -147,6 +171,22 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       userEmail: response.userEmail,
       userID: response.userID,
       userName: response.name
+    )
+  }
+
+  public func loginWithAPIKey(server: ImmichServer, apiKey: String) async throws -> UserSession {
+    let auth = SessionAuthentication.apiKey(apiKey)
+    let apiKeyRecord = try await fetchCurrentAPIKey(server: server, apiKey: apiKey)
+    let currentUser = try? await fetchCurrentUser(server: server, authentication: auth)
+    let isAdmin = (try? await determineAdminAccess(server: server, authentication: auth)) ?? false
+
+    return UserSession(
+      apiKey: apiKey,
+      isAdmin: isAdmin,
+      shouldChangePassword: false,
+      userEmail: currentUser?.email ?? "API key session",
+      userID: currentUser?.id ?? "api-key-\(apiKeyRecord.id)",
+      userName: currentUser?.name ?? apiKeyRecord.name
     )
   }
 
@@ -572,6 +612,145 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     }
   }
 
+  // MARK: - API Keys
+
+  public func fetchAPIKeys(server: ImmichServer, session: UserSession) async throws -> [ImmichAPIKey] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "api-keys"), session: session)
+    let response: [APIKeyResponse] = try await perform(request)
+    return response.map { $0.toModel() }
+  }
+
+  public func createAPIKey(
+    server: ImmichServer,
+    session: UserSession,
+    name: String,
+    permissions: [String]
+  ) async throws -> CreatedAPIKey {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "api-keys"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(APIKeyCreateRequest(name: name, permissions: permissions))
+    let response: APIKeyCreateResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  public func deleteAPIKey(server: ImmichServer, session: UserSession, id: String) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "api-keys").appending(path: id),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    try await performWithoutResponse(request, errorMessage: "Failed to delete API key")
+  }
+
+  // MARK: - Tags
+
+  public func fetchTags(server: ImmichServer, session: UserSession) async throws -> [ImmichTag] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "tags"), session: session)
+    let response: [TagResponse] = try await perform(request)
+    return response.map { $0.toModel() }.sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }
+  }
+
+  public func upsertTags(server: ImmichServer, session: UserSession, tagNames: [String]) async throws -> [ImmichTag] {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "tags"), session: session)
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(TagUpsertRequest(tags: tagNames))
+    let response: [TagResponse] = try await perform(request)
+    return response.map { $0.toModel() }
+  }
+
+  public func tagAssets(server: ImmichServer, session: UserSession, assetIDs: [String], tagIDs: [String]) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "tags/assets"), session: session)
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(TagBulkAssetsRequest(assetIds: assetIDs, tagIds: tagIDs))
+    let _: TagBulkAssetsResponse = try await perform(request)
+  }
+
+  public func untagAssets(server: ImmichServer, session: UserSession, tagID: String, assetIDs: [String]) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "tags").appending(path: tagID).appending(path: "assets"),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(BulkIdsRequest(ids: assetIDs))
+    let _: [BulkIDResponse] = try await perform(request)
+  }
+
+  public func deleteTag(server: ImmichServer, session: UserSession, id: String) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "tags").appending(path: id),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    try await performWithoutResponse(request, errorMessage: "Failed to delete tag")
+  }
+
+  // MARK: - Admin Users
+
+  public func fetchAdminUsers(server: ImmichServer, session: UserSession, includeDeleted: Bool) async throws -> [AdminUser] {
+    var components = URLComponents(url: server.baseURL.appending(path: "admin/users"), resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "withDeleted", value: includeDeleted ? "true" : "false")]
+    let request = authorizedRequest(url: components?.url ?? server.baseURL.appending(path: "admin/users"), session: session)
+    let response: [AdminUserResponse] = try await perform(request)
+    return response.map { $0.toModel() }
+  }
+
+  public func createAdminUser(
+    server: ImmichServer,
+    session: UserSession,
+    name: String,
+    email: String,
+    password: String,
+    isAdmin: Bool,
+    shouldChangePassword: Bool,
+    quotaSizeInBytes: Int?,
+    storageLabel: String?,
+    notify: Bool
+  ) async throws -> AdminUser {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "admin/users"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(
+      AdminUserCreateRequest(
+        email: email,
+        isAdmin: isAdmin,
+        name: name,
+        notify: notify,
+        password: password,
+        quotaSizeInBytes: quotaSizeInBytes,
+        shouldChangePassword: shouldChangePassword,
+        storageLabel: storageLabel
+      )
+    )
+    let response: AdminUserResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  public func deleteAdminUser(server: ImmichServer, session: UserSession, id: String, force: Bool) async throws -> AdminUser {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "admin/users").appending(path: id),
+      session: session
+    )
+    request.httpMethod = "DELETE"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(AdminUserDeleteRequest(force: force))
+    let response: AdminUserResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  public func restoreAdminUser(server: ImmichServer, session: UserSession, id: String) async throws -> AdminUser {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "admin/users").appending(path: id).appending(path: "restore"),
+      session: session
+    )
+    request.httpMethod = "POST"
+    let response: AdminUserResponse = try await perform(request)
+    return response.toModel()
+  }
+
   private func fetchAboutInfo(server: ImmichServer, apiKey: String) async throws -> ServerInfo {
     var request = URLRequest(url: server.baseURL.appending(path: "server/about"))
     request.httpMethod = "GET"
@@ -590,8 +769,35 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   private func authorizedRequest(url: URL, session: UserSession) -> URLRequest {
     var request = URLRequest(url: url)
-    request.addValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+    request.addValue(session.authHeaderValue, forHTTPHeaderField: session.authHeaderField)
     return request
+  }
+
+  private func request(url: URL, authentication: SessionAuthentication) -> URLRequest {
+    var request = URLRequest(url: url)
+    request.addValue(authentication.headerValue, forHTTPHeaderField: authentication.headerField)
+    return request
+  }
+
+  private func fetchCurrentAPIKey(server: ImmichServer, apiKey: String) async throws -> ImmichAPIKey {
+    var request = URLRequest(url: server.baseURL.appending(path: "api-keys/me"))
+    request.httpMethod = "GET"
+    request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
+    let response: APIKeyResponse = try await perform(request)
+    return response.toModel()
+  }
+
+  private func fetchCurrentUser(server: ImmichServer, authentication: SessionAuthentication) async throws -> CurrentUserResponse {
+    let request = request(url: server.baseURL.appending(path: "users/me"), authentication: authentication)
+    return try await perform(request)
+  }
+
+  private func determineAdminAccess(server: ImmichServer, authentication: SessionAuthentication) async throws -> Bool {
+    var components = URLComponents(url: server.baseURL.appending(path: "admin/users"), resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "withDeleted", value: "false")]
+    let request = request(url: components?.url ?? server.baseURL.appending(path: "admin/users"), authentication: authentication)
+    let _: [AdminUserResponse] = try await perform(request)
+    return true
   }
 
   private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
@@ -619,6 +825,16 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       immichLog("[ImmichAPI] Decode FAILED for \(requestURL): \(error)")
       immichLog("[ImmichAPI] Body (500 chars): \(bodySnippet)")
       throw ImmichAPIError.decodingFailed(url: requestURL, detail: error.localizedDescription)
+    }
+  }
+
+  private func performWithoutResponse(_ request: URLRequest, errorMessage: String) async throws {
+    let (data, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      if let httpResponse = response as? HTTPURLResponse {
+        throw apiError(from: data, statusCode: httpResponse.statusCode)
+      }
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: errorMessage)
     }
   }
 
@@ -674,6 +890,139 @@ private struct LoginResponse: Decodable {
     case shouldChangePassword
     case userEmail
     case userID = "userId"
+  }
+}
+
+private struct CurrentUserResponse: Decodable {
+  let email: String
+  let id: String
+  let name: String
+}
+
+private struct APIKeyCreateRequest: Encodable {
+  let name: String?
+  let permissions: [String]
+}
+
+private struct APIKeyResponse: Decodable {
+  let createdAt: String
+  let id: String
+  let name: String
+  let permissions: [String]
+  let updatedAt: String
+
+  func toModel() -> ImmichAPIKey {
+    ImmichAPIKey(
+      id: id,
+      name: name,
+      permissions: permissions,
+      createdAt: TimelineBucketMapper.parseDate(createdAt) ?? .distantPast,
+      updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? .distantPast
+    )
+  }
+}
+
+private struct APIKeyCreateResponse: Decodable {
+  let apiKey: APIKeyResponse
+  let secret: String
+
+  func toModel() -> CreatedAPIKey {
+    CreatedAPIKey(apiKey: apiKey.toModel(), secret: secret)
+  }
+}
+
+private struct TagResponse: Decodable {
+  let color: String?
+  let createdAt: String
+  let id: String
+  let name: String
+  let parentId: String?
+  let updatedAt: String
+  let value: String
+
+  func toModel() -> ImmichTag {
+    ImmichTag(
+      id: id,
+      name: name,
+      value: value,
+      color: color,
+      parentID: parentId,
+      createdAt: TimelineBucketMapper.parseDate(createdAt) ?? .distantPast,
+      updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? .distantPast
+    )
+  }
+}
+
+private struct TagUpsertRequest: Encodable {
+  let tags: [String]
+}
+
+private struct TagBulkAssetsRequest: Encodable {
+  let assetIds: [String]
+  let tagIds: [String]
+}
+
+private struct TagBulkAssetsResponse: Decodable {
+  let count: Int?
+}
+
+private struct BulkIDResponse: Decodable {
+  let id: String?
+  let success: Bool?
+}
+
+private struct AdminUserCreateRequest: Encodable {
+  let email: String
+  let isAdmin: Bool
+  let name: String
+  let notify: Bool
+  let password: String
+  let quotaSizeInBytes: Int?
+  let shouldChangePassword: Bool
+  let storageLabel: String?
+}
+
+private struct AdminUserDeleteRequest: Encodable {
+  let force: Bool
+}
+
+private struct AdminUserResponse: Decodable {
+  let avatarColor: String
+  let createdAt: String
+  let deletedAt: String?
+  let email: String
+  let id: String
+  let isAdmin: Bool
+  let name: String
+  let oauthId: String
+  let profileChangedAt: String
+  let profileImagePath: String
+  let quotaSizeInBytes: Int?
+  let quotaUsageInBytes: Int?
+  let shouldChangePassword: Bool
+  let status: String
+  let storageLabel: String?
+  let updatedAt: String
+
+  func toModel() -> AdminUser {
+    AdminUser(
+      id: id,
+      name: name,
+      email: email,
+      avatarColor: avatarColor,
+      isAdmin: isAdmin,
+      shouldChangePassword: shouldChangePassword,
+      status: status,
+      createdAt: TimelineBucketMapper.parseDate(createdAt) ?? .distantPast,
+      updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? .distantPast,
+      deletedAt: deletedAt.flatMap(TimelineBucketMapper.parseDate),
+      oauthID: oauthId,
+      profileChangedAt: TimelineBucketMapper.parseDate(profileChangedAt) ?? .distantPast,
+      profileImagePath: profileImagePath,
+      quotaSizeInBytes: quotaSizeInBytes,
+      quotaUsageInBytes: quotaUsageInBytes,
+      storageLabel: storageLabel
+    )
   }
 }
 
@@ -972,6 +1321,7 @@ private struct AssetDetailResponse: Decodable {
   let isTrashed: Bool?
   let duration: String?
   let livePhotoVideoId: String?
+  let tags: [TagResponse]?
 
   struct ExifInfoResponse: Decodable {
     let make: String?
@@ -1017,7 +1367,8 @@ private struct AssetDetailResponse: Decodable {
       isFavorite: isFavorite ?? false,
       duration: duration,
       livePhotoVideoId: livePhotoVideoId,
-      exif: exifModel
+      exif: exifModel,
+      tags: (tags ?? []).map { $0.toModel() }
     )
   }
 

@@ -7,7 +7,7 @@ import AVKit
 
 struct AuthenticatedVideoPlayer: View {
   let url: URL
-  let accessToken: String
+  let authHeaderFields: [String: String]
   var showControls: Bool = true
   var isPlaying: Bool = true
   var onPlaybackEnded: (() -> Void)?
@@ -41,9 +41,7 @@ struct AuthenticatedVideoPlayer: View {
     }
     .task(id: url) {
       // Configure AVURLAsset to pass the Authorization header
-      let options: [String: Any] = [
-        "AVURLAssetHTTPHeaderFieldsKey": ["Authorization": "Bearer \(accessToken)"]
-      ]
+      let options: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": authHeaderFields]
       let asset = AVURLAsset(url: url, options: options)
       let playerItem = AVPlayerItem(asset: asset)
       let newPlayer = AVPlayer(playerItem: playerItem)

@@ -22,6 +22,13 @@ final class AppState: ObservableObject {
     case library
   }
 
+  enum AuthMethod: String, CaseIterable, Identifiable {
+    case password = "Password"
+    case apiKey = "API Key"
+
+    var id: Self { self }
+  }
+
   // MARK: - Photo Item (unified model for display)
 
   struct PhotoItem: Identifiable {
@@ -46,9 +53,16 @@ final class AppState: ObservableObject {
     let stackCount: Int?
     let timeBucketKey: String
     let projectionType: String?
+    let aspectRatio: CGFloat
 
     var isLivePhoto: Bool { livePhotoVideoID != nil }
     var isPanorama: Bool { projectionType == "EQUIRECTANGULAR" }
+    var gridAspectRatio: CGFloat {
+      if aspectRatio.isFinite, aspectRatio > 0 {
+        return aspectRatio
+      }
+      return 1
+    }
 
     var timeLabel: String {
       if let durationText, isVideo { return durationText }
@@ -73,17 +87,12 @@ final class AppState: ObservableObject {
   // MARK: - Published State
 
   // Phase & Auth
-  @Published var appPhase: AppPhase = {
-    if UserDefaults.standard.string(forKey: "immich.serverURL") != nil,
-       UserDefaults.standard.string(forKey: "immich.email") != nil,
-       let pass = KeychainHelper.load(account: "immich.password"), !pass.isEmpty {
-      return .launching
-    }
-    return .serverSetup
-  }()
+  @Published var appPhase: AppPhase = AppState.initialAppPhase()
+  @Published var authMethod: AuthMethod = AppState.initialAuthMethod()
   @Published var serverURLText = UserDefaults.standard.string(forKey: "immich.serverURL") ?? ""
   @Published var emailText = UserDefaults.standard.string(forKey: "immich.email") ?? ""
   @Published var passwordText = KeychainHelper.load(account: "immich.password") ?? ""
+  @Published var apiKeyText = KeychainHelper.load(account: "immich.apiKey") ?? ""
   @Published var statusText = "Enter your Immich server URL to continue."
   @Published var isConnecting = false
   @Published var isSigningIn = false
@@ -102,6 +111,7 @@ final class AppState: ObservableObject {
   @Published var libraryItems: [PhotoItem] = []
   @Published var isLoadingTimeline = false
   @Published var searchText = ""
+  @Published var photoGridScaleIndex = AppState.initialPhotoGridScaleIndex()
 
   // Smart search
   @Published var searchResults: [PhotoItem] = []
@@ -147,6 +157,10 @@ final class AppState: ObservableObject {
   // Album CRUD
   @Published var showCreateAlbumSheet = false
   @Published var showAddToAlbumSheet = false
+  @Published var showAPIKeysSheet = false
+  @Published var showTagsSheet = false
+  @Published var showTagEditorSheet = false
+  @Published var showAdminUsersSheet = false
   @Published var newAlbumName = ""
   @Published var newAlbumDescription = ""
 
@@ -155,10 +169,18 @@ final class AppState: ObservableObject {
   @Published var people: [Person] = []
   @Published var memories: [Memory] = []
   @Published var sharedLinks: [SharedLink] = []
+  @Published var apiKeys: [ImmichAPIKey] = []
+  @Published var tags: [ImmichTag] = []
+  @Published var adminUsers: [AdminUser] = []
+  @Published var activeTagEditorAssetIDs: [String] = []
+  @Published var activeTagEditorCurrentTags: [ImmichTag] = []
+  @Published var activeTagEditorTitle = "Edit Tags"
+  @Published var hasAdminAccess = false
   @Published var assetStatistics: AssetStatistics?
   @Published var favoritesCount = 0
   @Published var videosCount = 0
   @Published var livePhotosCount = 0
+  @Published var panoramasCount = 0
 
   // Uploads
   @Published var uploadRows: [UploadRow] = []
@@ -202,10 +224,22 @@ final class AppState: ObservableObject {
 
   struct ThumbnailContext {
     let baseURL: URL
-    let accessToken: String
+    let authHeaderField: String
+    let authHeaderValue: String
+
+    func apply(to request: inout URLRequest) {
+      request.addValue(authHeaderValue, forHTTPHeaderField: authHeaderField)
+    }
+
+    var assetHeaderFields: [String: String] {
+      [authHeaderField: authHeaderValue]
+    }
   }
 
   private static let timelinePageSize = 6
+  private static let photoGridScaleKey = "immich.photoGridScaleIndex"
+  private static let photoGridThumbnailWidths: [CGFloat] = [110, 130, 150, 170, 190, 220, 250]
+  private static let defaultPhotoGridScaleIndex = 3
   private static let timelineBucketFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withFullDate]
@@ -232,7 +266,11 @@ final class AppState: ObservableObject {
 
   var thumbnailContext: ThumbnailContext? {
     guard let connectedServer, let currentSession else { return nil }
-    return ThumbnailContext(baseURL: connectedServer.baseURL, accessToken: currentSession.accessToken)
+    return ThumbnailContext(
+      baseURL: connectedServer.baseURL,
+      authHeaderField: currentSession.authHeaderField,
+      authHeaderValue: currentSession.authHeaderValue
+    )
   }
 
   var filteredItems: [PhotoItem] {
@@ -277,6 +315,22 @@ final class AppState: ObservableObject {
     }
   }
 
+  var photoGridThumbnailWidth: CGFloat {
+    Self.photoGridThumbnailWidths[photoGridScaleIndex]
+  }
+
+  var photoGridSpacing: CGFloat { 8 }
+
+  var photoGridPadding: CGFloat { 12 }
+
+  var canZoomOutPhotoGrid: Bool {
+    photoGridScaleIndex > 0
+  }
+
+  var canZoomInPhotoGrid: Bool {
+    photoGridScaleIndex < Self.photoGridThumbnailWidths.count - 1
+  }
+
   @Published private(set) var librarySections: [LibrarySection] = []
 
   func rebuildLibrarySections() {
@@ -294,15 +348,17 @@ final class AppState: ObservableObject {
   }
 
   private func updateMediaCounts() {
-    var fav = 0, vid = 0, live = 0
+    var fav = 0, vid = 0, live = 0, pano = 0
     for item in libraryItems {
       if item.isFavorite { fav += 1 }
       if item.isVideo { vid += 1 }
       if item.isLivePhoto { live += 1 }
+      if item.isPanorama { pano += 1 }
     }
     favoritesCount = fav
     videosCount = vid
     livePhotosCount = live
+    panoramasCount = pano
   }
 
   var canLoadMoreTimeline: Bool {
@@ -330,6 +386,7 @@ final class AppState: ObservableObject {
     case .favorites: "No favorites yet"
     case .videos: "No videos yet"
     case .livePhotos: "No Live Photos yet"
+    case .panoramas: "No panoramas yet"
     case .imports: "No imports yet"
     case .recentlyDeleted: "Trash is empty"
     default: "No items"
@@ -351,6 +408,37 @@ final class AppState: ObservableObject {
   }
 
   // MARK: - Init
+
+  private static func initialAuthMethod() -> AuthMethod {
+    if let rawValue = UserDefaults.standard.string(forKey: "immich.authMethod"),
+       let method = AuthMethod(rawValue: rawValue) {
+      return method
+    }
+    if let savedKey = KeychainHelper.load(account: "immich.apiKey"), !savedKey.isEmpty {
+      return .apiKey
+    }
+    return .password
+  }
+
+  private static func initialPhotoGridScaleIndex() -> Int {
+    guard let stored = UserDefaults.standard.object(forKey: photoGridScaleKey) as? Int else {
+      return defaultPhotoGridScaleIndex
+    }
+    return min(max(stored, 0), photoGridThumbnailWidths.count - 1)
+  }
+
+  private static func initialAppPhase() -> AppPhase {
+    let hasSavedServer = UserDefaults.standard.string(forKey: "immich.serverURL") != nil
+    let hasSavedPasswordLogin =
+      UserDefaults.standard.string(forKey: "immich.email") != nil &&
+      (KeychainHelper.load(account: "immich.password")?.isEmpty == false)
+    let hasSavedAPIKey = KeychainHelper.load(account: "immich.apiKey")?.isEmpty == false
+
+    if hasSavedServer && (hasSavedPasswordLogin || hasSavedAPIKey) {
+      return .launching
+    }
+    return .serverSetup
+  }
 
   init(apiClient: any ImmichAPIClient = URLSessionImmichAPIClient()) {
     self.apiClient = apiClient
@@ -400,10 +488,13 @@ final class AppState: ObservableObject {
     do {
       let session = try await apiClient.login(server: connectedServer, email: trimmedEmail, password: passwordText)
       emailText = trimmedEmail
+      authMethod = .password
+      UserDefaults.standard.set(AuthMethod.password.rawValue, forKey: "immich.authMethod")
       UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
       KeychainHelper.save(account: "immich.password", password: passwordText)
       currentSession = session
       resetLibraryState()
+      hasAdminAccess = session.isAdmin
       appPhase = .library
       statusText = "Signed in as \(session.userName)"
       await loadInitialData()
@@ -412,11 +503,54 @@ final class AppState: ObservableObject {
     }
   }
 
+  func signInWithAPIKey() async {
+    let trimmedKey = apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let connectedServer else { changeServer(); return }
+    guard !trimmedKey.isEmpty else {
+      statusText = "Enter an API key."
+      return
+    }
+
+    isSigningIn = true
+    defer { isSigningIn = false }
+
+    do {
+      let session = try await apiClient.loginWithAPIKey(server: connectedServer, apiKey: trimmedKey)
+      authMethod = .apiKey
+      UserDefaults.standard.set(AuthMethod.apiKey.rawValue, forKey: "immich.authMethod")
+      KeychainHelper.save(account: "immich.apiKey", password: trimmedKey)
+      if session.userEmail != "API key session" {
+        UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
+        emailText = session.userEmail
+      }
+      currentSession = session
+      resetLibraryState()
+      hasAdminAccess = session.isAdmin || session.usesAPIKey
+      appPhase = .library
+      statusText = "Connected with API key"
+      await loadInitialData()
+    } catch {
+      statusText = "API key sign in failed: \(error.localizedDescription)"
+    }
+  }
+
   func autoSignInIfNeeded() {
     guard appPhase == .launching else { return }
     Task {
       await connect()
-      if appPhase == .login { await signIn() } else { appPhase = .serverSetup }
+      guard appPhase == .login else {
+        appPhase = .serverSetup
+        return
+      }
+
+      if authMethod == .apiKey, apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+        await signInWithAPIKey()
+      } else if emailText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                passwordText.isEmpty == false {
+        await signIn()
+      } else {
+        appPhase = .login
+      }
     }
   }
 
@@ -473,6 +607,7 @@ final class AppState: ObservableObject {
   func signOut() {
     currentSession = nil
     passwordText = ""
+    apiKeyText = ""
     resetLibraryState()
     appPhase = .login
     statusText = "Connected • Immich \(connectedServerVersion ?? "")"
@@ -487,6 +622,7 @@ final class AppState: ObservableObject {
     passwordLoginEnabled = true
     emailText = ""
     passwordText = ""
+    apiKeyText = ""
     currentSession = nil
     resetLibraryState()
     appPhase = .serverSetup
@@ -521,6 +657,13 @@ final class AppState: ObservableObject {
     people = []
     memories = []
     sharedLinks = []
+    apiKeys = []
+    tags = []
+    adminUsers = []
+    activeTagEditorAssetIDs = []
+    activeTagEditorCurrentTags = []
+    activeTagEditorTitle = "Edit Tags"
+    hasAdminAccess = false
     sharedLinkAssets = [:]
     activeSharedLinkID = nil
     activeSharedLinkItems = []
@@ -530,8 +673,13 @@ final class AppState: ObservableObject {
     isPeeking = false
     isEditing = false
     showInfoPopover = false
+    showAPIKeysSheet = false
+    showTagsSheet = false
+    showTagEditorSheet = false
+    showAdminUsersSheet = false
     hoveredItemID = nil
     librarySections = []
+    panoramasCount = 0
   }
 
   // MARK: - Data Loading
@@ -685,7 +833,6 @@ final class AppState: ObservableObject {
       loadedTimelineBucketKeys.append(contentsOf: fetchedKeys)
       libraryItems = dedup.values.sorted { $0.date > $1.date }
       updateMediaCounts()
-      if selectedItemID == nil { selectedItemID = libraryItems.first?.id }
       rebuildLibrarySections()
     } catch {
       timelineErrorMessage = "Couldn't load more photos: \(error.localizedDescription)"
@@ -848,9 +995,200 @@ final class AppState: ObservableObject {
     }
   }
 
+  // MARK: - Asset Detail / Tags / API Keys / Admin
+
+  func fetchAssetDetail(_ assetID: String) async throws -> AssetDetail {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+    return try await apiClient.fetchAssetDetail(server: connectedServer, session: currentSession, assetId: assetID)
+  }
+
+  func loadAPIKeys() async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+    apiKeys = try await apiClient.fetchAPIKeys(server: connectedServer, session: currentSession)
+      .sorted { $0.updatedAt > $1.updatedAt }
+  }
+
+  func createAPIKey(name: String, permissionsText: String) async throws -> CreatedAPIKey {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let permissions = Self.parseDelimitedValues(permissionsText, fallback: ["all"])
+    let created = try await apiClient.createAPIKey(
+      server: connectedServer,
+      session: currentSession,
+      name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+      permissions: permissions
+    )
+
+    apiKeys.removeAll { $0.id == created.apiKey.id }
+    apiKeys.insert(created.apiKey, at: 0)
+    return created
+  }
+
+  func deleteAPIKey(_ id: String) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.deleteAPIKey(server: connectedServer, session: currentSession, id: id)
+    apiKeys.removeAll { $0.id == id }
+  }
+
+  func loadTags() async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+    tags = try await apiClient.fetchTags(server: connectedServer, session: currentSession)
+  }
+
+  func upsertTags(from rawNames: String) async throws -> [ImmichTag] {
+    let names = Self.parseDelimitedValues(rawNames, fallback: [])
+    guard !names.isEmpty else { return [] }
+    return try await upsertTags(named: names)
+  }
+
+  func upsertTags(named names: [String]) async throws -> [ImmichTag] {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let normalized = Self.normalizeTagNames(names)
+    guard !normalized.isEmpty else { return [] }
+
+    let upserted = try await apiClient.upsertTags(server: connectedServer, session: currentSession, tagNames: normalized)
+    mergeTags(upserted)
+    return upserted
+  }
+
+  func applyTags(named names: [String], to assetIDs: [String]) async throws -> [ImmichTag] {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let upserted = try await upsertTags(named: names)
+    guard !upserted.isEmpty else { return [] }
+
+    try await apiClient.tagAssets(
+      server: connectedServer,
+      session: currentSession,
+      assetIDs: assetIDs,
+      tagIDs: upserted.map(\.id)
+    )
+    return upserted
+  }
+
+  func deleteTag(_ id: String) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.deleteTag(server: connectedServer, session: currentSession, id: id)
+    tags.removeAll { $0.id == id }
+    activeTagEditorCurrentTags.removeAll { $0.id == id }
+  }
+
+  func removeTag(_ tagID: String, from assetIDs: [String]) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.untagAssets(server: connectedServer, session: currentSession, tagID: tagID, assetIDs: assetIDs)
+    activeTagEditorCurrentTags.removeAll { $0.id == tagID }
+  }
+
+  func presentTagEditor(for assetIDs: [String], currentTags: [ImmichTag], title: String) {
+    activeTagEditorAssetIDs = assetIDs
+    activeTagEditorCurrentTags = currentTags.sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }
+    activeTagEditorTitle = title
+    showTagEditorSheet = true
+  }
+
+  func loadAdminUsers(includeDeleted: Bool = true) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    do {
+      adminUsers = try await apiClient.fetchAdminUsers(
+        server: connectedServer,
+        session: currentSession,
+        includeDeleted: includeDeleted
+      )
+      .sorted(by: Self.sortAdminUsers)
+      hasAdminAccess = true
+    } catch {
+      if Self.isAuthorizationError(error) {
+        hasAdminAccess = false
+      }
+      throw error
+    }
+  }
+
+  func createAdminUser(
+    name: String,
+    email: String,
+    password: String,
+    isAdmin: Bool,
+    shouldChangePassword: Bool,
+    quotaSizeInBytes: Int?,
+    storageLabel: String?,
+    notify: Bool
+  ) async throws -> AdminUser {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let user = try await apiClient.createAdminUser(
+      server: connectedServer,
+      session: currentSession,
+      name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+      email: email.trimmingCharacters(in: .whitespacesAndNewlines),
+      password: password,
+      isAdmin: isAdmin,
+      shouldChangePassword: shouldChangePassword,
+      quotaSizeInBytes: quotaSizeInBytes,
+      storageLabel: storageLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+      notify: notify
+    )
+
+    upsertAdminUser(user)
+    hasAdminAccess = true
+    return user
+  }
+
+  func deleteAdminUser(_ id: String, force: Bool) async throws -> AdminUser {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let user = try await apiClient.deleteAdminUser(server: connectedServer, session: currentSession, id: id, force: force)
+    upsertAdminUser(user)
+    return user
+  }
+
+  func restoreAdminUser(_ id: String) async throws -> AdminUser {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    let user = try await apiClient.restoreAdminUser(server: connectedServer, session: currentSession, id: id)
+    upsertAdminUser(user)
+    return user
+  }
+
   // MARK: - Download / Export
 
   @Published var isDownloading = false
+
+  private struct DownloadedAssetPayload {
+    let data: Data
+    let filename: String
+  }
 
   func downloadAsset(_ assetID: String) {
     guard let connectedServer, let currentSession else { return }
@@ -858,11 +1196,15 @@ final class AppState: ObservableObject {
     Task {
       defer { isDownloading = false }
       do {
-        let (data, filename) = try await apiClient.downloadOriginalAsset(
-          server: connectedServer, session: currentSession, assetId: assetID
+        let payloads = try await downloadPayloads(
+          for: assetID,
+          server: connectedServer,
+          session: currentSession
         )
+        guard let primaryPayload = payloads.first else { return }
+
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = filename
+        panel.nameFieldStringValue = primaryPayload.filename
         panel.canCreateDirectories = true
         let response: NSApplication.ModalResponse
         if let window = NSApp.keyWindow {
@@ -871,8 +1213,17 @@ final class AppState: ObservableObject {
           response = panel.runModal()
         }
         if response == .OK, let url = panel.url {
-          try data.write(to: url)
-          immichLog("[Download] Saved \(filename) to \(url.path)")
+          try primaryPayload.data.write(to: url)
+          immichLog("[Download] Saved \(primaryPayload.filename) to \(url.path)")
+
+          for companionPayload in payloads.dropFirst() {
+            let companionURL = companionDownloadURL(
+              nextTo: url,
+              companionFilename: companionPayload.filename
+            )
+            try companionPayload.data.write(to: companionURL)
+            immichLog("[Download] Saved \(companionPayload.filename) to \(companionURL.path)")
+          }
         }
       } catch {
         immichLog("[Download] Failed: \(error)")
@@ -1000,11 +1351,31 @@ final class AppState: ObservableObject {
     }
   }
 
+  func zoomOutPhotoGrid() {
+    withAnimation(.easeInOut(duration: 0.22)) {
+      setPhotoGridScaleIndex(photoGridScaleIndex - 1)
+    }
+  }
+
+  func zoomInPhotoGrid() {
+    withAnimation(.easeInOut(duration: 0.22)) {
+      setPhotoGridScaleIndex(photoGridScaleIndex + 1)
+    }
+  }
+
   func toggleItemSelection(_ itemID: String) {
     if selectedItemIDs.contains(itemID) {
       selectedItemIDs.remove(itemID)
     } else {
       selectedItemIDs.insert(itemID)
+    }
+  }
+
+  func setItemSelection(_ itemID: String, isSelected: Bool) {
+    if isSelected {
+      selectedItemIDs.insert(itemID)
+    } else {
+      selectedItemIDs.remove(itemID)
     }
   }
 
@@ -1067,17 +1438,77 @@ final class AppState: ObservableObject {
 
       for id in ids {
         do {
-          let (data, filename) = try await apiClient.downloadOriginalAsset(
-            server: connectedServer, session: currentSession, assetId: id
+          let payloads = try await downloadPayloads(
+            for: id,
+            server: connectedServer,
+            session: currentSession
           )
-          let fileURL = folder.appendingPathComponent(filename)
-          try data.write(to: fileURL)
-          immichLog("[BatchDownload] Saved \(filename)")
+          for payload in payloads {
+            let fileURL = folder.appendingPathComponent(payload.filename)
+            try payload.data.write(to: fileURL)
+            immichLog("[BatchDownload] Saved \(payload.filename)")
+          }
         } catch {
           immichLog("[BatchDownload] Failed for \(id): \(error)")
         }
       }
     }
+  }
+
+  private func downloadPayloads(
+    for assetID: String,
+    server: ImmichServer,
+    session: UserSession
+  ) async throws -> [DownloadedAssetPayload] {
+    let (primaryData, primaryFilename) = try await apiClient.downloadOriginalAsset(
+      server: server,
+      session: session,
+      assetId: assetID
+    )
+
+    var payloads = [DownloadedAssetPayload(data: primaryData, filename: primaryFilename)]
+
+    guard let livePhotoVideoID = try await livePhotoVideoID(for: assetID),
+          livePhotoVideoID != assetID else {
+      return payloads
+    }
+
+    do {
+      let (videoData, videoFilename) = try await apiClient.downloadOriginalAsset(
+        server: server,
+        session: session,
+        assetId: livePhotoVideoID
+      )
+      payloads.append(DownloadedAssetPayload(data: videoData, filename: videoFilename))
+    } catch {
+      immichLog("[Download] Failed to download Live Photo movie for \(assetID): \(error)")
+    }
+
+    return payloads
+  }
+
+  private func livePhotoVideoID(for assetID: String) async throws -> String? {
+    if let cachedID = photoItem(for: assetID)?.livePhotoVideoID {
+      return cachedID
+    }
+    let detail = try await fetchAssetDetail(assetID)
+    return detail.livePhotoVideoId
+  }
+
+  private func photoItem(for assetID: String) -> PhotoItem? {
+    activeAlbumItems.first { $0.id == assetID }
+      ?? activePersonItems.first { $0.id == assetID }
+      ?? activeSharedLinkItems.first { $0.id == assetID }
+      ?? activeMemoryItems.first { $0.id == assetID }
+      ?? libraryItems.first { $0.id == assetID }
+      ?? trashedItems.first { $0.id == assetID }
+  }
+
+  private func companionDownloadURL(nextTo primaryURL: URL, companionFilename: String) -> URL {
+    let ext = URL(fileURLWithPath: companionFilename).pathExtension
+    let baseName = primaryURL.deletingPathExtension().lastPathComponent
+    let companionName = ext.isEmpty ? companionFilename : "\(baseName).\(ext)"
+    return primaryURL.deletingLastPathComponent().appendingPathComponent(companionName)
   }
 
   // MARK: - Album CRUD
@@ -1257,12 +1688,12 @@ final class AppState: ObservableObject {
         country: nil,
         stackCount: nil,
         timeBucketKey: Self.timelineBucketKey(for: .now),
-        projectionType: nil
+        projectionType: nil,
+        aspectRatio: Self.localAspectRatio(for: url, isVideo: isVideo)
       )
 
       uploadRows.insert(UploadRow(id: uploadItem.id, filename: url.lastPathComponent, progress: 0, state: .queued), at: 0)
       libraryItems.insert(item, at: 0)
-      selectedItemID = item.id
       rebuildLibrarySections()
 
       Task {
@@ -1296,6 +1727,13 @@ final class AppState: ObservableObject {
     } else {
       statusText = "Signed in as \(session.userName) • \(loaded) items"
     }
+  }
+
+  private func setPhotoGridScaleIndex(_ newValue: Int) {
+    let clamped = min(max(newValue, 0), Self.photoGridThumbnailWidths.count - 1)
+    guard clamped != photoGridScaleIndex else { return }
+    photoGridScaleIndex = clamped
+    UserDefaults.standard.set(clamped, forKey: Self.photoGridScaleKey)
   }
 
   private func simulateUpload(_ item: UploadItem) async {
@@ -1334,7 +1772,8 @@ final class AppState: ObservableObject {
           country: old.country,
           stackCount: old.stackCount,
           timeBucketKey: old.timeBucketKey,
-          projectionType: old.projectionType
+          projectionType: old.projectionType,
+          aspectRatio: old.aspectRatio
         )
         rebuildLibrarySections()
       }
@@ -1351,6 +1790,55 @@ final class AppState: ObservableObject {
     guard let idx = uploadRows.firstIndex(where: { $0.id == id }) else { return }
     uploadRows[idx].progress = progress
     uploadRows[idx].state = state
+  }
+
+  private func mergeTags(_ incomingTags: [ImmichTag]) {
+    guard !incomingTags.isEmpty else { return }
+    var merged = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
+    for tag in incomingTags {
+      merged[tag.id] = tag
+    }
+    tags = merged.values.sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }
+  }
+
+  private func upsertAdminUser(_ user: AdminUser) {
+    adminUsers.removeAll { $0.id == user.id }
+    adminUsers.append(user)
+    adminUsers.sort(by: Self.sortAdminUsers)
+  }
+
+  private static func sortAdminUsers(_ lhs: AdminUser, _ rhs: AdminUser) -> Bool {
+    if lhs.isDeleted != rhs.isDeleted {
+      return !lhs.isDeleted && rhs.isDeleted
+    }
+    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+  }
+
+  private static func normalizeTagNames(_ names: [String]) -> [String] {
+    var seen = Set<String>()
+    return names.compactMap { rawName in
+      let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return nil }
+      let canonical = trimmed.lowercased()
+      guard seen.insert(canonical).inserted else { return nil }
+      return trimmed
+    }
+  }
+
+  private static func parseDelimitedValues(_ rawValue: String, fallback: [String]) -> [String] {
+    let values = rawValue
+      .split(separator: ",")
+      .map(String.init)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+
+    return values.isEmpty ? fallback : values
+  }
+
+  private static func isAuthorizationError(_ error: Error) -> Bool {
+    guard let apiError = error as? ImmichAPIError else { return false }
+    guard case ImmichAPIError.requestFailed(let statusCode, _) = apiError else { return false }
+    return statusCode == 401 || statusCode == 403
   }
 
   static func makePhotoItem(from asset: RemoteTimelineAsset, timeBucket: String) -> PhotoItem {
@@ -1373,8 +1861,15 @@ final class AppState: ObservableObject {
       country: asset.country,
       stackCount: asset.stackChildrenCount,
       timeBucketKey: timeBucket,
-      projectionType: asset.projectionType
+      projectionType: asset.projectionType,
+      aspectRatio: CGFloat(asset.ratio)
     )
+  }
+
+  private static func localAspectRatio(for url: URL, isVideo: Bool) -> CGFloat {
+    guard !isVideo else { return 16.0 / 9.0 }
+    guard let image = NSImage(contentsOf: url), image.size.height > 0 else { return 1 }
+    return image.size.width / image.size.height
   }
 
   private static func timelineBucketKey(for date: Date) -> String {

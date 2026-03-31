@@ -50,7 +50,7 @@ final class ThumbnailStore: ObservableObject {
       guard let url else { return nil }
 
       var request = URLRequest(url: url)
-      request.addValue("Bearer \(context.accessToken)", forHTTPHeaderField: "Authorization")
+      context.apply(to: &request)
 
       do {
         let (data, response) = try await URLSession.shared.data(for: request)

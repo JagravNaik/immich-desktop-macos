@@ -63,8 +63,54 @@ public struct ServerLoginConfiguration: Sendable {
   }
 }
 
+public enum SessionAuthentication: Sendable {
+  case accessToken(String)
+  case apiKey(String)
+
+  public var headerField: String {
+    switch self {
+    case .accessToken:
+      return "Authorization"
+    case .apiKey:
+      return "x-api-key"
+    }
+  }
+
+  public var headerValue: String {
+    switch self {
+    case .accessToken(let token):
+      return "Bearer \(token)"
+    case .apiKey(let key):
+      return key
+    }
+  }
+
+  public var accessToken: String? {
+    if case .accessToken(let token) = self {
+      return token
+    }
+    return nil
+  }
+
+  public var apiKey: String? {
+    if case .apiKey(let key) = self {
+      return key
+    }
+    return nil
+  }
+
+  public var modeLabel: String {
+    switch self {
+    case .accessToken:
+      return "Password"
+    case .apiKey:
+      return "API Key"
+    }
+  }
+}
+
 public struct UserSession: Sendable {
-  public let accessToken: String
+  public let authentication: SessionAuthentication
   public let isAdmin: Bool
   public let shouldChangePassword: Bool
   public let userEmail: String
@@ -79,12 +125,165 @@ public struct UserSession: Sendable {
     userID: String,
     userName: String
   ) {
-    self.accessToken = accessToken
+    self.authentication = .accessToken(accessToken)
     self.isAdmin = isAdmin
     self.shouldChangePassword = shouldChangePassword
     self.userEmail = userEmail
     self.userID = userID
     self.userName = userName
+  }
+
+  public init(
+    apiKey: String,
+    isAdmin: Bool,
+    shouldChangePassword: Bool,
+    userEmail: String,
+    userID: String,
+    userName: String
+  ) {
+    self.authentication = .apiKey(apiKey)
+    self.isAdmin = isAdmin
+    self.shouldChangePassword = shouldChangePassword
+    self.userEmail = userEmail
+    self.userID = userID
+    self.userName = userName
+  }
+
+  public var accessToken: String {
+    authentication.accessToken ?? ""
+  }
+
+  public var apiKey: String? {
+    authentication.apiKey
+  }
+
+  public var authHeaderField: String {
+    authentication.headerField
+  }
+
+  public var authHeaderValue: String {
+    authentication.headerValue
+  }
+
+  public var usesAPIKey: Bool {
+    authentication.apiKey != nil
+  }
+
+  public var authenticationModeLabel: String {
+    authentication.modeLabel
+  }
+}
+
+public struct ImmichAPIKey: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let name: String
+  public let permissions: [String]
+  public let createdAt: Date
+  public let updatedAt: Date
+
+  public init(id: String, name: String, permissions: [String], createdAt: Date, updatedAt: Date) {
+    self.id = id
+    self.name = name
+    self.permissions = permissions
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct CreatedAPIKey: Sendable {
+  public let apiKey: ImmichAPIKey
+  public let secret: String
+
+  public init(apiKey: ImmichAPIKey, secret: String) {
+    self.apiKey = apiKey
+    self.secret = secret
+  }
+}
+
+public struct ImmichTag: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let name: String
+  public let value: String
+  public let color: String?
+  public let parentID: String?
+  public let createdAt: Date
+  public let updatedAt: Date
+
+  public init(
+    id: String,
+    name: String,
+    value: String,
+    color: String?,
+    parentID: String?,
+    createdAt: Date,
+    updatedAt: Date
+  ) {
+    self.id = id
+    self.name = name
+    self.value = value
+    self.color = color
+    self.parentID = parentID
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+  }
+}
+
+public struct AdminUser: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let name: String
+  public let email: String
+  public let avatarColor: String
+  public let isAdmin: Bool
+  public let shouldChangePassword: Bool
+  public let status: String
+  public let createdAt: Date
+  public let updatedAt: Date
+  public let deletedAt: Date?
+  public let oauthID: String
+  public let profileChangedAt: Date
+  public let profileImagePath: String
+  public let quotaSizeInBytes: Int?
+  public let quotaUsageInBytes: Int?
+  public let storageLabel: String?
+
+  public init(
+    id: String,
+    name: String,
+    email: String,
+    avatarColor: String,
+    isAdmin: Bool,
+    shouldChangePassword: Bool,
+    status: String,
+    createdAt: Date,
+    updatedAt: Date,
+    deletedAt: Date?,
+    oauthID: String,
+    profileChangedAt: Date,
+    profileImagePath: String,
+    quotaSizeInBytes: Int?,
+    quotaUsageInBytes: Int?,
+    storageLabel: String?
+  ) {
+    self.id = id
+    self.name = name
+    self.email = email
+    self.avatarColor = avatarColor
+    self.isAdmin = isAdmin
+    self.shouldChangePassword = shouldChangePassword
+    self.status = status
+    self.createdAt = createdAt
+    self.updatedAt = updatedAt
+    self.deletedAt = deletedAt
+    self.oauthID = oauthID
+    self.profileChangedAt = profileChangedAt
+    self.profileImagePath = profileImagePath
+    self.quotaSizeInBytes = quotaSizeInBytes
+    self.quotaUsageInBytes = quotaUsageInBytes
+    self.storageLabel = storageLabel
+  }
+
+  public var isDeleted: Bool {
+    status == "deleted" || deletedAt != nil
   }
 }
 
@@ -297,6 +496,7 @@ public struct AssetDetail: Sendable {
   public let duration: String?
   public let livePhotoVideoId: String?
   public let exif: ExifInfo?
+  public let tags: [ImmichTag]
 
   public init(
     id: String,
@@ -310,7 +510,8 @@ public struct AssetDetail: Sendable {
     isFavorite: Bool,
     duration: String?,
     livePhotoVideoId: String?,
-    exif: ExifInfo?
+    exif: ExifInfo?,
+    tags: [ImmichTag]
   ) {
     self.id = id
     self.type = type
@@ -324,6 +525,7 @@ public struct AssetDetail: Sendable {
     self.duration = duration
     self.livePhotoVideoId = livePhotoVideoId
     self.exif = exif
+    self.tags = tags
   }
 }
 
