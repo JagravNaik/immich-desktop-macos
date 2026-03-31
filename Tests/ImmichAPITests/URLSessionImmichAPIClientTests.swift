@@ -361,8 +361,33 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 }
 
+private final class RequestHandlerStore: @unchecked Sendable {
+  typealias Handler = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+  private let lock = NSLock()
+  private var handler: Handler?
+
+  func set(_ handler: Handler?) {
+    lock.lock()
+    self.handler = handler
+    lock.unlock()
+  }
+
+  func get() -> Handler? {
+    lock.lock()
+    defer { lock.unlock() }
+    return handler
+  }
+}
+
 private final class StubURLProtocol: URLProtocol {
-  nonisolated(unsafe) static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+  typealias Handler = RequestHandlerStore.Handler
+  private static let requestHandlerStore = RequestHandlerStore()
+
+  static var requestHandler: Handler? {
+    get { requestHandlerStore.get() }
+    set { requestHandlerStore.set(newValue) }
+  }
 
   override class func canInit(with request: URLRequest) -> Bool {
     true

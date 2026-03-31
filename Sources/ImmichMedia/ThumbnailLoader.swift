@@ -1,4 +1,13 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+
+#if canImport(CoreGraphics)
+public typealias ThumbnailPixelSize = CGFloat
+#else
+public typealias ThumbnailPixelSize = Double
+#endif
 
 #if canImport(AppKit)
 import AppKit
@@ -11,7 +20,7 @@ public final class ThumbnailLoader: @unchecked Sendable {
 
   public init() {}
 
-  public func loadThumbnail(for fileURL: URL, maxPixelSize: CGFloat = 256) async -> PlatformImage? {
+  public func loadThumbnail(for fileURL: URL, maxPixelSize: ThumbnailPixelSize = 256) async -> PlatformImage? {
     if let cached = cache.object(forKey: fileURL as NSURL) {
       return cached
     }
@@ -51,7 +60,7 @@ public struct PlatformImage: Sendable {}
 public final class ThumbnailLoader: @unchecked Sendable {
   public init() {}
 
-  public func loadThumbnail(for _: URL, maxPixelSize _: Double = 256) async -> PlatformImage? {
+  public func loadThumbnail(for _: URL, maxPixelSize _: ThumbnailPixelSize = 256) async -> PlatformImage? {
     nil
   }
 }
