@@ -144,13 +144,57 @@ struct LibraryGridView: View {
     let itemIndices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
     guard !items.isEmpty else { return }
     guard let currentID = appState.selectedItemID,
+          let currentIndex = itemIndices[currentID],
           let currentFrame = itemFrames[currentID]
     else {
       moveSelection(by: direction == .up ? -columnsEstimate : columnsEstimate, shouldScrollIntoView: shouldScrollIntoView)
       return
     }
 
-    let directionalCandidates = items.compactMap { item -> (id: String, frame: CGRect)? in
+    let directionOffset = direction == .up ? -columnsEstimate : columnsEstimate
+    let clampedPreferredIndex = min(max(currentIndex + directionOffset, 0), items.count - 1)
+    let searchRadius = max(columnsEstimate, 2)
+
+    let fastPathRange = max(0, clampedPreferredIndex - searchRadius)...min(items.count - 1, clampedPreferredIndex + searchRadius)
+    let fastPathItems = fastPathRange.map { items[$0] }
+    let fastPathCandidates = directionalCandidates(
+      from: fastPathItems,
+      currentID: currentID,
+      currentFrame: currentFrame,
+      direction: direction
+    )
+
+    if let bestMatch = bestVerticalMatch(
+      in: fastPathCandidates,
+      currentFrame: currentFrame,
+      itemIndices: itemIndices
+    ) {
+      setSelection(bestMatch.id, shouldScrollIntoView: shouldScrollIntoView)
+      return
+    }
+
+    let fallbackCandidates = directionalCandidates(
+      from: items,
+      currentID: currentID,
+      currentFrame: currentFrame,
+      direction: direction
+    )
+    if let bestMatch = bestVerticalMatch(
+      in: fallbackCandidates,
+      currentFrame: currentFrame,
+      itemIndices: itemIndices
+    ) {
+      setSelection(bestMatch.id, shouldScrollIntoView: shouldScrollIntoView)
+    }
+  }
+
+  private func directionalCandidates(
+    from items: [AppState.PhotoItem],
+    currentID: String,
+    currentFrame: CGRect,
+    direction: VerticalSelectionDirection
+  ) -> [(id: String, frame: CGRect)] {
+    items.compactMap { item -> (id: String, frame: CGRect)? in
       guard item.id != currentID, let frame = itemFrames[item.id] else { return nil }
 
       switch direction {
@@ -162,8 +206,14 @@ struct LibraryGridView: View {
         return nil
       }
     }
+  }
 
-    guard !directionalCandidates.isEmpty else { return }
+  private func bestVerticalMatch(
+    in directionalCandidates: [(id: String, frame: CGRect)],
+    currentFrame: CGRect,
+    itemIndices: [String: Int]
+  ) -> (id: String, frame: CGRect)? {
+    guard !directionalCandidates.isEmpty else { return nil }
 
     let overlappingCandidates = directionalCandidates.filter {
       $0.frame.maxX > currentFrame.minX && $0.frame.minX < currentFrame.maxX
@@ -173,7 +223,7 @@ struct LibraryGridView: View {
     let currentMidX = currentFrame.midX
     let currentMidY = currentFrame.midY
 
-    let bestMatch = pool.min { lhs, rhs in
+    return pool.min { lhs, rhs in
       let lhsHorizontal = abs(lhs.frame.midX - currentMidX)
       let rhsHorizontal = abs(rhs.frame.midX - currentMidX)
 
@@ -189,10 +239,6 @@ struct LibraryGridView: View {
       }
 
       return itemIndices[lhs.id] ?? 0 < itemIndices[rhs.id] ?? 0
-    }
-
-    if let bestMatch {
-      setSelection(bestMatch.id, shouldScrollIntoView: shouldScrollIntoView)
     }
   }
 

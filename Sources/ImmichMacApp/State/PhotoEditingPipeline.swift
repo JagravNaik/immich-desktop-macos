@@ -78,6 +78,10 @@ final class PhotoEditingPipeline: ObservableObject {
     let imageData: Data?
   }
 
+  private struct SourceImageSnapshot: @unchecked Sendable {
+    let cgImage: CGImage
+  }
+
   private enum EncodedRenderFormat: Sendable {
     case jpeg(Double)
     case png
@@ -317,7 +321,37 @@ final class PhotoEditingPipeline: ObservableObject {
   }
 
   private nonisolated static func loadSourceImageData(for image: NSImage) async -> SourceImageLoadResult {
-    let imageData = await MainActor.run { image.tiffRepresentation }
+    let snapshot = await MainActor.run { () -> SourceImageSnapshot? in
+      guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return nil
+      }
+      return SourceImageSnapshot(cgImage: cgImage)
+    }
+
+    guard let snapshot else {
+      let imageData = await MainActor.run { image.tiffRepresentation }
+      return SourceImageLoadResult(imageData: imageData)
+    }
+
+    let imageData = await Task.detached(priority: .userInitiated) { () -> Data? in
+      let mutableData = NSMutableData()
+      guard let destination = CGImageDestinationCreateWithData(
+        mutableData,
+        UTType.tiff.identifier as CFString,
+        1,
+        nil
+      ) else {
+        return nil
+      }
+
+      CGImageDestinationAddImage(destination, snapshot.cgImage, nil)
+      guard CGImageDestinationFinalize(destination) else {
+        return nil
+      }
+
+      return mutableData as Data
+    }.value
+
     return SourceImageLoadResult(imageData: imageData)
   }
 
@@ -427,7 +461,7 @@ final class PhotoEditingPipeline: ObservableObject {
   func renderFinalJPEG(compressionQuality: CGFloat = 0.92) async -> Data? {
     guard sourceImageData != nil else { return nil }
     let snapshot = makeRenderSnapshot()
-    let quality = Double(compressionQuality)
+    let quality = min(max(Double(compressionQuality), 0), 1)
     return await Task.detached(priority: .userInitiated) {
       Self.renderEncodedData(from: snapshot, format: .jpeg(quality))
     }.value

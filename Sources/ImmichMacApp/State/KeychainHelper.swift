@@ -65,7 +65,10 @@ enum KeychainHelper {
     guard status == errSecSuccess, let data = result as? Data else {
       throw KeychainHelperError.operationFailed(operation: "load", account: account, status: status)
     }
-    return String(data: data, encoding: .utf8)
+    guard let string = String(data: data, encoding: .utf8) else {
+      throw KeychainHelperError.invalidUTF8(account: account)
+    }
+    return string
   }
 
   static func delete(account: String) throws {
