@@ -633,10 +633,18 @@ struct PhotoGridCell: View {
       }
       Button(item.isFavorite ? "Unfavorite" : "Favorite") { onFavoriteToggle() }
       Divider()
-      Button("Download Original") { onDownload?() }
-      Button("Add to Album…") { onAddToAlbum?() }
-      Button("Edit Tags…") { onEditTags?() }
-      Divider()
+      if let onDownload = onDownload {
+        Button("Download Original") { onDownload() }
+      }
+      if let onAddToAlbum = onAddToAlbum {
+        Button("Add to Album…") { onAddToAlbum() }
+      }
+      if let onEditTags = onEditTags {
+        Button("Edit Tags…") { onEditTags() }
+      }
+      if onDownload != nil || onAddToAlbum != nil || onEditTags != nil {
+        Divider()
+      }
       Button("Get Info") { onSelect() }
     }
   }
