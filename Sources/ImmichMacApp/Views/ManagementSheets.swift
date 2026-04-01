@@ -216,6 +216,7 @@ struct APIKeysSheet: View {
 
   private func createKey() async {
     isCreating = true
+    createdSecret = nil
     defer { isCreating = false }
 
     do {
@@ -225,6 +226,7 @@ struct APIKeysSheet: View {
       permissionsText = "all"
       errorMessage = nil
     } catch {
+      createdSecret = nil
       errorMessage = error.localizedDescription
     }
   }

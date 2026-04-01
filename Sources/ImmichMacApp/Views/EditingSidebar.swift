@@ -9,6 +9,10 @@ struct EditingSidebar: View {
   @ObservedObject var pipeline: PhotoEditingPipeline
   let item: AppState.PhotoItem
 
+  private var canSaveEdits: Bool {
+    pipeline.hasEdits && !item.isVideo
+  }
+
   var body: some View {
     VStack(spacing: 0) {
       // Tab picker (Photos-style segmented control)
@@ -62,9 +66,13 @@ struct EditingSidebar: View {
           Button("Save to Server") {
             appState.saveEditedImage(pipeline: pipeline)
           }
+          .disabled(item.isVideo)
+
           Button("Export to Disk…") {
             appState.exportEditedImage(pipeline: pipeline)
           }
+          .disabled(item.isVideo)
+
           Divider()
           Button("Revert to Original") {
             withAnimation(.easeInOut(duration: 0.2)) {
@@ -75,7 +83,7 @@ struct EditingSidebar: View {
           Text("Save")
         }
         .menuStyle(.borderedButton)
-        .disabled(!pipeline.hasEdits)
+        .disabled(!canSaveEdits)
 
         Button("Done") {
           withAnimation(.easeInOut(duration: 0.2)) {
@@ -88,6 +96,11 @@ struct EditingSidebar: View {
     }
     .frame(width: 280)
     .background(.ultraThinMaterial)
+    .onAppear {
+      if item.isVideo {
+        appState.isEditing = false
+      }
+    }
   }
 
   // MARK: - Adjust Tab

@@ -452,14 +452,16 @@ struct MainContentView: View {
         }
         .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
-        Button {
-          withAnimation(.easeInOut(duration: 0.25)) {
-            appState.isEditing.toggle()
+        if !item.isVideo {
+          Button {
+            withAnimation(.easeInOut(duration: 0.25)) {
+              appState.isEditing.toggle()
+            }
+          } label: {
+            Image(systemName: "slider.horizontal.3")
           }
-        } label: {
-          Image(systemName: "slider.horizontal.3")
+          .help("Edit")
         }
-        .help("Edit")
 
         Button {
           appState.showInfoPopover.toggle()

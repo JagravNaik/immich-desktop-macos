@@ -1264,7 +1264,12 @@ final class AppState: ObservableObject {
   // MARK: - Photo Editing (Save / Export)
 
   func saveEditedImage(pipeline: PhotoEditingPipeline) {
-    guard let connectedServer, let currentSession, let item = selectedItem else { return }
+    guard
+      let connectedServer,
+      let currentSession,
+      let item = selectedItem,
+      !item.isVideo
+    else { return }
     Task {
       guard let jpegData = await pipeline.renderFinalJPEG() else { return }
       do {
@@ -1286,9 +1291,10 @@ final class AppState: ObservableObject {
   }
 
   func exportEditedImage(pipeline: PhotoEditingPipeline) {
+    guard let item = selectedItem, !item.isVideo else { return }
     Task {
       let panel = NSSavePanel()
-      let defaultName = selectedItem?.title ?? "Edited Photo"
+      let defaultName = item.title
       panel.nameFieldStringValue = "\(defaultName)_edited.jpg"
       panel.canCreateDirectories = true
       panel.allowedContentTypes = [.jpeg, .png]
