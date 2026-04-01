@@ -136,7 +136,7 @@ final class ThumbnailStore: ObservableObject {
         inFlightRegistry.clear(cacheKey: cacheKey)
 
         if let image {
-          let cost = Int(image.size.width * image.size.height * 4)
+          let cost = cacheCost(for: image)
           cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
         }
 
@@ -159,6 +159,18 @@ final class ThumbnailStore: ObservableObject {
     case .remoteAsset(let assetID):
       return "remote::\(context?.baseURL.absoluteString ?? "")::\(assetID)::\(size.rawValue)"
     }
+  }
+
+  private func cacheCost(for image: NSImage) -> Int {
+    if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+      return max(cgImage.width * cgImage.height * 4, 1)
+    }
+
+    if let bitmapRep = image.representations.compactMap({ $0 as? NSBitmapImageRep }).first {
+      return max(bitmapRep.pixelsWide * bitmapRep.pixelsHigh * 4, 1)
+    }
+
+    return max(Int(image.size.width * image.size.height * 4), 1)
   }
 
   private static func loadRemoteImage(

@@ -91,11 +91,6 @@ resolve_version() {
     return
   fi
 
-  if [[ -n "${CF_BUNDLE_VERSION:-}" ]]; then
-    printf '%s\n' "$CF_BUNDLE_VERSION"
-    return
-  fi
-
   if command -v node >/dev/null 2>&1 && [[ -f "${REPO_DIR}/package.json" ]]; then
     node -e 'const fs = require("node:fs"); const path = process.argv[1]; const version = JSON.parse(fs.readFileSync(path, "utf8")).version; if (version) console.log(version);' \
       "${REPO_DIR}/package.json"
@@ -127,13 +122,34 @@ normalize_short_version() {
 }
 
 normalize_bundle_version() {
-  local short_version
-  short_version="$(normalize_short_version "$1")"
-  if [[ ! "$short_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+  if [[ -n "${CF_BUNDLE_VERSION:-}" ]]; then
+    printf '%s\n' "${CF_BUNDLE_VERSION}"
+    return
+  fi
+
+  if [[ -n "${BUILD_NUMBER:-}" ]]; then
+    printf '%s\n' "${BUILD_NUMBER}"
+    return
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    local commit_count
+    commit_count="$(
+      cd "${REPO_DIR}" && git rev-list --count HEAD 2>/dev/null || true
+    )"
+    if [[ "$commit_count" =~ ^[0-9]+$ ]] && [[ "$commit_count" -gt 0 ]]; then
+      printf '%s\n' "$commit_count"
+      return
+    fi
+  fi
+
+  local fallback_timestamp
+  fallback_timestamp="$(date +%s)"
+  if [[ ! "$fallback_timestamp" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "1"
     return
   fi
-  printf '%s\n' "$short_version"
+  printf '%s\n' "$fallback_timestamp"
 }
 
 RAW_VERSION="$(resolve_version)"
