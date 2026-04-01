@@ -74,7 +74,6 @@ CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 ICONSET_DIR="${OUTPUT_ROOT}/${APP_NAME}.iconset"
-EXECUTABLE_PATH="${PROJECT_DIR}/.build/${BUILD_CONFIGURATION}/${APP_NAME}"
 ICON_SOURCE="${REPO_DIR}/design/immich-logo.png"
 
 for tool in swift sips iconutil plutil codesign; do
@@ -82,6 +81,9 @@ for tool in swift sips iconutil plutil codesign; do
 done
 
 require_file "$ICON_SOURCE"
+
+SWIFT_BUILD_BIN_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path --package-path "$PROJECT_DIR")"
+EXECUTABLE_PATH="${SWIFT_BUILD_BIN_DIR}/${APP_NAME}"
 
 resolve_version() {
   if [[ -n "${VERSION:-}" ]]; then

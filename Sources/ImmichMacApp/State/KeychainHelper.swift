@@ -9,7 +9,7 @@ enum KeychainHelperError: LocalizedError {
   var errorDescription: String? {
     switch self {
     case .invalidUTF8(let account):
-      return "Could not encode keychain value for \(account)."
+      return "Stored keychain value for \(account) is not valid UTF-8."
     case .operationFailed(let operation, let account, let status):
       let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
       return "Keychain \(operation) failed for \(account): \(message)"
@@ -26,9 +26,7 @@ enum KeychainHelper {
   }()
 
   static func save(account: String, password: String) throws {
-    guard let data = password.data(using: .utf8) else {
-      throw KeychainHelperError.invalidUTF8(account: account)
-    }
+    let data = Data(password.utf8)
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,

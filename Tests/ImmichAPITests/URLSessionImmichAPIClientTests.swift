@@ -339,12 +339,17 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
     defer { buffer.deallocate() }
 
-    while stream.hasBytesAvailable {
+    while true {
       let read = stream.read(buffer, maxLength: bufferSize)
-      if read <= 0 {
+      if read > 0 {
+        data.append(buffer, count: read)
+      } else if read == 0 {
+        break
+      } else {
+        let errorDescription = stream.streamError?.localizedDescription ?? "Unknown stream error"
+        XCTFail("Failed to read HTTP body stream: \(errorDescription)")
         break
       }
-      data.append(buffer, count: read)
     }
 
     return data
