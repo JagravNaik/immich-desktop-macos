@@ -37,6 +37,8 @@ struct TagPill: View {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Remove tag")
+        .accessibilityHint("Removes this tag")
       }
     }
     .padding(.horizontal, 10)

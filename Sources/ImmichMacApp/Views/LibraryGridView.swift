@@ -279,9 +279,12 @@ struct LibraryGridView: View {
   }
 
   private func itemID(at location: CGPoint) -> String? {
-    orderedItems.first(where: { item in
-      itemFrames[item.id]?.contains(location) == true
-    })?.id
+    for (itemID, frame) in itemFrames {
+      if frame.contains(location) {
+        return itemID
+      }
+    }
+    return nil
   }
 
   private func startScrubSelectionIfNeeded(at location: CGPoint) {
@@ -565,6 +568,8 @@ struct PhotoGridCell: View {
             .background(.black.opacity(0.4), in: Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(item.isFavorite ? "Unfavorite" : "Favorite"))
+        .accessibilityHint(Text("Toggle favorite"))
         .padding(4)
         .transition(.opacity)
       }
