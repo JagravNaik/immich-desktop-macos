@@ -250,7 +250,9 @@ final class ThumbnailStore: ObservableObject {
       return Int(ceil(Double(size.maxPixelSize)))
     }
 
-    return max(pixelWidth.intValue, pixelHeight.intValue)
+    let largestDimension = max(pixelWidth.intValue, pixelHeight.intValue)
+    let maxAllowedSize = Int(ceil(Double(size.maxPixelSize)))
+    return min(largestDimension, maxAllowedSize)
   }
 
   private static func thumbnailURL(baseURL: URL, assetID: String, size: ThumbnailSize = .thumbnail) -> URL? {
