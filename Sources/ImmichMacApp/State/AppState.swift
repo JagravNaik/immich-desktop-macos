@@ -222,7 +222,7 @@ final class AppState: ObservableObject {
   private var totalTimelineItemCount = 0
   private var timelineErrorMessage: String?
 
-  struct ThumbnailContext {
+  struct ThumbnailContext: Sendable {
     let baseURL: URL
     let authHeaderField: String
     let authHeaderValue: String

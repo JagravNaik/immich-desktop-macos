@@ -82,9 +82,6 @@ done
 
 require_file "$ICON_SOURCE"
 
-SWIFT_BUILD_BIN_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path --package-path "$PROJECT_DIR")"
-EXECUTABLE_PATH="${SWIFT_BUILD_BIN_DIR}/${APP_NAME}"
-
 resolve_version() {
   if [[ -n "${VERSION:-}" ]]; then
     printf '%s\n' "$VERSION"
@@ -162,6 +159,9 @@ swift build \
   -c "$BUILD_CONFIGURATION" \
   --package-path "$PROJECT_DIR" \
   --product "$APP_NAME"
+
+SWIFT_BUILD_BIN_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path --package-path "$PROJECT_DIR")"
+EXECUTABLE_PATH="${SWIFT_BUILD_BIN_DIR}/${APP_NAME}"
 
 if [[ ! -x "$EXECUTABLE_PATH" ]]; then
   echo "Expected executable not found at ${EXECUTABLE_PATH}" >&2

@@ -5,12 +5,15 @@ import ImmichCore
 
 final class URLSessionImmichAPIClientTests: XCTestCase {
   private var handlerSessionIDs: [String] = []
+  private let tempDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("ImmichAPITests-\(UUID().uuidString)", isDirectory: true)
 
   override func tearDown() {
     for sessionID in handlerSessionIDs {
       StubURLProtocol.removeRequestHandler(for: sessionID)
     }
     handlerSessionIDs.removeAll()
+    try? FileManager.default.removeItem(at: tempDirectory)
     super.tearDown()
   }
 
@@ -356,13 +359,12 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
   }
 
   private func makeTempFile(named name: String, contents: String) throws -> URL {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ImmichAPITests", isDirectory: true)
     try FileManager.default.createDirectory(
-      at: directory,
+      at: tempDirectory,
       withIntermediateDirectories: true,
       attributes: nil
     )
-    let fileURL = directory.appendingPathComponent("\(UUID().uuidString)-\(name)")
+    let fileURL = tempDirectory.appendingPathComponent("\(UUID().uuidString)-\(name)")
     try Data(contents.utf8).write(to: fileURL)
     return fileURL
   }

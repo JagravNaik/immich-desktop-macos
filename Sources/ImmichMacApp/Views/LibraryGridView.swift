@@ -29,9 +29,15 @@ struct LibraryGridView: View {
   let onOpenAsset: (AppState.PhotoItem, CGRect, NSImage?) -> Void
   let onHeroFramesChanged: ([String: CGRect]) -> Void
   @State private var itemFrames: [String: CGRect] = [:]
+  @State private var itemFrameBuckets: [SpatialBucket: [String]] = [:]
   @State private var heroItemFrames: [String: CGRect] = [:]
   @State private var dragSelectionState: DragSelectionState?
   @State private var keyboardScrollTargetID: String?
+
+  private struct SpatialBucket: Hashable {
+    let x: Int
+    let y: Int
+  }
 
   private struct DragSelectionState {
     let mode: DragSelectionMode
@@ -279,12 +285,54 @@ struct LibraryGridView: View {
   }
 
   private func itemID(at location: CGPoint) -> String? {
-    for (itemID, frame) in itemFrames {
+    let bucket = spatialBucket(for: location)
+    guard let candidateIDs = itemFrameBuckets[bucket] else {
+      return nil
+    }
+
+    for itemID in candidateIDs {
+      guard let frame = itemFrames[itemID] else { continue }
       if frame.contains(location) {
         return itemID
       }
     }
     return nil
+  }
+
+  private var spatialBucketSize: CGFloat {
+    max(appState.photoGridThumbnailWidth + appState.photoGridSpacing, 1)
+  }
+
+  private func spatialBucket(for point: CGPoint) -> SpatialBucket {
+    SpatialBucket(
+      x: Int(floor(point.x / spatialBucketSize)),
+      y: Int(floor(point.y / spatialBucketSize))
+    )
+  }
+
+  private func rebuildItemFrameBuckets(from frames: [String: CGRect]) -> [SpatialBucket: [String]] {
+    let bucketSize = spatialBucketSize
+    var buckets: [SpatialBucket: [String]] = [:]
+
+    for (itemID, frame) in frames {
+      let minX = Int(floor(frame.minX / bucketSize))
+      let maxX = Int(floor((max(frame.maxX, frame.minX + 1) - 1) / bucketSize))
+      let minY = Int(floor(frame.minY / bucketSize))
+      let maxY = Int(floor((max(frame.maxY, frame.minY + 1) - 1) / bucketSize))
+
+      for x in minX...maxX {
+        for y in minY...maxY {
+          buckets[SpatialBucket(x: x, y: y), default: []].append(itemID)
+        }
+      }
+    }
+
+    return buckets
+  }
+
+  private func updateItemFrames(_ frames: [String: CGRect]) {
+    itemFrames = frames
+    itemFrameBuckets = rebuildItemFrameBuckets(from: frames)
   }
 
   private func startScrubSelectionIfNeeded(at location: CGPoint) {
@@ -395,7 +443,7 @@ struct LibraryGridView: View {
     }
     .overlay { scrubSelectionOverlay }
     .coordinateSpace(name: photoGridCoordinateSpace)
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { itemFrames = $0 }
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
     .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
       heroItemFrames = frames
       onHeroFramesChanged(frames)
@@ -443,7 +491,7 @@ struct LibraryGridView: View {
     }
     .overlay { scrubSelectionOverlay }
     .coordinateSpace(name: photoGridCoordinateSpace)
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { itemFrames = $0 }
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
     .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
       heroItemFrames = frames
       onHeroFramesChanged(frames)
