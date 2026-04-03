@@ -4,6 +4,19 @@ import AppKit
 
 let photoHeroCoordinateSpaceName = "ImmichPhotoHero"
 
+struct InteractiveDismissPresentation: Equatable {
+  let offset: CGSize
+  let scale: CGFloat
+  let backdropOpacity: Double
+  let progress: CGFloat
+
+  static let identity = InteractiveDismissPresentation(offset: .zero, scale: 1, backdropOpacity: 0.96, progress: 0)
+
+  var isInteractive: Bool {
+    progress > 0.001
+  }
+}
+
 // MARK: - Main Content View (Photos-style three-pane layout)
 
 struct MainContentView: View {
@@ -14,6 +27,7 @@ struct MainContentView: View {
   @State private var heroTransition: HeroTransitionState?
   @State private var heroItemFrames: [String: CGRect] = [:]
   @State private var isHeroExpanded = false
+  @State private var interactiveDismissPresentation: InteractiveDismissPresentation = .identity
 
   struct HeroTransitionState: Equatable {
     enum Direction: Equatable {
@@ -26,12 +40,14 @@ struct MainContentView: View {
     let sourceFrame: CGRect
     let image: NSImage
     let aspectRatio: CGFloat
+    let expandedPresentation: InteractiveDismissPresentation
 
     static func == (lhs: HeroTransitionState, rhs: HeroTransitionState) -> Bool {
       lhs.itemID == rhs.itemID
         && lhs.direction == rhs.direction
         && lhs.sourceFrame == rhs.sourceFrame
         && lhs.aspectRatio == rhs.aspectRatio
+        && lhs.expandedPresentation == rhs.expandedPresentation
     }
   }
 
@@ -110,6 +126,7 @@ struct MainContentView: View {
     }
     heroTransition = nil
     isHeroExpanded = false
+    interactiveDismissPresentation = .identity
   }
 
   // MARK: - Detail Area
@@ -132,6 +149,7 @@ struct MainContentView: View {
           editingPipeline: editingPipeline,
           initialDisplayImage: heroSeedImage(for: item),
           isHeroTransitioning: heroTransition?.itemID == item.id,
+          onDismissPresentationChanged: { interactiveDismissPresentation = $0 },
           onDismiss: closeViewer
         )
         .opacity(viewerOpacity)
@@ -177,7 +195,7 @@ struct MainContentView: View {
     if heroTransition != nil {
       return 1
     }
-    return appState.isViewingPhoto ? 0 : 1
+    return appState.isViewingPhoto ? Double(interactiveDismissPresentation.progress) : 1
   }
 
   private var viewerOpacity: Double {
@@ -213,6 +231,7 @@ struct MainContentView: View {
     switch appState.sidebarSelection {
     case .library: "Library"
     case .collections: "Collections"
+    case .map: "Map"
     case .favorites: "Favorites"
     case .videos: "Videos"
     case .livePhotos: "Live Photos"
@@ -238,6 +257,12 @@ struct MainContentView: View {
     switch appState.sidebarSelection {
     case .collections:
       CollectionsView(appState: appState, thumbnailStore: thumbnailStore)
+    case .map:
+      MapBrowserView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        onOpenAsset: handleOpenAsset
+      )
     case .sharedLinks:
       SharedLinksView(appState: appState)
     case .allAlbums:
@@ -518,6 +543,7 @@ struct MainContentView: View {
     appState.selectedItemID = item.id
     appState.isViewingLivePhoto = false
     appState.isEditing = false
+    interactiveDismissPresentation = .identity
 
     guard let sourceImage, sourceFrame != .zero else {
       withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
@@ -531,7 +557,8 @@ struct MainContentView: View {
       direction: .opening,
       sourceFrame: sourceFrame,
       image: sourceImage,
-      aspectRatio: preferredHeroAspectRatio(for: item, image: sourceImage)
+      aspectRatio: preferredHeroAspectRatio(for: item, image: sourceImage),
+      expandedPresentation: .identity
     )
     isHeroExpanded = false
 
@@ -567,15 +594,21 @@ struct MainContentView: View {
       withAnimation(.easeOut(duration: 0.18)) {
         appState.isViewingPhoto = false
       }
+      interactiveDismissPresentation = .identity
       return
     }
+
+    let expandedPresentation = interactiveDismissPresentation.isInteractive
+      ? interactiveDismissPresentation
+      : .identity
 
     heroTransition = HeroTransitionState(
       itemID: item.id,
       direction: .closing,
       sourceFrame: destinationFrame,
       image: heroImage,
-      aspectRatio: preferredHeroAspectRatio(for: item, image: heroImage)
+      aspectRatio: preferredHeroAspectRatio(for: item, image: heroImage),
+      expandedPresentation: expandedPresentation
     )
     isHeroExpanded = true
 
@@ -591,6 +624,7 @@ struct MainContentView: View {
       guard heroTransition?.itemID == item.id else { return }
       heroTransition = nil
       isHeroExpanded = false
+      interactiveDismissPresentation = .identity
     }
   }
 
@@ -623,7 +657,7 @@ struct MainContentView: View {
 
   private var showsPhotoGridZoomControl: Bool {
     switch appState.sidebarSelection {
-    case .collections, .sharedLinks, .allAlbums:
+    case .collections, .map, .sharedLinks, .allAlbums:
       return false
     default:
       return true
@@ -932,12 +966,12 @@ private struct HeroOpenOverlay: View {
 
   var body: some View {
     GeometryReader { proxy in
-      let targetFrame = targetFrame(in: proxy.size)
-      let activeFrame = isExpanded ? targetFrame : heroState.sourceFrame
+      let expandedFrame = expandedFrame(in: proxy.size)
+      let activeFrame = isExpanded ? expandedFrame : heroState.sourceFrame
 
       ZStack(alignment: .topLeading) {
         Color.black
-          .opacity(isExpanded ? 0.96 : 0)
+          .opacity(isExpanded ? heroState.expandedPresentation.backdropOpacity : 0)
           .ignoresSafeArea()
 
         Image(nsImage: heroState.image)
@@ -970,6 +1004,17 @@ private struct HeroOpenOverlay: View {
 
     let origin = CGPoint(x: (size.width - width) / 2, y: (size.height - height) / 2)
     return CGRect(origin: origin, size: CGSize(width: width, height: height))
+  }
+
+  private func expandedFrame(in size: CGSize) -> CGRect {
+    let targetFrame = targetFrame(in: size)
+    let scaledWidth = targetFrame.width * heroState.expandedPresentation.scale
+    let scaledHeight = targetFrame.height * heroState.expandedPresentation.scale
+    let origin = CGPoint(
+      x: targetFrame.midX - (scaledWidth / 2) + heroState.expandedPresentation.offset.width,
+      y: targetFrame.midY - (scaledHeight / 2) + heroState.expandedPresentation.offset.height
+    )
+    return CGRect(origin: origin, size: CGSize(width: scaledWidth, height: scaledHeight))
   }
 }
 

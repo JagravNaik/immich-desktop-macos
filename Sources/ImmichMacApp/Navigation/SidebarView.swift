@@ -7,6 +7,7 @@ enum SidebarDestination: Hashable {
   // Top-level
   case library
   case collections
+  case map
 
   // Pinned
   case pinnedAlbum(id: String)
@@ -40,6 +41,7 @@ enum SidebarDestination: Hashable {
     switch self {
     case .library: "Library"
     case .collections: "Collections"
+    case .map: "Map"
     case .pinnedAlbum: "Pinned Album"
     case .allAlbums: "All Albums"
     case .album: "Album"
@@ -61,6 +63,7 @@ enum SidebarDestination: Hashable {
     switch self {
     case .library: "photo.on.rectangle.angled"
     case .collections: "square.grid.2x2"
+    case .map: "map"
     case .pinnedAlbum: "pin.fill"
     case .allAlbums: "rectangle.stack"
     case .album: "rectangle.stack"
@@ -138,6 +141,10 @@ struct SidebarView: View {
       Label("Collections", systemImage: "square.grid.2x2")
         .tag(SidebarDestination.collections)
         .fontWeight(selection == .collections ? .semibold : .regular)
+
+      Label("Map", systemImage: "map")
+        .tag(SidebarDestination.map)
+        .fontWeight(selection == .map ? .semibold : .regular)
     }
   }
 

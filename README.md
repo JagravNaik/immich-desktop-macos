@@ -22,6 +22,10 @@ swift run ImmichMacApp
 
 The app opens with server verification and sign-in, then presents the native macOS library experience with timeline browsing, hero-style viewer transitions, keyboard navigation, editing tools, collections surfaces, management sheets, and desktop-specific polish built on the shared SwiftPM modules in this directory.
 
+## Developer notes
+
+- [Map browser implementation notes](./docs/map-browser.md)
+
 ## Build a macOS `.app` bundle
 
 ```bash

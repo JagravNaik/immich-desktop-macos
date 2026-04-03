@@ -10,30 +10,30 @@ struct AssetInfoInspector: View {
   let item: AppState.PhotoItem
   @State private var detail: AssetDetail?
   @State private var isLoading = false
+  @State private var showsTags = false
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 0) {
-        headerSection
-          .padding(16)
+    VStack(alignment: .leading, spacing: 0) {
+      headerSection
+        .padding(18)
 
+      Divider()
+
+      cameraSection
+        .padding(18)
+
+      Divider()
+
+      tagsSection
+        .padding(18)
+
+      if let lat = item.latitude, let lon = item.longitude {
         Divider()
-
-        cameraSection
-          .padding(16)
-
-        Divider()
-
-        tagsSection
-          .padding(16)
-
-        if let lat = item.latitude, let lon = item.longitude {
-          Divider()
-          mapSection(lat: lat, lon: lon)
-        }
+        mapSection(lat: lat, lon: lon)
+          .padding(18)
       }
     }
-    .frame(width: 300)
+    .frame(width: 420)
     .background(.ultraThinMaterial)
     .task(id: item.id) {
       await loadDetail()
@@ -50,6 +50,7 @@ struct AssetInfoInspector: View {
     VStack(alignment: .leading, spacing: 6) {
       Text(detail?.originalFileName ?? item.title)
         .font(.headline)
+        .lineLimit(2)
 
       HStack(spacing: 4) {
         Text(item.date, style: .date)
@@ -83,7 +84,6 @@ struct AssetInfoInspector: View {
   private var cameraSection: some View {
     VStack(alignment: .leading, spacing: 12) {
       if let exif = detail?.exif {
-        // Camera heading
         HStack(spacing: 10) {
           Image(systemName: "camera")
             .font(.title3)
@@ -100,15 +100,20 @@ struct AssetInfoInspector: View {
           }
         }
 
-        // EXIF grid
-        HStack(spacing: 0) {
-          exifItem(label: "ISO", value: exif.iso.map(String.init) ?? "—")
-          Spacer()
-          exifItem(label: "FOCAL", value: exif.focalLength.map { "\(Int($0))mm" } ?? "—")
-          Spacer()
-          exifItem(label: "f/", value: exif.fNumber.map { String(format: "%.1f", $0) } ?? "—")
-          Spacer()
-          exifItem(label: "SHUTTER", value: exif.exposureTime ?? "—")
+        Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
+          ForEach(metadataRows(for: exif)) { row in
+            GridRow(alignment: .firstTextBaseline) {
+              Text(row.label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 108, alignment: .leading)
+
+              Text(row.value)
+                .font(row.usesMonospacedValue ? .system(.subheadline, design: .monospaced) : .subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            }
+          }
         }
       } else if isLoading {
         HStack {
@@ -130,16 +135,6 @@ struct AssetInfoInspector: View {
     }
   }
 
-  private func exifItem(label: String, value: String) -> some View {
-    VStack(spacing: 2) {
-      Text(label)
-        .font(.system(size: 9, weight: .bold))
-        .foregroundStyle(.tertiary)
-      Text(value)
-        .font(.system(size: 12, design: .monospaced))
-    }
-  }
-
   // MARK: - Tags
 
   private var tagsSection: some View {
@@ -152,24 +147,37 @@ struct AssetInfoInspector: View {
           appState.presentTagEditor(for: [item.id], currentTags: detail?.tags ?? [], title: "Edit Tags")
         }
         .buttonStyle(.plain)
-      }
 
-      if let tags = detail?.tags, !tags.isEmpty {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
-          ForEach(tags) { tag in
-            TagPill(title: tag.value, colorHex: tag.color)
+        Button(showsTags ? "Hide" : "Show") {
+          withAnimation(.easeInOut(duration: 0.18)) {
+            showsTags.toggle()
           }
         }
-      } else if isLoading {
-        HStack {
-          ProgressView().controlSize(.small)
-          Text("Loading tags…")
-            .font(.caption)
+        .buttonStyle(.plain)
+      }
+
+      if showsTags {
+        if let tags = detail?.tags, !tags.isEmpty {
+          LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
+            ForEach(tags) { tag in
+              TagPill(title: tag.value, colorHex: tag.color)
+            }
+          }
+        } else if isLoading {
+          HStack {
+            ProgressView().controlSize(.small)
+            Text("Loading tags…")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        } else {
+          Text("No tags on this item.")
+            .font(.subheadline)
             .foregroundStyle(.secondary)
         }
       } else {
-        Text("No tags on this item.")
-          .font(.subheadline)
+        Text(tagSummaryText)
+          .font(.caption)
           .foregroundStyle(.secondary)
       }
     }
@@ -178,15 +186,24 @@ struct AssetInfoInspector: View {
   // MARK: - Map
 
   private func mapSection(lat: Double, lon: Double) -> some View {
-    VStack(alignment: .leading, spacing: 0) {
-      let location = [item.city, item.country].compactMap { $0 }.joined(separator: ", ")
+    VStack(alignment: .leading, spacing: 12) {
+      Label("Location", systemImage: "map")
+        .font(.headline)
+
+      let location = [detail?.exif?.city ?? item.city, detail?.exif?.state, detail?.exif?.country ?? item.country]
+        .compactMap { value in
+          guard let value, !value.isEmpty else { return nil }
+          return value
+        }
+        .joined(separator: ", ")
+
       if !location.isEmpty {
         Text(location)
           .font(.caption.weight(.medium))
-          .padding(.horizontal, 16)
+          .padding(.horizontal, 12)
           .padding(.vertical, 8)
           .frame(maxWidth: .infinity, alignment: .leading)
-          .background(.black.opacity(0.05))
+          .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
       }
 
       Map(initialPosition: .region(MKCoordinateRegion(
@@ -195,7 +212,8 @@ struct AssetInfoInspector: View {
       ))) {
         Marker("", coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon))
       }
-      .frame(height: 160)
+      .frame(height: 150)
+      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
   }
 
@@ -222,5 +240,62 @@ struct AssetInfoInspector: View {
     formatter.countStyle = .file
     return formatter.string(fromByteCount: Int64(bytes))
   }
+
+  private var tagSummaryText: String {
+    if isLoading {
+      return "Loading tags…"
+    }
+    guard let tags = detail?.tags else {
+      return "No tags on this item."
+    }
+    if tags.isEmpty {
+      return "No tags on this item."
+    }
+    if tags.count == 1 {
+      return "1 tag"
+    }
+    return "\(tags.count) tags"
+  }
+
+  private func metadataRows(for exif: ExifInfo) -> [MetadataRow] {
+    var rows: [MetadataRow] = [
+      MetadataRow(label: "ISO", value: exif.iso.map(String.init) ?? "—", usesMonospacedValue: true),
+      MetadataRow(label: "Focal Length", value: exif.focalLength.map { "\(Int($0)) mm" } ?? "—", usesMonospacedValue: true),
+      MetadataRow(label: "Aperture", value: exif.fNumber.map { "f/\(String(format: "%.1f", $0))" } ?? "—", usesMonospacedValue: true),
+      MetadataRow(label: "Shutter", value: exif.exposureTime ?? "—", usesMonospacedValue: true),
+    ]
+
+    if let dateTimeOriginal = exif.dateTimeOriginal {
+      rows.append(MetadataRow(label: "Captured", value: dateTimeOriginal.formatted(date: .abbreviated, time: .shortened)))
+    }
+
+    let location = [exif.city, exif.state, exif.country]
+      .compactMap { value in
+        guard let value, !value.isEmpty else { return nil }
+        return value
+      }
+      .joined(separator: ", ")
+    if !location.isEmpty {
+      rows.append(MetadataRow(label: "Location", value: location))
+    }
+
+    if let rating = exif.rating {
+      rows.append(MetadataRow(label: "Rating", value: String(repeating: "★", count: rating)))
+    }
+
+    if let description = exif.description, !description.isEmpty {
+      rows.append(MetadataRow(label: "Description", value: description))
+    }
+
+    return rows
+  }
+}
+
+private struct MetadataRow: Identifiable {
+  let label: String
+  let value: String
+  var usesMonospacedValue = false
+
+  var id: String { label }
 }
 #endif

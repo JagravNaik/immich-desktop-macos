@@ -42,5 +42,9 @@ let package = Package(
       name: "ImmichAPITests",
       dependencies: ["ImmichAPI", "ImmichCore"]
     ),
+    .testTarget(
+      name: "ImmichMacAppTests",
+      dependencies: ["ImmichMacApp", "ImmichAPI", "ImmichCore"]
+    ),
   ]
 )

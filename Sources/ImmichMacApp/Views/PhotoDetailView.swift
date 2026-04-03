@@ -10,18 +10,23 @@ struct PhotoDetailView: View {
   @ObservedObject var editingPipeline: PhotoEditingPipeline
   let initialDisplayImage: NSImage?
   let isHeroTransitioning: Bool
+  let onDismissPresentationChanged: (InteractiveDismissPresentation) -> Void
   let onDismiss: () -> Void
 
   @State private var image: NSImage?
   @State private var currentItemID: String?
   @State private var isLoading = false
   @State private var dragOffset: CGSize = .zero
+  @State private var dismissProgress: CGFloat = 0
+  @State private var zoomScale: CGFloat = 1
+  @GestureState private var pinchScale: CGFloat = 1
 
   var body: some View {
     if let item = appState.selectedItem {
       ZStack {
         // Dark background
         Color(white: 0.06)
+          .opacity(backgroundOpacity)
           .ignoresSafeArea()
 
         // Main content
@@ -34,6 +39,7 @@ struct PhotoDetailView: View {
                     .padding(16)
                 }
               }
+              .scaleEffect(dismissScale)
               .offset(dragOffset)
           } else {
             contentView(for: item)
@@ -43,6 +49,7 @@ struct PhotoDetailView: View {
                     .padding(16)
                 }
               }
+              .scaleEffect(dismissScale)
               .offset(dragOffset)
               .gesture(dismissDragGesture)
           }
@@ -50,12 +57,26 @@ struct PhotoDetailView: View {
 
         // Keyboard shortcuts (invisible)
         keyboardShortcuts
+
+        TrackpadSwipeDismissOverlay(
+          isEnabled: trackpadSwipeDismissEnabled(for: item),
+          onTranslationChanged: { translation in
+            updateDismissOffset(CGSize(width: 0, height: translation))
+          },
+          onSwipeEnded: { translation in
+            finishDismissInteraction(with: CGSize(width: 0, height: translation))
+          }
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
       }
       .onChange(of: item.id) { _, newID in
         image = initialDisplayImage
           ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext)
         currentItemID = newID
         isLoading = true
+        resetImageViewState()
+        onDismissPresentationChanged(.identity)
       }
       .task(id: "\(item.id)::\(isHeroTransitioning)") {
         currentItemID = item.id
@@ -118,10 +139,7 @@ struct PhotoDetailView: View {
     ZStack {
       // Still image: show edited version when editing, otherwise raw
       if appState.isEditing, let editedImage = editingPipeline.editedImage {
-        Image(nsImage: editedImage)
-          .resizable()
-          .scaledToFit()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        zoomableImageView(editedImage)
       } else if item.isPanorama, let image, !isHeroTransitioning {
         ZStack(alignment: .bottomLeading) {
           PanoramaSceneView(image: image)
@@ -136,10 +154,7 @@ struct PhotoDetailView: View {
             .padding(18)
         }
       } else if let displayImage = displayImage(for: item) {
-        Image(nsImage: displayImage)
-          .resizable()
-          .scaledToFit()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+        zoomableImageView(displayImage)
       } else if isLoading {
         ProgressView()
           .controlSize(.large)
@@ -193,6 +208,33 @@ struct PhotoDetailView: View {
     return thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
   }
 
+  private func zoomableImageView(_ image: NSImage) -> some View {
+    Image(nsImage: image)
+      .resizable()
+      .scaledToFit()
+      .scaleEffect(effectiveZoomScale)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .contentShape(Rectangle())
+      .clipped()
+      .simultaneousGesture(zoomGesture)
+  }
+
+  private func trackpadSwipeDismissEnabled(for item: AppState.PhotoItem) -> Bool {
+    !isHeroTransitioning
+      && !item.isVideo
+      && !item.isPanorama
+      && !appState.isViewingLivePhoto
+      && !isImageZoomed
+  }
+
+  private var dismissScale: CGFloat {
+    1 - (dismissProgress * 0.12)
+  }
+
+  private var backgroundOpacity: Double {
+    1 - Double(dismissProgress * 0.72)
+  }
+
   // MARK: - Live Photo Badge
 
   private var liveBadge: some View {
@@ -222,17 +264,76 @@ struct PhotoDetailView: View {
   private var dismissDragGesture: some Gesture {
     DragGesture()
       .onChanged { value in
-        dragOffset = value.translation
+        updateDismissOffset(value.translation)
       }
       .onEnded { value in
-        let magnitude = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-        if magnitude > 120 {
-          onDismiss()
-        }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+        finishDismissInteraction(with: value.translation)
+      }
+  }
+
+  private var zoomGesture: some Gesture {
+    MagnificationGesture()
+      .updating($pinchScale) { value, state, _ in
+        state = value
+      }
+      .onEnded { value in
+        zoomScale = clampedZoomScale(zoomScale * value)
+        if !isImageZoomed {
           dragOffset = .zero
         }
       }
+  }
+
+  private var effectiveZoomScale: CGFloat {
+    clampedZoomScale(zoomScale * pinchScale)
+  }
+
+  private var isImageZoomed: Bool {
+    effectiveZoomScale > 1.01
+  }
+
+  private func clampedZoomScale(_ value: CGFloat) -> CGFloat {
+    min(max(value, 1), 6)
+  }
+
+  private func resetImageViewState() {
+    dragOffset = .zero
+    dismissProgress = 0
+    zoomScale = 1
+  }
+
+  private func updateDismissOffset(_ translation: CGSize) {
+    guard !isImageZoomed else { return }
+    let vertical = max(translation.height, 0)
+    let horizontal = translation.width * 0.18
+    let progress = min(max(vertical / 360, 0), 1)
+    dragOffset = CGSize(width: horizontal, height: vertical)
+    dismissProgress = progress
+    onDismissPresentationChanged(currentDismissPresentation)
+  }
+
+  private func finishDismissInteraction(with translation: CGSize) {
+    guard !isImageZoomed else { return }
+    let magnitude = sqrt(pow(translation.width, 2) + pow(translation.height, 2))
+    if magnitude > 120 {
+      onDismissPresentationChanged(currentDismissPresentation)
+      onDismiss()
+      return
+    }
+    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+      dragOffset = .zero
+      dismissProgress = 0
+    }
+    onDismissPresentationChanged(.identity)
+  }
+
+  private var currentDismissPresentation: InteractiveDismissPresentation {
+    InteractiveDismissPresentation(
+      offset: dragOffset,
+      scale: dismissScale,
+      backdropOpacity: backgroundOpacity,
+      progress: dismissProgress
+    )
   }
 
   // MARK: - Keyboard
@@ -272,6 +373,120 @@ struct PhotoDetailView: View {
   private func livePhotoPlaybackURL(for item: AppState.PhotoItem) -> URL? {
     guard let videoID = item.livePhotoVideoID, let baseURL = appState.thumbnailContext?.baseURL else { return nil }
     return baseURL.appending(path: "assets").appending(path: videoID).appending(path: "video").appending(path: "playback")
+  }
+}
+
+private struct TrackpadSwipeDismissOverlay: NSViewRepresentable {
+  let isEnabled: Bool
+  let onTranslationChanged: (CGFloat) -> Void
+  let onSwipeEnded: (CGFloat) -> Void
+
+  func makeNSView(context: Context) -> TrackpadSwipeDismissNSView {
+    let view = TrackpadSwipeDismissNSView()
+    updateNSView(view, context: context)
+    return view
+  }
+
+  func updateNSView(_ nsView: TrackpadSwipeDismissNSView, context: Context) {
+    nsView.isEnabled = isEnabled
+    nsView.onTranslationChanged = onTranslationChanged
+    nsView.onSwipeEnded = onSwipeEnded
+  }
+}
+
+private final class ScrollWheelEventMonitor {
+  private var monitor: Any?
+
+  deinit {
+    remove()
+  }
+
+  func replace(with monitor: Any?) {
+    remove()
+    self.monitor = monitor
+  }
+
+  func remove() {
+    guard let monitor else { return }
+    NSEvent.removeMonitor(monitor)
+    self.monitor = nil
+  }
+}
+
+private final class TrackpadSwipeDismissNSView: NSView {
+  var isEnabled = false
+  var onTranslationChanged: (CGFloat) -> Void = { _ in }
+  var onSwipeEnded: (CGFloat) -> Void = { _ in }
+
+  private let eventMonitor = ScrollWheelEventMonitor()
+  private var accumulatedTranslation: CGFloat = 0
+  private var isTrackingSwipe = false
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+
+    eventMonitor.remove()
+
+    guard window != nil else { return }
+    let monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+      self?.handleScrollWheel(event) ?? event
+    }
+    eventMonitor.replace(with: monitor)
+  }
+
+  private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+    guard isEnabled else {
+      resetTracking()
+      return event
+    }
+
+    let phase = event.phase
+    let momentumPhase = event.momentumPhase
+    guard event.hasPreciseScrollingDeltas, phase != [] || momentumPhase != [] else {
+      return event
+    }
+
+    if momentumPhase != [] {
+      endTrackingIfNeeded()
+      return nil
+    }
+
+    let downwardTranslation = normalizedDownwardTranslation(for: event)
+
+    if phase.contains(.began) {
+      accumulatedTranslation = 0
+      isTrackingSwipe = true
+    }
+
+    if phase.contains(.changed) {
+      isTrackingSwipe = true
+      accumulatedTranslation = max(0, accumulatedTranslation + downwardTranslation)
+      onTranslationChanged(accumulatedTranslation)
+      return nil
+    }
+
+    if phase.contains(.ended) || phase.contains(.cancelled) {
+      endTrackingIfNeeded()
+      return nil
+    }
+
+    return event
+  }
+
+  private func normalizedDownwardTranslation(for event: NSEvent) -> CGFloat {
+    let deltaY = CGFloat(event.scrollingDeltaY)
+    return event.isDirectionInvertedFromDevice ? deltaY : -deltaY
+  }
+
+  private func endTrackingIfNeeded() {
+    guard isTrackingSwipe else { return }
+    onSwipeEnded(accumulatedTranslation)
+    resetTracking()
+  }
+
+  private func resetTracking() {
+    accumulatedTranslation = 0
+    isTrackingSwipe = false
   }
 }
 #endif

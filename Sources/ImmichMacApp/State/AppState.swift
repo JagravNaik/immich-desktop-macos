@@ -31,7 +31,7 @@ final class AppState: ObservableObject {
 
   // MARK: - Photo Item (unified model for display)
 
-  struct PhotoItem: Identifiable {
+  struct PhotoItem: Identifiable, Sendable {
     enum Source: Hashable {
       case localFile(URL)
       case remoteAsset(id: String)
@@ -149,6 +149,7 @@ final class AppState: ObservableObject {
   @Published var isPeeking = false
   @Published var showInfoPopover = false
   @Published var hoveredItemID: String?
+  private var forceTouchConsumed = false
 
   // Multi-select
   @Published var isMultiSelectMode = false
@@ -168,6 +169,11 @@ final class AppState: ObservableObject {
   @Published var albums: [Album] = []
   @Published var people: [Person] = []
   @Published var memories: [Memory] = []
+  @Published var mapMarkers: [MapMarker] = []
+  @Published var isLoadingMap = false
+  @Published var isLoadingMapSelection = false
+  @Published var selectedMapMarkerID: String?
+  @Published var mapSelectionItems: [PhotoItem] = []
   @Published var sharedLinks: [SharedLink] = []
   @Published var apiKeys: [ImmichAPIKey] = []
   @Published var tags: [ImmichTag] = []
@@ -258,6 +264,7 @@ final class AppState: ObservableObject {
     // Check active album items first, then main library, then trash
     return activeAlbumItems.first { $0.id == selectedItemID }
       ?? activePersonItems.first { $0.id == selectedItemID }
+      ?? mapSelectionItems.first { $0.id == selectedItemID }
       ?? activeSharedLinkItems.first { $0.id == selectedItemID }
       ?? activeMemoryItems.first { $0.id == selectedItemID }
       ?? libraryItems.first { $0.id == selectedItemID }
@@ -294,6 +301,8 @@ final class AppState: ObservableObject {
         return activeAlbumItems
       case .person:
         return activePersonItems
+      case .map:
+        return mapSelectionItems
       case .sharedLink:
         return activeSharedLinkItems
       case .memory:
@@ -377,12 +386,19 @@ final class AppState: ObservableObject {
     if sidebarSelection == .library, totalTimelineItemCount > loaded, searchText.isEmpty {
       return "\(loaded) of \(totalTimelineItemCount) items loaded"
     }
+    if sidebarSelection == .map {
+      if !mapSelectionItems.isEmpty {
+        return "\(mapSelectionItems.count) items in selected place"
+      }
+      return mapMarkers.isEmpty ? "No mapped items" : "\(mapMarkers.count) mapped items"
+    }
     return "\(filteredItems.count) items"
   }
 
   var emptyStateTitle: String {
     switch sidebarSelection {
     case .library: isLoadingTimeline ? "Loading timeline" : "Library is empty"
+    case .map: isLoadingMap ? "Loading map" : "No places yet"
     case .favorites: "No favorites yet"
     case .videos: "No videos yet"
     case .livePhotos: "No Live Photos yet"
@@ -402,6 +418,8 @@ final class AppState: ObservableObject {
       return "Sign in to an Immich server to continue."
     case .imports:
       return "Drag files into the window or use the import button."
+    case .map:
+      return "Photos and videos with location data will appear here."
     default:
       return "Content will appear here once available."
     }
@@ -664,6 +682,11 @@ final class AppState: ObservableObject {
     albums = []
     people = []
     memories = []
+    mapMarkers = []
+    isLoadingMap = false
+    isLoadingMapSelection = false
+    selectedMapMarkerID = nil
+    mapSelectionItems = []
     sharedLinks = []
     apiKeys = []
     tags = []
@@ -716,6 +739,90 @@ final class AppState: ObservableObject {
       sharedLinks = links
       sharedLinkAssets = assets
     } catch { immichLog("[Collections] Shared links failed: \(error)") }
+  }
+
+  @discardableResult
+  func loadMapMarkers() async -> String? {
+    guard let connectedServer, let currentSession else { return "Not connected to server." }
+    isLoadingMap = true
+    defer { isLoadingMap = false }
+
+    do {
+      let fetchedMarkers = try await apiClient.fetchMapMarkers(server: connectedServer, session: currentSession)
+      // Keep obviously bad coordinates out of the UI so the map browser only has to reason
+      // about valid positions when computing viewports and selection regions.
+      mapMarkers = fetchedMarkers.filter { marker in
+        marker.latitude.isFinite &&
+        marker.longitude.isFinite &&
+        (-90.0 ... 90.0).contains(marker.latitude) &&
+        (-180.0 ... 180.0).contains(marker.longitude)
+      }
+      return nil
+    } catch {
+      return error.localizedDescription
+    }
+  }
+
+  @discardableResult
+  func selectMapMarker(_ marker: MapMarker) async -> String? {
+    await selectMapMarker(marker, markers: [marker])
+  }
+
+  @discardableResult
+  func selectMapMarker(_ marker: MapMarker, markers: [MapMarker]) async -> String? {
+    guard let connectedServer, let currentSession else { return "Not connected to server." }
+
+    let canReuseSelection =
+      selectedMapMarkerID == marker.id &&
+      !mapSelectionItems.isEmpty &&
+      mapSelectionItems.count == markers.count
+
+    selectedMapMarkerID = marker.id
+
+    if canReuseSelection {
+      return nil
+    }
+
+    isLoadingMapSelection = true
+    mapSelectionItems = []
+    defer { isLoadingMapSelection = false }
+
+    let loadedItems = await Self.loadMapSelectionItems(
+      markers: markers,
+      server: connectedServer,
+      session: currentSession,
+      apiClient: apiClient
+    )
+      .map { Self.makePhotoItem(from: $0.detail, marker: $0.marker) }
+      .sorted { lhs, rhs in
+        if lhs.date != rhs.date {
+          return lhs.date > rhs.date
+        }
+        return lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+      }
+
+    mapSelectionItems = loadedItems
+
+    if let selectedItemID, loadedItems.contains(where: { $0.id == selectedItemID }) {
+      // Keep the current selected asset when it still belongs to this place.
+    } else {
+      selectedItemID = loadedItems.first?.id
+    }
+
+    if loadedItems.isEmpty {
+      return "Unable to load items for this place."
+    }
+
+    if loadedItems.count < markers.count {
+      return "Some items couldn't be loaded for this place."
+    }
+
+    return nil
+  }
+
+  func clearMapSelection() {
+    selectedMapMarkerID = nil
+    mapSelectionItems = []
   }
 
   @discardableResult
@@ -1628,6 +1735,7 @@ final class AppState: ObservableObject {
   }
 
   func selectNextItem() {
+    guard !filteredItems.isEmpty else { return }
     guard let selectedItemID,
           let idx = filteredItems.firstIndex(where: { $0.id == selectedItemID }),
           idx < filteredItems.count - 1 else {
@@ -1638,6 +1746,7 @@ final class AppState: ObservableObject {
   }
 
   func selectPreviousItem() {
+    guard !filteredItems.isEmpty else { return }
     guard let selectedItemID,
           let idx = filteredItems.firstIndex(where: { $0.id == selectedItemID }),
           idx > 0 else { return }
@@ -1650,7 +1759,8 @@ final class AppState: ObservableObject {
     let isDeepPress = stage == 2 || pressure > 0.65
 
     if isDeepPress {
-      if !isViewingLivePhoto {
+      if !isViewingLivePhoto && !forceTouchConsumed {
+        forceTouchConsumed = true
         if isViewingPhoto {
           withAnimation(.easeInOut(duration: 0.15)) {
             isViewingLivePhoto = true
@@ -1668,6 +1778,7 @@ final class AppState: ObservableObject {
         }
       }
     } else if pressure < 0.15 {
+      forceTouchConsumed = false
       if isViewingLivePhoto {
         withAnimation(.easeInOut(duration: 0.2)) {
           isViewingLivePhoto = false
@@ -1814,6 +1925,79 @@ final class AppState: ObservableObject {
     if selectedItemIDs.remove(oldID) != nil {
       selectedItemIDs.insert(newID)
     }
+  }
+
+  private struct LoadedMapSelectionItem: Sendable {
+    let detail: AssetDetail
+    let marker: MapMarker
+  }
+
+  private nonisolated static func loadMapSelectionItems(
+    markers: [MapMarker],
+    server: ImmichServer,
+    session: UserSession,
+    apiClient: any ImmichAPIClient
+  ) async -> [LoadedMapSelectionItem] {
+    let concurrencyLimit = min(8, markers.count)
+    guard concurrencyLimit > 0 else { return [] }
+
+    return await withTaskGroup(of: LoadedMapSelectionItem?.self, returning: [LoadedMapSelectionItem].self) { group in
+      var markerIterator = markers.makeIterator()
+      var loaded: [LoadedMapSelectionItem] = []
+
+      func addNextTask() {
+        guard let marker = markerIterator.next() else { return }
+        group.addTask {
+          do {
+            let detail = try await apiClient.fetchAssetDetail(server: server, session: session, assetId: marker.id)
+            return LoadedMapSelectionItem(detail: detail, marker: marker)
+          } catch {
+            return nil
+          }
+        }
+      }
+
+      for _ in 0..<concurrencyLimit {
+        addNextTask()
+      }
+
+      while let result = await group.next() {
+        if let result {
+          loaded.append(result)
+        }
+        addNextTask()
+      }
+
+      return loaded
+    }
+  }
+
+  private static func makePhotoItem(from detail: AssetDetail, marker: MapMarker) -> PhotoItem {
+    let lowercasedType = detail.type.lowercased()
+    let isVideo = lowercasedType.contains("video")
+    let width = max(CGFloat(detail.width ?? 1), 1)
+    let height = max(CGFloat(detail.height ?? 1), 1)
+    let fallbackDate = detail.localDateTime ?? detail.fileCreatedAt ?? .now
+
+    return PhotoItem(
+      id: detail.id,
+      source: .remoteAsset(id: detail.id),
+      title: detail.originalFileName,
+      date: fallbackDate,
+      isFavorite: detail.isFavorite,
+      isVideo: isVideo,
+      isImported: false,
+      livePhotoVideoID: detail.livePhotoVideoId,
+      latitude: detail.exif?.latitude ?? marker.latitude,
+      longitude: detail.exif?.longitude ?? marker.longitude,
+      durationText: isVideo ? detail.duration : nil,
+      city: detail.exif?.city ?? marker.city,
+      country: detail.exif?.country ?? marker.country,
+      stackCount: nil,
+      timeBucketKey: timelineBucketKey(for: fallbackDate),
+      projectionType: nil,
+      aspectRatio: width / height
+    )
   }
 
   private func mergeTags(_ incomingTags: [ImmichTag]) {
