@@ -36,7 +36,6 @@ final class AppStateTests: XCTestCase {
     appState.libraryItems = [item]
     appState.activeAlbumItems = [item]
     appState.activePersonItems = [item]
-    appState.activeSharedLinkItems = [item]
     appState.rebuildLibrarySections()
 
     appState.toggleFavorite(for: item.id)
@@ -44,7 +43,6 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.libraryItems[0].isFavorite)
     XCTAssertTrue(appState.activeAlbumItems[0].isFavorite)
     XCTAssertTrue(appState.activePersonItems[0].isFavorite)
-    XCTAssertTrue(appState.activeSharedLinkItems[0].isFavorite)
     XCTAssertEqual(appState.favoritesCount, 1)
 
     try await eventually {
@@ -73,44 +71,6 @@ final class AppStateTests: XCTestCase {
       appState.activeAlbumItems.first?.isFavorite == false &&
       appState.favoritesCount == 0
     }
-  }
-
-  @MainActor
-  func testReloadSharedLinksUpdatesStateAndLoadSharedLinkFiltersTrashedAssets() async throws {
-    let apiClient = MockImmichAPIClient()
-    let link = SharedLink(
-      id: "link-1",
-      type: "individual",
-      key: "share-key",
-      description: "Weekend trip",
-      expiresAt: nil,
-      allowUpload: false,
-      allowDownload: true,
-      assetCount: 2,
-      albumId: nil,
-      createdAt: Date(),
-      assetIds: ["asset-1", "asset-2"]
-    )
-    await apiClient.setSharedLinksResult(
-      links: [link],
-      assetsByLinkID: [
-        link.id: [
-          makeRemoteAsset(id: "asset-1", isTrashed: false),
-          makeRemoteAsset(id: "asset-2", isTrashed: true),
-        ]
-      ]
-    )
-    let appState = try await makeSignedInState(apiClient: apiClient)
-
-    let error = await appState.reloadSharedLinks()
-
-    XCTAssertNil(error)
-    XCTAssertEqual(appState.sharedLinks.map(\.id), [link.id])
-
-    appState.loadSharedLink(link.id)
-
-    XCTAssertEqual(appState.activeSharedLinkID, link.id)
-    XCTAssertEqual(appState.activeSharedLinkItems.map(\.id), ["asset-1"])
   }
 
   @MainActor
@@ -450,15 +410,10 @@ private struct FavoriteUpdate: Equatable {
 }
 
 private actor MockImmichAPIClient: ImmichAPIClient {
-  private var sharedLinksResponse: ([SharedLink], [String: [RemoteTimelineAsset]]) = ([], [:])
   private var mapMarkersResponse: [MapMarker] = []
   private var assetDetailsByID: [String: AssetDetail] = [:]
   private var favoriteUpdates: [FavoriteUpdate] = []
   private var favoriteError: Error?
-
-  func setSharedLinksResult(links: [SharedLink], assetsByLinkID: [String: [RemoteTimelineAsset]]) {
-    sharedLinksResponse = (links, assetsByLinkID)
-  }
 
   func setMapMarkersResult(_ markers: [MapMarker]) {
     mapMarkersResponse = markers
@@ -528,7 +483,6 @@ private actor MockImmichAPIClient: ImmichAPIClient {
         updatedAt: .distantPast,
         isActivityEnabled: false,
         shared: false,
-        hasSharedLink: false,
         ownerID: "user-1"
       ),
       []
@@ -580,10 +534,6 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker] { mapMarkersResponse }
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory] { [] }
 
-  func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]]) {
-    sharedLinksResponse
-  }
-
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String) {
     (Data("image".utf8), "\(assetId).jpg")
   }
@@ -609,7 +559,6 @@ private actor MockImmichAPIClient: ImmichAPIClient {
       updatedAt: Date(),
       isActivityEnabled: false,
       shared: false,
-      hasSharedLink: false,
       ownerID: session.userID
     )
   }

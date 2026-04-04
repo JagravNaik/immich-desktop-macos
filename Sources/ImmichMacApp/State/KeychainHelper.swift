@@ -31,6 +31,7 @@ enum KeychainHelper {
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
       kSecAttrAccount as String: account,
+      kSecUseDataProtectionKeychain as String: true,
     ]
     // Delete any existing item first
     let deleteStatus = SecItemDelete(query as CFDictionary)
@@ -54,6 +55,7 @@ enum KeychainHelper {
       kSecAttrAccount as String: account,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecUseDataProtectionKeychain as String: true,
     ]
     var result: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -74,6 +76,7 @@ enum KeychainHelper {
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
       kSecAttrAccount as String: account,
+      kSecUseDataProtectionKeychain as String: true,
     ]
     let status = SecItemDelete(query as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {

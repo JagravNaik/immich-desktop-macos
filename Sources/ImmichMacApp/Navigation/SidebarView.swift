@@ -30,10 +30,6 @@ enum SidebarDestination: Hashable {
   case recentlyDeleted
   case favorites
 
-  // Sharing
-  case sharedLinks
-  case sharedLink(id: String)
-
   // Memories
   case memory(id: String)
 
@@ -53,8 +49,6 @@ enum SidebarDestination: Hashable {
     case .imports: "Imports"
     case .recentlyDeleted: "Recently Deleted"
     case .favorites: "Favorites"
-    case .sharedLinks: "Shared Links"
-    case .sharedLink: "Shared Link"
     case .memory: "Memory"
     }
   }
@@ -75,8 +69,6 @@ enum SidebarDestination: Hashable {
     case .imports: "square.and.arrow.down"
     case .recentlyDeleted: "trash"
     case .favorites: "heart"
-    case .sharedLinks: "link"
-    case .sharedLink: "link"
     case .memory: "memories"
     }
   }
@@ -89,7 +81,6 @@ struct SidebarSectionState {
   var isAlbumsExpanded = true
   var isMediaTypesExpanded = true
   var isUtilitiesExpanded = true
-  var isSharingExpanded = true
 }
 
 // MARK: - Sidebar View
@@ -117,9 +108,6 @@ struct SidebarView: View {
 
       // Utilities
       utilitiesSection
-
-      // Sharing
-      sharingSection
 
       // Account (at bottom)
       accountSection
@@ -217,18 +205,6 @@ struct SidebarView: View {
       .tag(SidebarDestination.recentlyDeleted)
     } header: {
       sectionHeader("Utilities", isExpanded: $sectionState.isUtilitiesExpanded)
-    }
-  }
-
-  // MARK: - Sharing Section
-
-  private var sharingSection: some View {
-    Section(isExpanded: $sectionState.isSharingExpanded) {
-      Label("Shared Links", systemImage: "link")
-        .tag(SidebarDestination.sharedLinks)
-        .badge(appState.sharedLinks.count)
-    } header: {
-      sectionHeader("Sharing", isExpanded: $sectionState.isSharingExpanded)
     }
   }
 

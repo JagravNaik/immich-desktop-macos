@@ -28,6 +28,7 @@ struct MainContentView: View {
   @State private var heroItemFrames: [String: CGRect] = [:]
   @State private var isHeroExpanded = false
   @State private var interactiveDismissPresentation: InteractiveDismissPresentation = .identity
+  @State private var isSearchPresented = false
 
   struct HeroTransitionState: Equatable {
     enum Direction: Equatable {
@@ -98,6 +99,7 @@ struct MainContentView: View {
       heroItemFrames = [:]
       dismissViewer()
     }
+    .animation(.easeInOut(duration: 0.2), value: appState.sidebarSelection)
     .sheet(isPresented: $appState.showCreateAlbumSheet) {
       CreateAlbumSheet(appState: appState)
     }
@@ -141,6 +143,21 @@ struct MainContentView: View {
       .background(.background)
       .opacity(browserOpacity)
       .allowsHitTesting(!shouldPresentViewer)
+      .simultaneousGesture(TapGesture().onEnded {
+        dismissSearchFieldFocus()
+      })
+      .overlay(alignment: .bottom) {
+        if let notification = appState.uploadNotification {
+          UploadFailureBanner(
+            filename: notification.filename,
+            reason: notification.reason,
+            onDismiss: { appState.dismissUploadNotification() }
+          )
+          .transition(.move(edge: .bottom).combined(with: .opacity))
+          .padding(.bottom, 16)
+          .padding(.horizontal, 16)
+        }
+      }
 
       if shouldPresentViewer, let item = appState.selectedItem {
         PhotoDetailView(
@@ -174,9 +191,42 @@ struct MainContentView: View {
       }
     }
     .coordinateSpace(name: photoHeroCoordinateSpaceName)
-    .searchable(text: $appState.searchText, placement: .toolbar, prompt: "Search")
     .onChange(of: appState.searchText) { _, newValue in
       appState.performSmartSearch(query: newValue)
+    }
+    .onChange(of: isSearchPresented) { _, presented in
+      if presented {
+        appState.selectedItemID = nil
+      } else {
+        appState.searchText = ""
+        appState.performSmartSearch(query: "")
+      }
+    }
+    .onChange(of: appState.selectedItemID) { _, newID in
+      if newID != nil && isSearchPresented {
+        dismissSearchFieldFocus()
+      }
+    }
+    .background {
+      Button("") {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+          isSearchPresented = true
+        }
+      }
+      .keyboardShortcut("f", modifiers: .command)
+      .hidden()
+
+      Button("") { appState.zoomInPhotoGrid() }
+        .keyboardShortcut("+", modifiers: .command)
+        .hidden()
+
+      Button("") { appState.zoomInPhotoGrid() }
+        .keyboardShortcut("=", modifiers: .command)
+        .hidden()
+
+      Button("") { appState.zoomOutPhotoGrid() }
+        .keyboardShortcut("-", modifiers: .command)
+        .hidden()
     }
     .toolbar {
       if shouldPresentViewer {
@@ -243,8 +293,6 @@ struct MainContentView: View {
     case .album(let id): appState.albums.first(where: { $0.id == id })?.albumName ?? "Album"
     case .pinnedAlbum(let id): appState.albums.first(where: { $0.id == id })?.albumName ?? "Album"
     case .person(let id): appState.people.first(where: { $0.id == id })?.name ?? "Person"
-    case .sharedLinks: "Shared Links"
-    case .sharedLink(let id): appState.sharedLinks.first(where: { $0.id == id })?.description ?? "Shared Link"
     case .memory(let id): appState.memories.first(where: { $0.id == id })?.title ?? "Memory"
     case .none: "Library"
     }
@@ -263,8 +311,6 @@ struct MainContentView: View {
         thumbnailStore: thumbnailStore,
         onOpenAsset: handleOpenAsset
       )
-    case .sharedLinks:
-      SharedLinksView(appState: appState)
     case .allAlbums:
       AllAlbumsView(appState: appState, thumbnailStore: thumbnailStore)
     case .album(let id), .pinnedAlbum(let id):
@@ -285,15 +331,6 @@ struct MainContentView: View {
         onHeroFramesChanged: { heroItemFrames = $0 }
       )
         .task(id: id) { await appState.loadPerson(id) }
-    case .sharedLink(let id):
-      LibraryGridView(
-        appState: appState,
-        thumbnailStore: thumbnailStore,
-        heroHiddenItemID: activeHeroHiddenItemID,
-        onOpenAsset: handleOpenAsset,
-        onHeroFramesChanged: { heroItemFrames = $0 }
-      )
-        .task(id: id) { appState.loadSharedLink(id) }
     case .memory(let id):
       LibraryGridView(
         appState: appState,
@@ -326,6 +363,40 @@ struct MainContentView: View {
 
   @ToolbarContentBuilder
   private var browserToolbar: some ToolbarContent {
+    // Left: Zoom −/+ capsule
+    ToolbarItem(placement: .navigation) {
+      if showsPhotoGridZoomControl {
+        PhotoGridZoomControl(
+          canZoomOut: appState.canZoomOutPhotoGrid,
+          canZoomIn: appState.canZoomInPhotoGrid,
+          onZoomOut: appState.zoomOutPhotoGrid,
+          onZoomIn: appState.zoomInPhotoGrid
+        )
+      }
+    }
+
+    // Center: Years | Months | All Photos segmented control (Library only)
+    ToolbarItem(placement: .principal) {
+      if showsTimelineViewModePicker {
+        Picker("", selection: $appState.timelineViewMode) {
+          ForEach(AppState.TimelineViewMode.allCases) { mode in
+            Text(mode.rawValue).tag(mode)
+          }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 240)
+      }
+    }
+
+    // Right: Search field
+    ToolbarItem(placement: .automatic) {
+      ToolbarSearchField(
+        text: $appState.searchText,
+        isPresented: $isSearchPresented
+      )
+    }
+
+    // Right: Action buttons grouped in capsule pill
     ToolbarItemGroup(placement: .primaryAction) {
       if appState.isMultiSelectMode {
         Text("\(appState.selectedItemIDs.count) selected")
@@ -343,49 +414,27 @@ struct MainContentView: View {
         }
         .help(appState.allItemsSelected ? "Deselect All" : "Select All")
 
-        Button {
-          appState.batchFavorite()
-        } label: {
-          Image(systemName: "heart")
-        }
-        .help("Favorite Selected")
-        .disabled(appState.selectedItemIDs.isEmpty)
-
-        Button {
-          appState.batchDownload()
-        } label: {
-          Image(systemName: "arrow.down.circle")
-        }
-        .help("Download Selected")
-        .disabled(appState.selectedItemIDs.isEmpty)
-
-        Button {
-          appState.showAddToAlbumSheet = true
-        } label: {
-          Image(systemName: "rectangle.stack.badge.plus")
-        }
-        .help("Add to Album")
-        .disabled(appState.selectedItemIDs.isEmpty)
-
-        Button {
-          appState.presentTagEditor(
-            for: Array(appState.selectedItemIDs),
-            currentTags: [],
-            title: "Tag Selected Items"
-          )
-        } label: {
-          Image(systemName: "tag")
-        }
-        .help("Add Tags")
-        .disabled(appState.selectedItemIDs.isEmpty)
-
-        Button {
-          appState.batchTrash()
-        } label: {
-          Image(systemName: "trash")
-        }
-        .help("Trash Selected")
-        .disabled(appState.selectedItemIDs.isEmpty)
+        ToolbarActionGroup(actions: [
+          .init(icon: "heart", help: "Favorite Selected", enabled: !appState.selectedItemIDs.isEmpty) {
+            appState.batchFavorite()
+          },
+          .init(icon: "arrow.down.circle", help: "Download Selected", enabled: !appState.selectedItemIDs.isEmpty) {
+            appState.batchDownload()
+          },
+          .init(icon: "rectangle.stack.badge.plus", help: "Add to Album", enabled: !appState.selectedItemIDs.isEmpty) {
+            appState.showAddToAlbumSheet = true
+          },
+          .init(icon: "tag", help: "Add Tags", enabled: !appState.selectedItemIDs.isEmpty) {
+            appState.presentTagEditor(
+              for: Array(appState.selectedItemIDs),
+              currentTags: [],
+              title: "Tag Selected Items"
+            )
+          },
+          .init(icon: "trash", help: "Trash Selected", enabled: !appState.selectedItemIDs.isEmpty) {
+            appState.batchTrash()
+          },
+        ])
       }
 
       Button {
@@ -396,20 +445,19 @@ struct MainContentView: View {
       .help(appState.isMultiSelectMode ? "Exit Selection" : "Select Multiple")
 
       Button {
+        Task { await appState.loadRemoteTimeline(reset: true) }
+      } label: {
+        Image(systemName: "arrow.clockwise")
+      }
+      .help("Refresh Library")
+      .disabled(appState.isLoadingTimeline)
+
+      Button {
         importFromFinder()
       } label: {
         Image(systemName: "plus")
       }
       .help("Import Files")
-
-      if showsPhotoGridZoomControl {
-        PhotoGridZoomControl(
-          canZoomOut: appState.canZoomOutPhotoGrid,
-          canZoomIn: appState.canZoomInPhotoGrid,
-          onZoomOut: appState.zoomOutPhotoGrid,
-          onZoomIn: appState.zoomInPhotoGrid
-        )
-      }
 
       // View options
       Menu {
@@ -435,9 +483,9 @@ struct MainContentView: View {
         }
         .disabled(true)
       } label: {
-        Image(systemName: "line.3.horizontal.decrease.circle")
+        Image(systemName: "ellipsis.circle")
       }
-      .help("Filter & Sort")
+      .help("More Options")
     }
   }
 
@@ -527,6 +575,15 @@ struct MainContentView: View {
   }
 
   // MARK: - Helpers
+
+  private func dismissSearchFieldFocus() {
+    NSApp.keyWindow?.makeFirstResponder(nil)
+    if isSearchPresented && appState.searchText.isEmpty {
+      withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+        isSearchPresented = false
+      }
+    }
+  }
 
   private func importFromFinder() {
     let panel = NSOpenPanel()
@@ -657,11 +714,16 @@ struct MainContentView: View {
 
   private var showsPhotoGridZoomControl: Bool {
     switch appState.sidebarSelection {
-    case .collections, .map, .sharedLinks, .allAlbums:
+    case .collections, .map, .allAlbums:
       return false
     default:
       return true
     }
+  }
+
+  private var showsTimelineViewModePicker: Bool {
+    (appState.sidebarSelection == .library || appState.sidebarSelection == nil)
+    && !appState.isViewingPhoto
   }
 
   private func installSpacebarHandler() {
@@ -709,91 +771,6 @@ struct MainContentView: View {
       appState.presentTagEditor(for: [assetID], currentTags: detail.tags, title: "Edit Tags")
     } catch {
       appState.presentTagEditor(for: [assetID], currentTags: [], title: "Edit Tags")
-    }
-  }
-}
-
-// MARK: - Shared Links View (simple list)
-
-struct SharedLinksView: View {
-  @ObservedObject var appState: AppState
-  @State private var isLoading = true
-  @State private var loadError: String?
-
-  var body: some View {
-    Group {
-      if isLoading {
-        VStack(spacing: 12) {
-          ProgressView().controlSize(.large)
-          Text("Loading shared links…")
-            .font(.title3.weight(.medium))
-            .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else if appState.sharedLinks.isEmpty {
-        VStack(spacing: 12) {
-          Image(systemName: "link")
-            .font(.system(size: 42, weight: .light))
-            .foregroundStyle(.quaternary)
-          Text("No shared links")
-            .font(.title3.weight(.medium))
-            .foregroundStyle(.secondary)
-          if let loadError {
-            Text(loadError)
-              .font(.caption)
-              .foregroundStyle(.tertiary)
-              .multilineTextAlignment(.center)
-              .frame(maxWidth: 300)
-          }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-      } else {
-        List(appState.sharedLinks) { link in
-          Button {
-            if link.type == "ALBUM", let albumId = link.albumId {
-              appState.sidebarSelection = .album(id: albumId)
-            } else {
-              appState.sidebarSelection = .sharedLink(id: link.id)
-            }
-          } label: {
-            HStack {
-              Image(systemName: link.type == "ALBUM" ? "rectangle.stack" : "photo.on.rectangle")
-                .foregroundStyle(.secondary)
-                .frame(width: 24)
-
-              VStack(alignment: .leading, spacing: 2) {
-                Text(link.description ?? String(link.key.prefix(12)) + "…")
-                  .font(.subheadline)
-                Text("\(link.assetCount) items")
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-              }
-
-              Spacer()
-
-              if let expires = link.expiresAt {
-                Text("Expires \(expires, style: .relative)")
-                  .font(.caption2)
-                  .foregroundStyle(.tertiary)
-              }
-
-              Image(systemName: "chevron.right")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            }
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-          }
-          .buttonStyle(.plain)
-        }
-      }
-    }
-    .task {
-      isLoading = true
-      loadError = nil
-      let error = await appState.reloadSharedLinks()
-      loadError = error
-      isLoading = false
     }
   }
 }
@@ -915,6 +892,7 @@ struct RecentlyDeletedView: View {
           .padding(.vertical, appState.photoGridPadding)
         }
         .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { onHeroFramesChanged($0) }
+        .onTapGesture { appState.selectedItemID = nil }
       }
     }
     .task { await appState.loadTrashedAssets() }
@@ -957,6 +935,54 @@ struct PhotoGridZoomControl: View {
     .buttonStyle(.plain)
     .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
     .disabled(!isEnabled)
+  }
+}
+
+struct ToolbarActionGroup: View {
+  struct Action: Identifiable {
+    let id = UUID()
+    let icon: String
+    let help: String
+    let enabled: Bool
+    let action: () -> Void
+
+    init(icon: String, help: String, enabled: Bool = true, action: @escaping () -> Void) {
+      self.icon = icon
+      self.help = help
+      self.enabled = enabled
+      self.action = action
+    }
+  }
+
+  let actions: [Action]
+
+  var body: some View {
+    HStack(spacing: 0) {
+      ForEach(Array(actions.enumerated()), id: \.element.id) { index, item in
+        if index > 0 {
+          Rectangle()
+            .fill(.quaternary)
+            .frame(width: 1, height: 16)
+        }
+
+        Button(action: item.action) {
+          Image(systemName: item.icon)
+            .font(.system(size: 11, weight: .semibold))
+            .frame(width: 28, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(item.enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+        .disabled(!item.enabled)
+        .help(item.help)
+      }
+    }
+    .padding(2)
+    .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+    .overlay {
+      Capsule(style: .continuous)
+        .strokeBorder(.quaternary.opacity(0.9))
+    }
   }
 }
 
@@ -1196,4 +1222,50 @@ struct AddToAlbumSheet: View {
     .frame(width: 380)
   }
 }
+// MARK: - Upload Failure Banner
+
+struct UploadFailureBanner: View {
+  let filename: String
+  let reason: String
+  let onDismiss: () -> Void
+
+  var body: some View {
+    HStack(spacing: 10) {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.yellow)
+        .font(.system(size: 16))
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Upload failed: \(filename)")
+          .font(.callout.weight(.medium))
+          .lineLimit(1)
+        Text(reason)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+      }
+
+      Spacer()
+
+      Button {
+        onDismiss()
+      } label: {
+        Image(systemName: "xmark.circle.fill")
+          .font(.system(size: 14))
+          .foregroundStyle(.secondary)
+      }
+      .buttonStyle(.plain)
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .strokeBorder(.quaternary)
+    }
+    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+    .frame(maxWidth: 420)
+  }
+}
+
 #endif

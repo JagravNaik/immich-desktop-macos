@@ -8,6 +8,14 @@ import ImmichAPI
 import ImmichCore
 import ImmichSync
 
+// MARK: - OAuth Presentation Context Provider
+
+private final class OAuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+  }
+}
+
 // MARK: - App State (replaces ContentViewModel)
 
 @MainActor
@@ -57,6 +65,7 @@ final class AppState: ObservableObject {
 
     var isLivePhoto: Bool { livePhotoVideoID != nil }
     var isPanorama: Bool { projectionType == "EQUIRECTANGULAR" }
+    var dayOfMonth: Int { Calendar(identifier: .gregorian).component(.day, from: date) }
     var gridAspectRatio: CGFloat {
       if aspectRatio.isFinite, aspectRatio > 0 {
         return aspectRatio
@@ -75,6 +84,15 @@ final class AppState: ObservableObject {
     let title: String
     let itemCount: Int
     let items: [PhotoItem]
+    let representativeItem: PhotoItem?
+  }
+
+  enum TimelineViewMode: String, CaseIterable, Identifiable {
+    case years = "Years"
+    case months = "Months"
+    case allPhotos = "All Photos"
+
+    var id: String { rawValue }
   }
 
   struct UploadRow: Identifiable {
@@ -100,6 +118,8 @@ final class AppState: ObservableObject {
   @Published var oauthEnabled = false
   @Published var oauthButtonText = "OAuth"
   @Published var passwordLoginEnabled = true
+  private var activeOAuthSession: ASWebAuthenticationSession?
+  private let oauthContextProvider = OAuthPresentationContext()
   @Published var connectedServerVersion: String?
   @Published var connectedServerDisplayURL: String?
   @Published var currentSession: UserSession?
@@ -108,6 +128,7 @@ final class AppState: ObservableObject {
   @Published var sidebarSelection: SidebarDestination? = .library
 
   // Library
+  @Published var timelineViewMode: TimelineViewMode = .allPhotos
   @Published var libraryItems: [PhotoItem] = []
   @Published var isLoadingTimeline = false
   @Published var searchText = ""
@@ -128,11 +149,6 @@ final class AppState: ObservableObject {
   @Published var activePersonID: String?
   @Published var activePersonItems: [PhotoItem] = []
   @Published var isLoadingPerson = false
-
-  // Shared link detail
-  @Published var activeSharedLinkID: String?
-  @Published var activeSharedLinkItems: [PhotoItem] = []
-  var sharedLinkAssets: [String: [RemoteTimelineAsset]] = [:]
 
   // Memory detail
   @Published var activeMemoryID: String?
@@ -174,7 +190,6 @@ final class AppState: ObservableObject {
   @Published var isLoadingMapSelection = false
   @Published var selectedMapMarkerID: String?
   @Published var mapSelectionItems: [PhotoItem] = []
-  @Published var sharedLinks: [SharedLink] = []
   @Published var apiKeys: [ImmichAPIKey] = []
   @Published var tags: [ImmichTag] = []
   @Published var adminUsers: [AdminUser] = []
@@ -190,6 +205,19 @@ final class AppState: ObservableObject {
 
   // Uploads
   @Published var uploadRows: [UploadRow] = []
+  @Published var uploadNotification: UploadNotification?
+  @Published var isWebSocketConnected = false
+
+  struct UploadNotification: Identifiable, Equatable {
+    let id = UUID()
+    let filename: String
+    let reason: String
+    let timestamp: Date
+
+    static func == (lhs: UploadNotification, rhs: UploadNotification) -> Bool {
+      lhs.id == rhs.id
+    }
+  }
 
   // Editing
   @Published var isEditing = false
@@ -222,6 +250,7 @@ final class AppState: ObservableObject {
 
   private let apiClient: any ImmichAPIClient
   private let uploadQueue = UploadQueue()
+  private let webSocketService = ImmichWebSocketService()
   private var connectedServer: ImmichServer?
   private var timelineBuckets: [TimelineBucketSummary] = []
   private var loadedTimelineBucketKeys: [String] = []
@@ -256,6 +285,11 @@ final class AppState: ObservableObject {
     formatter.dateFormat = "LLLL yyyy"
     return formatter
   }()
+  static let timelineYearFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy"
+    return formatter
+  }()
 
   // MARK: - Computed Properties
 
@@ -265,7 +299,6 @@ final class AppState: ObservableObject {
     return activeAlbumItems.first { $0.id == selectedItemID }
       ?? activePersonItems.first { $0.id == selectedItemID }
       ?? mapSelectionItems.first { $0.id == selectedItemID }
-      ?? activeSharedLinkItems.first { $0.id == selectedItemID }
       ?? activeMemoryItems.first { $0.id == selectedItemID }
       ?? libraryItems.first { $0.id == selectedItemID }
       ?? trashedItems.first { $0.id == selectedItemID }
@@ -303,13 +336,11 @@ final class AppState: ObservableObject {
         return activePersonItems
       case .map:
         return mapSelectionItems
-      case .sharedLink:
-        return activeSharedLinkItems
       case .memory:
         return activeMemoryItems
       case .recentlyDeleted:
         return trashedItems
-      case .allAlbums, .collections, .sharedLinks:
+      case .allAlbums, .collections:
         return [] // Handled by dedicated views, not LibraryGridView
       }
     }()
@@ -341,6 +372,7 @@ final class AppState: ObservableObject {
   }
 
   @Published private(set) var librarySections: [LibrarySection] = []
+  @Published private(set) var libraryYearSections: [LibrarySection] = []
 
   func rebuildLibrarySections() {
     let items = libraryItems
@@ -351,7 +383,26 @@ final class AppState: ObservableObject {
         id: bucketKey,
         title: Self.date(forTimelineBucket: bucketKey).map(Self.timelineSectionFormatter.string(from:)) ?? bucketKey,
         itemCount: items.count,
-        items: items
+        items: items,
+        representativeItem: items.first
+      )
+    }
+    rebuildLibraryYearSections()
+  }
+
+  private func rebuildLibraryYearSections() {
+    let calendar = Calendar(identifier: .gregorian)
+    let groupedByYear = Dictionary(grouping: libraryItems) { item -> Int in
+      calendar.component(.year, from: item.date)
+    }
+    libraryYearSections = groupedByYear.keys.sorted(by: >).compactMap { year in
+      guard let items = groupedByYear[year]?.sorted(by: { $0.date > $1.date }) else { return nil }
+      return LibrarySection(
+        id: "\(year)",
+        title: "\(year)",
+        itemCount: items.count,
+        items: items,
+        representativeItem: items.first
       )
     }
   }
@@ -372,6 +423,20 @@ final class AppState: ObservableObject {
 
   var canLoadMoreTimeline: Bool {
     loadedTimelineBucketKeys.count < timelineBuckets.count
+  }
+
+  var activeUploadCount: Int {
+    uploadRows.filter { if case .uploading = $0.state { return true }; if case .queued = $0.state { return true }; return false }.count
+  }
+
+  var failedUploadCount: Int {
+    uploadRows.filter { if case .failed = $0.state { return true }; return false }.count
+  }
+
+  func dismissUploadNotification() {
+    withAnimation(.easeOut(duration: 0.25)) {
+      uploadNotification = nil
+    }
   }
 
   var timelineFooterMessage: String? {
@@ -598,7 +663,8 @@ final class AppState: ObservableObject {
         }
 
         let callbackURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-          let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "immich") { callbackURL, error in
+          let authSession = ASWebAuthenticationSession(url: url, callbackURLScheme: "immich") { [weak self] callbackURL, error in
+            self?.activeOAuthSession = nil
             if let error {
               continuation.resume(throwing: error)
             } else if let callbackURL {
@@ -607,8 +673,10 @@ final class AppState: ObservableObject {
               continuation.resume(throwing: ImmichAPIError.invalidResponse(url: "oauth"))
             }
           }
-          session.prefersEphemeralWebBrowserSession = false
-          session.start()
+          authSession.presentationContextProvider = self.oauthContextProvider
+          authSession.prefersEphemeralWebBrowserSession = false
+          self.activeOAuthSession = authSession
+          authSession.start()
         }
 
         let session = try await apiClient.finishOAuth(server: connectedServer, oauthCallbackUrl: callbackURL.absoluteString)
@@ -631,6 +699,7 @@ final class AppState: ObservableObject {
   }
 
   func signOut() {
+    webSocketService.disconnect()
     currentSession = nil
     passwordText = ""
     apiKeyText = ""
@@ -687,7 +756,6 @@ final class AppState: ObservableObject {
     isLoadingMapSelection = false
     selectedMapMarkerID = nil
     mapSelectionItems = []
-    sharedLinks = []
     apiKeys = []
     tags = []
     adminUsers = []
@@ -695,9 +763,6 @@ final class AppState: ObservableObject {
     activeTagEditorCurrentTags = []
     activeTagEditorTitle = "Edit Tags"
     hasAdminAccess = false
-    sharedLinkAssets = [:]
-    activeSharedLinkID = nil
-    activeSharedLinkItems = []
     assetStatistics = nil
     isViewingPhoto = false
     isViewingLivePhoto = false
@@ -716,6 +781,10 @@ final class AppState: ObservableObject {
   // MARK: - Data Loading
 
   func loadInitialData() async {
+    if let connectedServer, let currentSession {
+      webSocketService.delegate = self
+      webSocketService.connect(server: connectedServer, userSession: currentSession)
+    }
     async let timelineTask: () = loadRemoteTimeline(reset: true)
     async let collectionsTask: () = loadCollections()
     _ = await (timelineTask, collectionsTask)
@@ -728,17 +797,11 @@ final class AppState: ObservableObject {
     async let peopleResult = apiClient.fetchPeople(server: connectedServer, session: currentSession)
     async let statsResult = apiClient.fetchAssetStatistics(server: connectedServer, session: currentSession)
     async let memoriesResult = apiClient.fetchMemories(server: connectedServer, session: currentSession)
-    async let sharedResult = apiClient.fetchSharedLinks(server: connectedServer, session: currentSession)
 
     do { albums = try await albumsResult } catch { immichLog("[Collections] Albums failed: \(error)") }
     do { people = try await peopleResult } catch { immichLog("[Collections] People failed: \(error)") }
     do { assetStatistics = try await statsResult } catch { immichLog("[Collections] Stats failed: \(error)") }
     do { memories = try await memoriesResult } catch { immichLog("[Collections] Memories failed: \(error)") }
-    do {
-      let (links, assets) = try await sharedResult
-      sharedLinks = links
-      sharedLinkAssets = assets
-    } catch { immichLog("[Collections] Shared links failed: \(error)") }
   }
 
   @discardableResult
@@ -823,30 +886,6 @@ final class AppState: ObservableObject {
   func clearMapSelection() {
     selectedMapMarkerID = nil
     mapSelectionItems = []
-  }
-
-  @discardableResult
-  func reloadSharedLinks() async -> String? {
-    guard let connectedServer, let currentSession else { return "Not connected to server." }
-    do {
-      let (links, assets) = try await apiClient.fetchSharedLinks(server: connectedServer, session: currentSession)
-      sharedLinks = links
-      sharedLinkAssets = assets
-      immichLog("[SharedLinks] Loaded \(links.count) links")
-      return nil
-    } catch {
-      immichLog("[SharedLinks] Reload failed: \(error)")
-      return error.localizedDescription
-    }
-  }
-
-  func loadSharedLink(_ linkID: String) {
-    guard activeSharedLinkID != linkID else { return }
-    activeSharedLinkID = linkID
-    let assets = sharedLinkAssets[linkID] ?? []
-    activeSharedLinkItems = assets.filter { !$0.isTrashed }.map {
-      Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
-    }
   }
 
   // MARK: - Smart Search
@@ -944,7 +983,7 @@ final class AppState: ObservableObject {
       }
 
       let all = libraryItems + newItems
-      let dedup = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+      let dedup = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
       loadedTimelineBucketKeys.append(contentsOf: fetchedKeys)
       libraryItems = dedup.values.sorted { $0.date > $1.date }
       updateMediaCounts()
@@ -988,15 +1027,6 @@ final class AppState: ObservableObject {
       }
     }
 
-    if let index = activeSharedLinkItems.firstIndex(where: { $0.id == itemID }) {
-      if let newVal {
-        activeSharedLinkItems[index].isFavorite = newVal
-      } else {
-        activeSharedLinkItems[index].isFavorite.toggle()
-        newVal = activeSharedLinkItems[index].isFavorite
-      }
-    }
-
     guard let newVal else { return }
     rebuildLibrarySections()
     updateMediaCounts()
@@ -1017,9 +1047,6 @@ final class AppState: ObservableObject {
         if let idx = activePersonItems.firstIndex(where: { $0.id == itemID }) {
           activePersonItems[idx].isFavorite = !newVal
         }
-        if let idx = activeSharedLinkItems.firstIndex(where: { $0.id == itemID }) {
-          activeSharedLinkItems[idx].isFavorite = !newVal
-        }
         rebuildLibrarySections()
         updateMediaCounts()
         immichLog("[Favorite] Sync failed: \(error)")
@@ -1032,7 +1059,6 @@ final class AppState: ObservableObject {
     libraryItems.removeAll { $0.id == itemID }
     activeAlbumItems.removeAll { $0.id == itemID }
     activePersonItems.removeAll { $0.id == itemID }
-    activeSharedLinkItems.removeAll { $0.id == itemID }
     rebuildLibrarySections()
     if selectedItemID == itemID {
       selectedItemID = filteredItems.first?.id
@@ -1524,7 +1550,6 @@ final class AppState: ObservableObject {
     libraryItems.removeAll { ids.contains($0.id) }
     activeAlbumItems.removeAll { ids.contains($0.id) }
     activePersonItems.removeAll { ids.contains($0.id) }
-    activeSharedLinkItems.removeAll { ids.contains($0.id) }
     rebuildLibrarySections()
     selectedItemIDs.removeAll()
     if let selectedItemID, ids.contains(selectedItemID) {
@@ -1619,7 +1644,6 @@ final class AppState: ObservableObject {
   private func photoItem(for assetID: String) -> PhotoItem? {
     activeAlbumItems.first { $0.id == assetID }
       ?? activePersonItems.first { $0.id == assetID }
-      ?? activeSharedLinkItems.first { $0.id == assetID }
       ?? activeMemoryItems.first { $0.id == assetID }
       ?? libraryItems.first { $0.id == assetID }
       ?? trashedItems.first { $0.id == assetID }
@@ -1661,7 +1685,7 @@ final class AppState: ObservableObject {
           assetCount: old.assetCount, albumThumbnailAssetId: old.albumThumbnailAssetId,
           createdAt: old.createdAt, updatedAt: Date(),
           isActivityEnabled: old.isActivityEnabled, shared: old.shared,
-          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+          ownerID: old.ownerID
         )
       }
       immichLog("[Album] Renamed to: \(newName)")
@@ -1702,7 +1726,7 @@ final class AppState: ObservableObject {
           assetCount: old.assetCount + assetIds.count, albumThumbnailAssetId: old.albumThumbnailAssetId,
           createdAt: old.createdAt, updatedAt: Date(),
           isActivityEnabled: old.isActivityEnabled, shared: old.shared,
-          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+          ownerID: old.ownerID
         )
       }
       immichLog("[Album] Added \(assetIds.count) assets to \(albumID)")
@@ -1725,7 +1749,7 @@ final class AppState: ObservableObject {
           assetCount: max(0, old.assetCount - assetIds.count), albumThumbnailAssetId: old.albumThumbnailAssetId,
           createdAt: old.createdAt, updatedAt: Date(),
           isActivityEnabled: old.isActivityEnabled, shared: old.shared,
-          hasSharedLink: old.hasSharedLink, ownerID: old.ownerID
+          ownerID: old.ownerID
         )
       }
       immichLog("[Album] Removed \(assetIds.count) assets from \(albumID)")
@@ -1908,6 +1932,28 @@ final class AppState: ObservableObject {
     } catch {
       await uploadQueue.markFailed(item, reason: error.localizedDescription)
       updateUploadRow(id: item.id, progress: 0, state: .failed(reason: error.localizedDescription))
+
+      if let idx = libraryItems.firstIndex(where: { $0.source == .localFile(item.fileURL) }) {
+        libraryItems.remove(at: idx)
+        rebuildLibrarySections()
+      }
+
+      withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+        uploadNotification = UploadNotification(
+          filename: item.fileURL.lastPathComponent,
+          reason: error.localizedDescription,
+          timestamp: .now
+        )
+      }
+
+      let notificationID = uploadNotification?.id
+      Task {
+        try? await Task.sleep(for: .seconds(8))
+        if uploadNotification?.id == notificationID {
+          dismissUploadNotification()
+        }
+      }
+
       immichLog("[Upload] Failed: \(error)")
     }
   }
@@ -2002,7 +2048,7 @@ final class AppState: ObservableObject {
 
   private func mergeTags(_ incomingTags: [ImmichTag]) {
     guard !incomingTags.isEmpty else { return }
-    var merged = Dictionary(uniqueKeysWithValues: tags.map { ($0.id, $0) })
+    var merged = Dictionary(tags.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
     for tag in incomingTags {
       merged[tag.id] = tag
     }
@@ -2087,6 +2133,122 @@ final class AppState: ObservableObject {
 
   private static func date(forTimelineBucket value: String) -> Date? {
     timelineBucketFormatter.date(from: value)
+  }
+}
+
+extension AppState: ImmichWebSocketDelegate {
+  func webSocketDidConnect() {
+    isWebSocketConnected = true
+    immichLog("[WebSocket] Connected — live sync active")
+  }
+
+  func webSocketDidDisconnect() {
+    isWebSocketConnected = false
+    immichLog("[WebSocket] Disconnected")
+  }
+
+  func webSocketDidReceiveAssetUpload(assetJSON: [String: Any]) {
+    guard let item = parseAssetResponseDTO(assetJSON) else { return }
+    guard !libraryItems.contains(where: { $0.id == item.id }) else { return }
+    libraryItems.insert(item, at: 0)
+    libraryItems.sort { $0.date > $1.date }
+    updateMediaCounts()
+    rebuildLibrarySections()
+    immichLog("[WebSocket] Asset uploaded: \(item.id)")
+  }
+
+  func webSocketDidReceiveAssetUpdate(assetJSON: [String: Any]) {
+    guard let updated = parseAssetResponseDTO(assetJSON) else { return }
+    if let idx = libraryItems.firstIndex(where: { $0.id == updated.id }) {
+      libraryItems[idx] = updated
+      rebuildLibrarySections()
+    }
+  }
+
+  func webSocketDidReceiveAssetDelete(assetID: String) {
+    libraryItems.removeAll { $0.id == assetID }
+    if selectedItemID == assetID { selectedItemID = nil }
+    selectedItemIDs.remove(assetID)
+    updateMediaCounts()
+    rebuildLibrarySections()
+  }
+
+  func webSocketDidReceiveAssetTrash(assetIDs: [String]) {
+    let idSet = Set(assetIDs)
+    libraryItems.removeAll { idSet.contains($0.id) }
+    if let selected = selectedItemID, idSet.contains(selected) { selectedItemID = nil }
+    selectedItemIDs.subtract(idSet)
+    updateMediaCounts()
+    rebuildLibrarySections()
+  }
+
+  func webSocketDidReceiveAssetRestore(assetIDs: [String]) {
+    Task {
+      await loadRemoteTimeline(reset: true)
+    }
+  }
+
+  private func parseAssetResponseDTO(_ json: [String: Any]) -> PhotoItem? {
+    guard let id = json["id"] as? String else { return nil }
+
+    let typeString = (json["type"] as? String)?.lowercased() ?? "image"
+    let isVideo = typeString.contains("video")
+
+    let isFavorite = json["isFavorite"] as? Bool ?? false
+    let isTrashed = json["isTrashed"] as? Bool ?? false
+    guard !isTrashed else { return nil }
+
+    let width = max(CGFloat(json["width"] as? Int ?? 1), 1)
+    let height = max(CGFloat(json["height"] as? Int ?? 1), 1)
+
+    let dateString = json["localDateTime"] as? String ?? json["fileCreatedAt"] as? String
+    let date = dateString.flatMap { Self.parseISO8601Date($0) } ?? .now
+
+    let duration = json["duration"] as? String
+    let livePhotoVideoId = json["livePhotoVideoId"] as? String
+    let originalFileName = json["originalFileName"] as? String ?? "Photo"
+
+    var city: String?
+    var country: String?
+    var latitude: Double?
+    var longitude: Double?
+    if let exif = json["exifInfo"] as? [String: Any] {
+      city = exif["city"] as? String
+      country = exif["country"] as? String
+      latitude = exif["latitude"] as? Double
+      longitude = exif["longitude"] as? Double
+    }
+
+    let locationText = [city, country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    let title = locationText.isEmpty ? originalFileName : locationText
+
+    return PhotoItem(
+      id: id,
+      source: .remoteAsset(id: id),
+      title: title,
+      date: date,
+      isFavorite: isFavorite,
+      isVideo: isVideo,
+      isImported: false,
+      livePhotoVideoID: livePhotoVideoId,
+      latitude: latitude,
+      longitude: longitude,
+      durationText: isVideo ? duration : nil,
+      city: city,
+      country: country,
+      stackCount: nil,
+      timeBucketKey: Self.timelineBucketKey(for: date),
+      projectionType: nil,
+      aspectRatio: width / height
+    )
+  }
+
+  private static func parseISO8601Date(_ string: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = formatter.date(from: string) { return date }
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.date(from: string)
   }
 }
 #endif

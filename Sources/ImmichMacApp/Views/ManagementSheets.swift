@@ -518,7 +518,7 @@ struct AssetTagEditorSheet: View {
 
   private func mergeCurrentTags(with incoming: [ImmichTag]) {
     guard !incoming.isEmpty else { return }
-    var merged = Dictionary(uniqueKeysWithValues: appState.activeTagEditorCurrentTags.map { ($0.id, $0) })
+    var merged = Dictionary(appState.activeTagEditorCurrentTags.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
     for tag in incoming {
       merged[tag.id] = tag
     }

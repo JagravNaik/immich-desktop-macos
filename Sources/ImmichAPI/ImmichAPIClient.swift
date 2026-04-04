@@ -4,7 +4,10 @@ import FoundationNetworking
 #endif
 import ImmichCore
 
-public func immichLog(_: @autoclosure () -> String) {
+public func immichLog(_ message: @autoclosure () -> String) {
+  #if DEBUG
+  print("[Immich]", message())
+  #endif
 }
 
 private struct MultipartFormField {
@@ -129,7 +132,6 @@ public protocol ImmichAPIClient: Sendable {
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
-  func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]])
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String)
   func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String
   func createAlbum(server: ImmichServer, session: UserSession, name: String, description: String, assetIds: [String]) async throws -> Album
@@ -419,19 +421,6 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return responses.map { $0.toModel() }
   }
 
-  // MARK: - Shared Links
-
-  public func fetchSharedLinks(server: ImmichServer, session: UserSession) async throws -> ([SharedLink], [String: [RemoteTimelineAsset]]) {
-    let request = authorizedRequest(url: server.baseURL.appending(path: "shared-links"), session: session)
-    let responses: [SharedLinkResponse] = try await perform(request)
-    let links = responses.map { $0.toModel() }
-    var assetsMap: [String: [RemoteTimelineAsset]] = [:]
-    for response in responses {
-      assetsMap[response.id] = response.toTimelineAssets()
-    }
-    return (links, assetsMap)
-  }
-
   // MARK: - Download Original Asset
 
   public func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String) {
@@ -516,19 +505,14 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     )
     defer { try? FileManager.default.removeItem(at: multipartBody.url) }
 
-    guard let bodyStream = InputStream(url: multipartBody.url) else {
-      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Failed to prepare upload stream.")
-    }
-
     var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
     request.httpMethod = "POST"
     request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
     request.addValue(String(multipartBody.contentLength), forHTTPHeaderField: "Content-Length")
-    request.httpBodyStream = bodyStream
 
     onProgress(0)
     let progressDelegate = UploadProgressDelegate(onProgress: onProgress)
-    let (data, response) = try await urlSession.data(for: request, delegate: progressDelegate)
+    let (data, response) = try await urlSession.upload(for: request, fromFile: multipartBody.url, delegate: progressDelegate)
     guard let httpResponse = response as? HTTPURLResponse else {
       throw ImmichAPIError.invalidResponse(url: request.url?.absoluteString ?? "unknown")
     }
@@ -1246,7 +1230,6 @@ private struct AlbumResponse: Decodable {
   let updatedAt: String?
   let isActivityEnabled: Bool?
   let shared: Bool?
-  let hasSharedLink: Bool?
   let ownerId: String?
 
   func toModel() -> Album {
@@ -1260,7 +1243,6 @@ private struct AlbumResponse: Decodable {
       updatedAt: updatedAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date(),
       isActivityEnabled: isActivityEnabled ?? false,
       shared: shared ?? false,
-      hasSharedLink: hasSharedLink ?? false,
       ownerID: ownerId ?? ""
     )
   }
@@ -1278,7 +1260,6 @@ private struct AlbumDetailResponse: Decodable {
   let updatedAt: String
   let isActivityEnabled: Bool?
   let shared: Bool?
-  let hasSharedLink: Bool?
   let ownerId: String?
   let assets: [AlbumAssetResponse]?
 
@@ -1293,7 +1274,6 @@ private struct AlbumDetailResponse: Decodable {
       updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? Date(),
       isActivityEnabled: isActivityEnabled ?? false,
       shared: shared ?? false,
-      hasSharedLink: hasSharedLink ?? false,
       ownerID: ownerId ?? ""
     )
   }
@@ -1551,43 +1531,6 @@ private struct MemoryResponse: Decodable {
       isSaved: isSaved ?? false,
       assets: assetModels
     )
-  }
-}
-
-// MARK: - Shared Link DTOs
-
-private struct SharedLinkResponse: Decodable {
-  let id: String
-  let type: String?
-  let key: String?
-  let description: String?
-  let expiresAt: String?
-  let allowUpload: Bool?
-  let allowDownload: Bool?
-  let assets: [AssetDetailResponse]?
-  let album: AlbumResponse?
-  let createdAt: String?
-
-  func toModel() -> SharedLink {
-    let parsedExpiry = expiresAt.flatMap { TimelineBucketMapper.parseDate($0) }
-    let parsedCreated = createdAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date()
-    return SharedLink(
-      id: id,
-      type: type ?? "INDIVIDUAL",
-      key: key ?? "",
-      description: description,
-      expiresAt: parsedExpiry,
-      allowUpload: allowUpload ?? false,
-      allowDownload: allowDownload ?? true,
-      assetCount: assets?.count ?? album?.assetCount ?? 0,
-      albumId: album?.id,
-      createdAt: parsedCreated,
-      assetIds: assets?.map(\.id) ?? []
-    )
-  }
-
-  func toTimelineAssets() -> [RemoteTimelineAsset] {
-    (assets ?? []).compactMap { $0.toTimelineAsset() }
   }
 }
 

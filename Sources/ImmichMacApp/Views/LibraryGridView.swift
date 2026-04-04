@@ -61,6 +61,200 @@ struct LibraryGridView: View {
     ]
   }
 
+  private var yearsGridColumns: [GridItem] {
+    Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
+  }
+
+  // MARK: - Years Grid
+
+  private var yearsGrid: some View {
+    let context = appState.thumbnailContext
+    return ScrollView {
+      LazyVGrid(columns: yearsGridColumns, spacing: 8) {
+        ForEach(appState.libraryYearSections) { section in
+          if let item = section.representativeItem ?? section.items.first {
+            Button {
+              // Switch to months view
+              appState.timelineViewMode = .months
+              // Bonus: scroll to that year? (Optional stretch goal)
+            } label: {
+              AssetThumbnailView(
+                item: item,
+                context: context,
+                store: thumbnailStore
+              )
+              .aspectRatio(1.0, contentMode: .fill)
+              .frame(minWidth: 0, maxWidth: .infinity)
+              .clipped()
+              .overlay(alignment: .topLeading) {
+                Text(section.title)
+                  .font(.system(size: 48, weight: .bold))
+                  .foregroundStyle(.white)
+                  .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
+                  .padding([.top, .leading], 12)
+              }
+              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+              .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+          }
+        }
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 8)
+    }
+    .overlay { scrubSelectionOverlay }
+    .coordinateSpace(name: photoGridCoordinateSpace)
+    .onTapGesture { appState.selectedItemID = nil }
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
+    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
+      heroItemFrames = frames
+      onHeroFramesChanged(frames)
+    }
+    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+  }
+
+  // MARK: - Months Mosaic
+
+  private var monthsMosaic: some View {
+    let context = appState.thumbnailContext
+    let sections = appState.librarySections
+    return ScrollView {
+      LazyVStack(alignment: .leading, spacing: 16) {
+        ForEach(sections) { section in
+          VStack(alignment: .leading, spacing: 8) {
+            Text(section.title)
+              .font(.title2.weight(.bold))
+              .foregroundStyle(.primary)
+              .padding(.horizontal, 8)
+
+            monthsMosaicSection(items: section.items, context: context)
+          }
+          .onAppear {
+            appState.loadMoreTimelineIfNeeded(after: section.id)
+          }
+        }
+
+        // Footer
+        if let footer = appState.timelineFooterMessage {
+          HStack {
+            Spacer()
+            if appState.isLoadingTimeline {
+              ProgressView().controlSize(.small)
+              Text(footer).foregroundStyle(.secondary)
+            } else {
+              Button(footer) { Task { await appState.loadNextTimelinePage() } }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+          }
+          .padding(.vertical, 16)
+        }
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 8)
+    }
+    .overlay { scrubSelectionOverlay }
+    .coordinateSpace(name: photoGridCoordinateSpace)
+    .onTapGesture { appState.selectedItemID = nil }
+    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
+    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
+      heroItemFrames = frames
+      onHeroFramesChanged(frames)
+    }
+    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+  }
+
+  @ViewBuilder
+  private func monthsMosaicSection(items: [AppState.PhotoItem], context: AppState.ThumbnailContext?) -> some View {
+    let spacing: CGFloat = 8
+    VStack(spacing: spacing) {
+      if items.count >= 3 {
+        HStack(spacing: spacing) {
+          mosaicCell(item: items[0], context: context)
+            .aspectRatio(0.8, contentMode: .fill)
+            .frame(minWidth: 0, maxWidth: .infinity)
+            .layoutPriority(1)
+          
+          VStack(spacing: spacing) {
+            mosaicCell(item: items[1], context: context)
+              .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+              .clipped()
+            
+            mosaicCell(item: items[2], context: context)
+              .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+              .clipped()
+          }
+          .frame(minWidth: 0, maxWidth: .infinity)
+        }
+      } else if items.count == 2 {
+        HStack(spacing: spacing) {
+          mosaicCell(item: items[0], context: context)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(1.0, contentMode: .fill)
+          mosaicCell(item: items[1], context: context)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(1.0, contentMode: .fill)
+        }
+      } else if items.count == 1 {
+        mosaicCell(item: items[0], context: context)
+          .frame(maxWidth: .infinity)
+          .aspectRatio(1.5, contentMode: .fill)
+      }
+
+      // Rest of items in grid
+      if items.count > 3 {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: 4), spacing: spacing) {
+          ForEach(items.dropFirst(3)) { item in
+            mosaicCell(item: item, context: context)
+              .aspectRatio(1.0, contentMode: .fill)
+              .clipped()
+          }
+        }
+      }
+    }
+  }
+
+  private func mosaicCell(item: AppState.PhotoItem, context: AppState.ThumbnailContext?) -> some View {
+    Button {
+      appState.selectedItemID = item.id
+      onOpenAsset(
+        item,
+        heroItemFrames[item.id] ?? itemFrames[item.id] ?? .zero,
+        thumbnailStore.cachedImage(for: item, context: context, size: .thumbnail)
+      )
+    } label: {
+      AssetThumbnailView(
+        item: item,
+        context: context,
+        store: thumbnailStore
+      )
+      .overlay(alignment: .topLeading) {
+        Text("\(item.dayOfMonth)")
+          .font(.system(size: 22, weight: .bold))
+          .foregroundStyle(.white)
+          .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
+          .padding([.top, .leading], 8)
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .contentShape(Rectangle())
+      .background {
+        GeometryReader { proxy in
+          Color.clear.preference(
+            key: PhotoGridItemFramePreferenceKey.self,
+            value: [item.id: proxy.frame(in: .named(photoGridCoordinateSpace))]
+          )
+          .preference(
+            key: PhotoHeroSourceFramePreferenceKey.self,
+            value: [item.id: proxy.frame(in: .named(photoHeroCoordinateSpaceName))]
+          )
+        }
+      }
+    }
+    .buttonStyle(.plain)
+    .id(item.id)
+  }
+
   var body: some View {
     ScrollViewReader { proxy in
       Group {
@@ -70,14 +264,17 @@ struct LibraryGridView: View {
           } else {
             emptyView
           }
-        } else if shouldShowSectionedTimeline {
-          sectionedTimeline
+        } else if isLibraryTimeline && appState.timelineViewMode == .years {
+          yearsGrid
+        } else if isLibraryTimeline && appState.timelineViewMode == .months {
+          monthsMosaic
         } else {
           flatGrid
         }
       }
       .focusable()
       .focusEffectDisabled()
+      .animation(.easeInOut(duration: 0.25), value: appState.timelineViewMode)
       .onChange(of: appState.isMultiSelectMode) { _, isEnabled in
         if !isEnabled {
           dragSelectionState = nil
@@ -112,8 +309,13 @@ struct LibraryGridView: View {
 
   /// Flat ordered list of all visible items matching the current grid order.
   private var orderedItems: [AppState.PhotoItem] {
-    if shouldShowSectionedTimeline {
-      return appState.librarySections.flatMap(\.items)
+    let isLibrary = appState.sidebarSelection == .library || appState.sidebarSelection == nil
+    if isLibrary && appState.searchText.isEmpty {
+      if appState.timelineViewMode == .months {
+        return appState.librarySections.flatMap(\.items)
+      } else if appState.timelineViewMode == .years {
+        return appState.libraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
+      }
     }
     return appState.filteredItems
   }
@@ -147,7 +349,7 @@ struct LibraryGridView: View {
 
   private func moveSelectionVertically(_ direction: VerticalSelectionDirection, shouldScrollIntoView: Bool = false) {
     let items = orderedItems
-    let itemIndices = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.id, $0.offset) })
+    let itemIndices = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { _, new in new })
     guard !items.isEmpty else { return }
     guard let currentID = appState.selectedItemID,
           let currentIndex = itemIndices[currentID],
@@ -268,7 +470,7 @@ struct LibraryGridView: View {
     onOpenAsset(item, sourceFrame, sourceImage)
   }
 
-  private var shouldShowSectionedTimeline: Bool {
+  private var isLibraryTimeline: Bool {
     (appState.sidebarSelection == .library || appState.sidebarSelection == nil)
     && appState.searchText.isEmpty
   }
@@ -370,87 +572,6 @@ struct LibraryGridView: View {
     }
   }
 
-  // MARK: - Sectioned Timeline
-
-  private var sectionedTimeline: some View {
-    let context = appState.thumbnailContext
-    let selectedID = appState.selectedItemID
-    return ScrollView {
-      LazyVStack(alignment: .leading, spacing: 12) {
-        ForEach(appState.librarySections) { section in
-          VStack(alignment: .leading, spacing: 4) {
-            // Section header (Photos-style: subtle date label)
-            Text(section.title)
-              .font(.subheadline.weight(.semibold))
-              .foregroundStyle(.secondary)
-              .padding(.horizontal, 4)
-              .padding(.top, 4)
-
-            // Photo grid
-            LazyVGrid(columns: gridColumns, spacing: appState.photoGridSpacing) {
-              ForEach(section.items) { item in
-                PhotoGridCell(
-                  item: item,
-                  isSelected: item.id == selectedID,
-                  isMultiSelected: appState.selectedItemIDs.contains(item.id),
-                  isMultiSelectMode: appState.isMultiSelectMode,
-                  heroHidden: heroHiddenItemID == item.id,
-                  context: context,
-                  thumbnailStore: thumbnailStore,
-                  onSelect: { appState.selectedItemID = item.id },
-                  onOpen: { item, sourceFrame, sourceImage in
-                    appState.selectedItemID = item.id
-                    onOpenAsset(item, heroItemFrames[item.id] ?? sourceFrame, sourceImage)
-                  },
-                  onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
-                  onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
-                  onDownload: { appState.downloadAsset(item.id) },
-                  onAddToAlbum: {
-                    appState.selectedItemIDs = [item.id]
-                    appState.showAddToAlbumSheet = true
-                  },
-                  onEditTags: {
-                    appState.presentTagEditor(for: [item.id], currentTags: [], title: "Edit Tags")
-                  }
-                )
-                .id(item.id)
-              }
-            }
-          }
-          .onAppear {
-            appState.loadMoreTimelineIfNeeded(after: section.id)
-          }
-        }
-
-        // Footer
-        if let footer = appState.timelineFooterMessage {
-          HStack {
-            Spacer()
-            if appState.isLoadingTimeline {
-              ProgressView().controlSize(.small)
-              Text(footer).foregroundStyle(.secondary)
-            } else {
-              Button(footer) { Task { await appState.loadNextTimelinePage() } }
-                .buttonStyle(.bordered)
-            }
-            Spacer()
-          }
-          .padding(.vertical, 16)
-        }
-      }
-      .padding(.horizontal, appState.photoGridPadding)
-      .padding(.vertical, appState.photoGridPadding)
-    }
-    .overlay { scrubSelectionOverlay }
-    .coordinateSpace(name: photoGridCoordinateSpace)
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
-    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
-      heroItemFrames = frames
-      onHeroFramesChanged(frames)
-    }
-    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
-  }
-
   // MARK: - Flat Grid
 
   private var flatGrid: some View {
@@ -491,6 +612,7 @@ struct LibraryGridView: View {
     }
     .overlay { scrubSelectionOverlay }
     .coordinateSpace(name: photoGridCoordinateSpace)
+    .onTapGesture { appState.selectedItemID = nil }
     .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
     .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
       heroItemFrames = frames
@@ -572,6 +694,13 @@ struct PhotoGridCell: View {
   var body: some View {
     contentLayer
     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    .shadow(
+      color: .black.opacity(isHovered && !isSelected ? 0.15 : 0),
+      radius: isHovered && !isSelected ? 8 : 0,
+      y: isHovered && !isSelected ? 4 : 0
+    )
+    .scaleEffect(isHovered && !isSelected && !isMultiSelectMode ? 1.02 : 1.0)
+    .animation(.easeOut(duration: 0.2), value: isHovered)
     .background {
       GeometryReader { proxy in
         Color.clear.preference(
@@ -585,12 +714,11 @@ struct PhotoGridCell: View {
       }
     }
     .overlay {
-      // Keep normal single-item selection visible, but reserve multi-select
-      // checkboxes and multi-selection for explicit selection mode only.
-      if isSelected || (isMultiSelectMode && isMultiSelected) {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-          .strokeBorder(Color.accentColor, lineWidth: isMultiSelectMode && isMultiSelected ? 3 : 2)
-      }
+      RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        .strokeBorder(Color.accentColor, lineWidth: isMultiSelectMode && isMultiSelected ? 3 : 2)
+        .opacity(isSelected || (isMultiSelectMode && isMultiSelected) ? 1 : 0)
+        .animation(.easeOut(duration: 0.15), value: isSelected)
+        .animation(.easeOut(duration: 0.15), value: isMultiSelected)
     }
     .overlay(alignment: .topLeading) {
       // Multi-select checkbox
@@ -622,7 +750,11 @@ struct PhotoGridCell: View {
         .transition(.opacity)
       }
     }
-    .onHover { isHovered = $0 }
+    .onHover { hovering in
+      withAnimation(.easeOut(duration: 0.15)) {
+        isHovered = hovering
+      }
+    }
     .contextMenu {
       Button("Open") {
         onOpen(

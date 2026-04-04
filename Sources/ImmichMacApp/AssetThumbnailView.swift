@@ -315,6 +315,7 @@ struct AssetThumbnailView: View {
   let store: ThumbnailStore
 
   @State private var image: NSImage?
+  @State private var imageOpacity: Double = 0
 
   var body: some View {
     GeometryReader { geo in
@@ -328,6 +329,7 @@ struct AssetThumbnailView: View {
             .scaledToFill()
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
+            .opacity(imageOpacity)
         } else {
           Image(systemName: item.isVideo ? "video" : "photo")
             .font(.system(size: 22, weight: .medium))
@@ -336,7 +338,16 @@ struct AssetThumbnailView: View {
       }
     }
     .task(id: thumbnailTaskID) {
-      image = await store.loadImage(for: item, context: context)
+      let appearsInstantly = store.cachedImage(for: item, context: context) != nil
+      let loaded = await store.loadImage(for: item, context: context)
+      image = loaded
+      if appearsInstantly || loaded == nil {
+        imageOpacity = 1
+      } else {
+        withAnimation(.easeIn(duration: 0.2)) {
+          imageOpacity = 1
+        }
+      }
     }
   }
 
