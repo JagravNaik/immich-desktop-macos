@@ -28,6 +28,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
 
   weak var delegate: (any ImmichWebSocketDelegate)?
 
+  @MainActor
   func connect(server: ImmichServer, userSession: UserSession) {
     intentionalDisconnect = false
     reconnectAttempt = 0
@@ -63,6 +64,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     immichLog("[WebSocket] Connecting to \(url.absoluteString)")
   }
 
+  @MainActor
   func disconnect() {
     intentionalDisconnect = true
     reconnectTask?.cancel()
@@ -74,9 +76,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     session?.invalidateAndCancel()
     session = nil
     isConnected = false
-    Task { @MainActor in
-      delegate?.webSocketDidDisconnect()
-    }
+    delegate?.webSocketDidDisconnect()
   }
 
   private func receiveMessage() {
@@ -86,7 +86,9 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
       case .success(let message):
         switch message {
         case .string(let text):
-          self.handleEngineIOMessage(text)
+          Task { @MainActor in
+            self.handleEngineIOMessage(text)
+          }
         case .data:
           break
         @unknown default:
@@ -95,11 +97,14 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
         self.receiveMessage()
       case .failure(let error):
         immichLog("[WebSocket] Receive error: \(error.localizedDescription)")
-        self.handleDisconnection()
+        Task { @MainActor in
+          self.handleDisconnection()
+        }
       }
     }
   }
 
+  @MainActor
   private func handleEngineIOMessage(_ raw: String) {
     guard let firstChar = raw.first else { return }
 
@@ -117,6 +122,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     }
   }
 
+  @MainActor
   private func handleEngineIOOpen(_ raw: String) {
     let jsonString = String(raw.dropFirst())
     if let data = jsonString.data(using: .utf8),
@@ -130,6 +136,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     startPingTimer()
   }
 
+  @MainActor
   private func handleSocketIOMessage(_ payload: String) {
     guard let firstChar = payload.first else { return }
 
@@ -138,9 +145,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
       isConnected = true
       immichLog("[WebSocket] Socket.IO connected")
       reconnectAttempt = 0
-      Task { @MainActor in
-        delegate?.webSocketDidConnect()
-      }
+      delegate?.webSocketDidConnect()
     case "2":
       handleSocketIOEvent(String(payload.dropFirst()))
     default:
@@ -148,6 +153,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     }
   }
 
+  @MainActor
   private func handleSocketIOEvent(_ jsonPayload: String) {
     guard let data = jsonPayload.data(using: .utf8),
           let parsed = try? JSONSerialization.jsonObject(with: data) as? [Any],
@@ -155,35 +161,31 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
 
     let eventData = parsed.count > 1 ? parsed[1] : nil
 
-    Task { @MainActor [weak self] in
-      guard let self else { return }
-
-      switch eventName {
-      case "on_upload_success":
-        if let assetJSON = eventData as? [String: Any] {
-          delegate?.webSocketDidReceiveAssetUpload(assetJSON: assetJSON)
-        }
-      case "on_asset_update":
-        if let assetJSON = eventData as? [String: Any] {
-          delegate?.webSocketDidReceiveAssetUpdate(assetJSON: assetJSON)
-        }
-      case "on_asset_delete":
-        if let assetID = eventData as? String {
-          delegate?.webSocketDidReceiveAssetDelete(assetID: assetID)
-        }
-      case "on_asset_trash":
-        if let ids = eventData as? [String] {
-          delegate?.webSocketDidReceiveAssetTrash(assetIDs: ids)
-        }
-      case "on_asset_restore":
-        if let ids = eventData as? [String] {
-          delegate?.webSocketDidReceiveAssetRestore(assetIDs: ids)
-        }
-      case "on_session_delete":
-        immichLog("[WebSocket] Session deleted by server")
-      default:
-        break
+    switch eventName {
+    case "on_upload_success":
+      if let assetJSON = eventData as? [String: Any] {
+        delegate?.webSocketDidReceiveAssetUpload(assetJSON: assetJSON)
       }
+    case "on_asset_update":
+      if let assetJSON = eventData as? [String: Any] {
+        delegate?.webSocketDidReceiveAssetUpdate(assetJSON: assetJSON)
+      }
+    case "on_asset_delete":
+      if let assetID = eventData as? String {
+        delegate?.webSocketDidReceiveAssetDelete(assetID: assetID)
+      }
+    case "on_asset_trash":
+      if let ids = eventData as? [String] {
+        delegate?.webSocketDidReceiveAssetTrash(assetIDs: ids)
+      }
+    case "on_asset_restore":
+      if let ids = eventData as? [String] {
+        delegate?.webSocketDidReceiveAssetRestore(assetIDs: ids)
+      }
+    case "on_session_delete":
+      immichLog("[WebSocket] Session deleted by server")
+    default:
+      break
     }
   }
 
@@ -195,27 +197,25 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     }
   }
 
+  @MainActor
   private func startPingTimer() {
     stopPingTimer()
-    DispatchQueue.main.async { [weak self] in
-      guard let self else { return }
-      self.pingTimer = Timer.scheduledTimer(withTimeInterval: self.pingInterval, repeats: true) { [weak self] _ in
-        self?.sendRaw("2")
-      }
+    pingTimer = Timer.scheduledTimer(withTimeInterval: pingInterval, repeats: true) { [weak self] _ in
+      self?.sendRaw("2")
     }
   }
 
+  @MainActor
   private func stopPingTimer() {
     pingTimer?.invalidate()
     pingTimer = nil
   }
 
+  @MainActor
   private func handleDisconnection() {
     isConnected = false
     stopPingTimer()
-    Task { @MainActor in
-      delegate?.webSocketDidDisconnect()
-    }
+    delegate?.webSocketDidDisconnect()
 
     guard !intentionalDisconnect, reconnectAttempt < maxReconnectAttempts else { return }
 
@@ -252,7 +252,9 @@ extension ImmichWebSocketService: URLSessionWebSocketDelegate {
     reason: Data?
   ) {
     immichLog("[WebSocket] Transport closed: \(closeCode)")
-    handleDisconnection()
+    Task { @MainActor in
+      self.handleDisconnection()
+    }
   }
 }
 #endif

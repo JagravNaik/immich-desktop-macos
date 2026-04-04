@@ -453,8 +453,14 @@ struct MapBrowserView: View {
   private func buildPlaceGroups(from markers: [AssetMapMarker]) -> [PlaceGroup] {
     let grouped = Dictionary(grouping: markers, by: placeKey(for:))
     return grouped.compactMap { key, markers in
-      guard let sample = markers.first else { return nil }
-      let label = markerLabel(for: sample)
+      // Sort deterministically so the representative marker (and thus pin coordinate
+      // and selectedMapMarkerID) is stable across refreshes regardless of Dictionary
+      // grouping order.
+      let sortedMarkers = markers.sorted { lhs, rhs in
+        lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+      }
+      guard let representative = sortedMarkers.first else { return nil }
+      let label = markerLabel(for: representative)
       let parts = label.split(separator: ",", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
       let title = parts.first ?? label
       let subtitle = parts.count > 1 ? parts[1] : nil
@@ -462,11 +468,9 @@ struct MapBrowserView: View {
         id: key,
         title: title,
         subtitle: subtitle,
-        count: markers.count,
-        marker: sample,
-        markers: markers.sorted { lhs, rhs in
-          lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
-        }
+        count: sortedMarkers.count,
+        marker: representative,
+        markers: sortedMarkers
       )
     }
     .sorted {
@@ -594,7 +598,7 @@ private struct PlacesMapView: NSViewRepresentable {
     var lastViewportRequestID: UUID?
     var selectedMarkerID: String?
     var isUpdating = false
-    private var annotationIDs: Set<String> = []
+    private var annotationSignatures: Set<String> = []
     private var lastAppliedSelectedMarkerID: String?
     private var pendingViewportRequest: MapViewportRequest?
     private var isViewportApplyScheduled = false
@@ -604,10 +608,10 @@ private struct PlacesMapView: NSViewRepresentable {
     }
 
     func updateAnnotations(_ groups: [PlaceGroup], on mapView: MKMapView) {
-      let newIDs = Set(groups.map { $0.id })
-      guard newIDs != annotationIDs else { return }
+      let newSignatures = Set(groups.map { "\($0.id)|\($0.count)|\($0.marker.latitude)|\($0.marker.longitude)" })
+      guard newSignatures != annotationSignatures else { return }
 
-      annotationIDs = newIDs
+      annotationSignatures = newSignatures
       lastAppliedSelectedMarkerID = nil
       mapView.removeAnnotations(mapView.annotations)
       let annotations = groups.map(PlaceAnnotation.init)

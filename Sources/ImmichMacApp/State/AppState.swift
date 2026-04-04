@@ -40,7 +40,7 @@ final class AppState: ObservableObject {
   // MARK: - Photo Item (unified model for display)
 
   struct PhotoItem: Identifiable, Sendable {
-    enum Source: Hashable {
+    enum Source: Hashable, Sendable {
       case localFile(URL)
       case remoteAsset(id: String)
     }
@@ -190,6 +190,7 @@ final class AppState: ObservableObject {
   @Published var isLoadingMapSelection = false
   @Published var selectedMapMarkerID: String?
   @Published var mapSelectionItems: [PhotoItem] = []
+  private var lastLoadedMapMarkerIDs: Set<String> = []
   @Published var apiKeys: [ImmichAPIKey] = []
   @Published var tags: [ImmichTag] = []
   @Published var adminUsers: [AdminUser] = []
@@ -835,10 +836,11 @@ final class AppState: ObservableObject {
   func selectMapMarker(_ marker: MapMarker, markers: [MapMarker]) async -> String? {
     guard let connectedServer, let currentSession else { return "Not connected to server." }
 
+    let markerIDSet = Set(markers.map(\.id))
     let canReuseSelection =
       selectedMapMarkerID == marker.id &&
       !mapSelectionItems.isEmpty &&
-      mapSelectionItems.count == markers.count
+      markerIDSet == lastLoadedMapMarkerIDs
 
     selectedMapMarkerID = marker.id
 
@@ -848,6 +850,7 @@ final class AppState: ObservableObject {
 
     isLoadingMapSelection = true
     mapSelectionItems = []
+    lastLoadedMapMarkerIDs = Set(markers.map(\.id))
     defer { isLoadingMapSelection = false }
 
     let loadedItems = await Self.loadMapSelectionItems(
@@ -886,6 +889,7 @@ final class AppState: ObservableObject {
   func clearMapSelection() {
     selectedMapMarkerID = nil
     mapSelectionItems = []
+    lastLoadedMapMarkerIDs = []
   }
 
   // MARK: - Smart Search
