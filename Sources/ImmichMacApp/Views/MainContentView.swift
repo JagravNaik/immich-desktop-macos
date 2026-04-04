@@ -204,7 +204,9 @@ struct MainContentView: View {
     }
     .onChange(of: appState.selectedItemID) { _, newID in
       if newID != nil && isSearchPresented {
-        dismissSearchFieldFocus()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+          isSearchPresented = false
+        }
       }
     }
     .background {

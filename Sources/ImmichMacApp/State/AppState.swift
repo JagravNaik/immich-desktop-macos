@@ -710,6 +710,9 @@ final class AppState: ObservableObject {
   }
 
   func changeServer() {
+    webSocketService.disconnect()
+    isWebSocketConnected = false
+    uploadNotification = nil
     connectedServer = nil
     connectedServerDisplayURL = nil
     connectedServerVersion = nil
@@ -2165,6 +2168,8 @@ extension AppState: ImmichWebSocketDelegate {
     guard let updated = parseAssetResponseDTO(assetJSON) else { return }
     if let idx = libraryItems.firstIndex(where: { $0.id == updated.id }) {
       libraryItems[idx] = updated
+      libraryItems.sort { $0.date > $1.date }
+      updateMediaCounts()
       rebuildLibrarySections()
     }
   }

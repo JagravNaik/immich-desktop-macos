@@ -338,6 +338,8 @@ struct AssetThumbnailView: View {
       }
     }
     .task(id: thumbnailTaskID) {
+      image = nil
+      imageOpacity = 0
       let appearsInstantly = store.cachedImage(for: item, context: context) != nil
       let loaded = await store.loadImage(for: item, context: context)
       image = loaded

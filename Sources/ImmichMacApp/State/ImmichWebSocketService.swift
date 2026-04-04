@@ -40,7 +40,8 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     }
 
     components.scheme = baseURL.scheme == "https" ? "wss" : "ws"
-    components.path = "/api/socket.io/"
+    let normalizedBasePath = baseURL.path.hasSuffix("/") ? String(baseURL.path.dropLast()) : baseURL.path
+    components.path = normalizedBasePath + "/socket.io/"
     components.queryItems = [
       URLQueryItem(name: "EIO", value: "4"),
       URLQueryItem(name: "transport", value: "websocket"),
@@ -220,7 +221,7 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     guard !intentionalDisconnect, reconnectAttempt < maxReconnectAttempts else { return }
 
     reconnectTask?.cancel()
-    reconnectTask = Task { [weak self] in
+    reconnectTask = Task { @MainActor [weak self] in
       guard let self else { return }
       let delay = min(pow(2.0, Double(self.reconnectAttempt)), 30.0)
       self.reconnectAttempt += 1

@@ -302,20 +302,27 @@ struct PhotoDetailView: View {
     zoomScale = 1
   }
 
-  private func updateDismissOffset(_ translation: CGSize) {
-    guard !isImageZoomed else { return }
+  private func dismissOffset(for translation: CGSize) -> CGSize {
     let vertical = max(translation.height, 0)
     let horizontal = translation.width * 0.18
-    let progress = min(max(vertical / 360, 0), 1)
-    dragOffset = CGSize(width: horizontal, height: vertical)
+    return CGSize(width: horizontal, height: vertical)
+  }
+
+  private func updateDismissOffset(_ translation: CGSize) {
+    guard !isImageZoomed else { return }
+    let offset = dismissOffset(for: translation)
+    let progress = min(max(offset.height / 360, 0), 1)
+    dragOffset = offset
     dismissProgress = progress
     onDismissPresentationChanged(currentDismissPresentation)
   }
 
   private func finishDismissInteraction(with translation: CGSize) {
     guard !isImageZoomed else { return }
-    let magnitude = sqrt(pow(translation.width, 2) + pow(translation.height, 2))
-    if magnitude > 120 {
+    let offset = dismissOffset(for: translation)
+    if offset.height > 120 {
+      dragOffset = offset
+      dismissProgress = min(max(offset.height / 360, 0), 1)
       onDismissPresentationChanged(currentDismissPresentation)
       onDismiss()
       return
