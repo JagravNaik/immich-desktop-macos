@@ -608,7 +608,7 @@ private struct PlacesMapView: NSViewRepresentable {
     }
 
     func updateAnnotations(_ groups: [PlaceGroup], on mapView: MKMapView) {
-      let newSignatures = Set(groups.map { "\($0.id)|\($0.count)|\($0.marker.latitude)|\($0.marker.longitude)" })
+      let newSignatures = Set(groups.map { "\($0.id)|\($0.count)|\($0.marker.latitude)|\($0.marker.longitude)|\($0.title)|\($0.subtitle ?? "")" })
       guard newSignatures != annotationSignatures else { return }
 
       annotationSignatures = newSignatures

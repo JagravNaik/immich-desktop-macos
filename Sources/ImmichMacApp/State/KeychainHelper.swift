@@ -18,6 +18,10 @@ enum KeychainHelperError: LocalizedError {
 }
 
 enum KeychainHelper {
+  #if DEBUG
+  nonisolated(unsafe) static var testServiceOverride: String?
+  #endif
+
   private static let service: String = {
     if let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty {
       return bundleID
@@ -25,11 +29,19 @@ enum KeychainHelper {
     return "app.immich.desktop.macos"
   }()
 
+  private static var activeService: String {
+    #if DEBUG
+    return testServiceOverride ?? service
+    #else
+    return service
+    #endif
+  }
+
   static func save(account: String, password: String) throws {
     let data = Data(password.utf8)
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
+      kSecAttrService as String: activeService,
       kSecAttrAccount as String: account,
       kSecUseDataProtectionKeychain as String: true,
     ]
@@ -51,7 +63,7 @@ enum KeychainHelper {
   static func load(account: String) throws -> String? {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
+      kSecAttrService as String: activeService,
       kSecAttrAccount as String: account,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
@@ -74,7 +86,7 @@ enum KeychainHelper {
   static func delete(account: String) throws {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
+      kSecAttrService as String: activeService,
       kSecAttrAccount as String: account,
       kSecUseDataProtectionKeychain as String: true,
     ]

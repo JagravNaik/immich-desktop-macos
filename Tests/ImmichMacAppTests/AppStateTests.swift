@@ -16,14 +16,18 @@ final class AppStateTests: XCTestCase {
     "immich.apiKey",
   ]
 
+  private static let testKeychainService = "app.immich.desktop.macos.tests"
+
   override func setUp() {
     super.setUp()
     continueAfterFailure = false
+    KeychainHelper.testServiceOverride = Self.testKeychainService
     Self.resetPersistentState()
   }
 
   override func tearDown() {
     Self.resetPersistentState()
+    KeychainHelper.testServiceOverride = nil
     super.tearDown()
   }
 

@@ -80,25 +80,24 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
     delegate?.webSocketDidDisconnect()
   }
 
+  @MainActor
   private func receiveMessage() {
     webSocketTask?.receive { [weak self] result in
       guard let self else { return }
-      switch result {
-      case .success(let message):
-        switch message {
-        case .string(let text):
-          Task { @MainActor in
+      Task { @MainActor in
+        switch result {
+        case .success(let message):
+          switch message {
+          case .string(let text):
             self.handleEngineIOMessage(text)
+          case .data:
+            break
+          @unknown default:
+            break
           }
-        case .data:
-          break
-        @unknown default:
-          break
-        }
-        self.receiveMessage()
-      case .failure(let error):
-        immichLog("[WebSocket] Receive error: \(error.localizedDescription)")
-        Task { @MainActor in
+          self.receiveMessage()
+        case .failure(let error):
+          immichLog("[WebSocket] Receive error: \(error.localizedDescription)")
           self.handleDisconnection()
         }
       }
