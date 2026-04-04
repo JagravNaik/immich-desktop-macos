@@ -216,18 +216,22 @@ struct MainContentView: View {
       }
       .keyboardShortcut("f", modifiers: .command)
       .hidden()
+      .accessibilityHidden(true)
 
       Button("") { appState.zoomInPhotoGrid() }
         .keyboardShortcut("+", modifiers: .command)
         .hidden()
+        .accessibilityHidden(true)
 
       Button("") { appState.zoomInPhotoGrid() }
         .keyboardShortcut("=", modifiers: .command)
         .hidden()
+        .accessibilityHidden(true)
 
       Button("") { appState.zoomOutPhotoGrid() }
         .keyboardShortcut("-", modifiers: .command)
         .hidden()
+        .accessibilityHidden(true)
     }
     .toolbar {
       if shouldPresentViewer {
