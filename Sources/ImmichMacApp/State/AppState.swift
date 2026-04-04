@@ -2228,13 +2228,10 @@ extension AppState: ImmichWebSocketDelegate {
       longitude = exif["longitude"] as? Double
     }
 
-    let locationText = [city, country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
-    let title = locationText.isEmpty ? originalFileName : locationText
-
     return PhotoItem(
       id: id,
       source: .remoteAsset(id: id),
-      title: title,
+      title: originalFileName,
       date: date,
       isFavorite: isFavorite,
       isVideo: isVideo,

@@ -199,7 +199,6 @@ struct MainContentView: View {
         appState.selectedItemID = nil
       } else {
         appState.searchText = ""
-        appState.performSmartSearch(query: "")
       }
     }
     .onChange(of: appState.selectedItemID) { _, newID in
@@ -942,13 +941,14 @@ struct PhotoGridZoomControl: View {
 
 struct ToolbarActionGroup: View {
   struct Action: Identifiable {
-    let id = UUID()
+    let id: String
     let icon: String
     let help: String
     let enabled: Bool
     let action: () -> Void
 
     init(icon: String, help: String, enabled: Bool = true, action: @escaping () -> Void) {
+      self.id = icon
       self.icon = icon
       self.help = help
       self.enabled = enabled

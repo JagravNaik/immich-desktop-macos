@@ -13,24 +13,26 @@ struct AssetInfoInspector: View {
   @State private var showsTags = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      headerSection
-        .padding(18)
-
-      Divider()
-
-      cameraSection
-        .padding(18)
-
-      Divider()
-
-      tagsSection
-        .padding(18)
-
-      if let lat = item.latitude, let lon = item.longitude {
-        Divider()
-        mapSection(lat: lat, lon: lon)
+    ScrollView {
+      VStack(alignment: .leading, spacing: 0) {
+        headerSection
           .padding(18)
+
+        Divider()
+
+        cameraSection
+          .padding(18)
+
+        Divider()
+
+        tagsSection
+          .padding(18)
+
+        if let lat = item.latitude, let lon = item.longitude {
+          Divider()
+          mapSection(lat: lat, lon: lon)
+            .padding(18)
+        }
       }
     }
     .frame(width: 420)

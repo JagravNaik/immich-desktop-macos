@@ -214,11 +214,17 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
 
   @MainActor
   private func handleDisconnection() {
+    guard !intentionalDisconnect else {
+      // disconnect() already notified the delegate and cleaned up state.
+      return
+    }
     isConnected = false
     stopPingTimer()
     delegate?.webSocketDidDisconnect()
 
-    guard !intentionalDisconnect, reconnectAttempt < maxReconnectAttempts else { return }
+    guard reconnectAttempt < maxReconnectAttempts else {
+      return
+    }
 
     reconnectTask?.cancel()
     reconnectTask = Task { @MainActor [weak self] in
