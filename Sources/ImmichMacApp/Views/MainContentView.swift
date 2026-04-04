@@ -448,6 +448,7 @@ struct MainContentView: View {
         Image(systemName: appState.isMultiSelectMode ? "checkmark.circle.fill" : "checkmark.circle")
       }
       .help(appState.isMultiSelectMode ? "Exit Selection" : "Select Multiple")
+      .accessibilityLabel(appState.isMultiSelectMode ? "Exit Selection" : "Select Multiple")
 
       Button {
         Task { await appState.loadRemoteTimeline(reset: true) }
@@ -455,6 +456,7 @@ struct MainContentView: View {
         Image(systemName: "arrow.clockwise")
       }
       .help("Refresh Library")
+      .accessibilityLabel("Refresh Library")
       .disabled(appState.isLoadingTimeline)
 
       Button {
@@ -463,6 +465,7 @@ struct MainContentView: View {
         Image(systemName: "plus")
       }
       .help("Import Files")
+      .accessibilityLabel("Import Files")
 
       // View options
       Menu {
@@ -491,6 +494,7 @@ struct MainContentView: View {
         Image(systemName: "ellipsis.circle")
       }
       .help("More Options")
+      .accessibilityLabel("More Options")
     }
   }
 
@@ -506,6 +510,7 @@ struct MainContentView: View {
           .font(.system(size: 16, weight: .medium))
       }
       .help("Back to Library")
+      .accessibilityLabel("Back to Library")
     }
 
     ToolbarItem(placement: .principal) {
@@ -529,6 +534,7 @@ struct MainContentView: View {
             .foregroundColor(item.isFavorite ? .red : nil)
         }
         .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+        .accessibilityLabel(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
         if !item.isVideo {
           Button {
@@ -539,6 +545,7 @@ struct MainContentView: View {
             Image(systemName: "slider.horizontal.3")
           }
           .help("Edit")
+          .accessibilityLabel("Edit")
         }
 
         Button {
@@ -546,6 +553,7 @@ struct MainContentView: View {
         } label: {
           Image(systemName: "info.circle")
         }
+        .accessibilityLabel("Show Info")
         .popover(isPresented: $appState.showInfoPopover, arrowEdge: .bottom) {
           AssetInfoInspector(appState: appState, item: item)
         }
@@ -558,6 +566,7 @@ struct MainContentView: View {
           Image(systemName: "tag")
         }
         .help("Edit Tags")
+        .accessibilityLabel("Edit Tags")
 
         Button {
           appState.downloadAsset(item.id)
@@ -565,6 +574,7 @@ struct MainContentView: View {
           Image(systemName: "arrow.down.circle")
         }
         .help("Download Original")
+        .accessibilityLabel("Download Original")
         .disabled(appState.isDownloading)
 
         ShareButton(appState: appState, assetID: item.id)
@@ -575,6 +585,7 @@ struct MainContentView: View {
           Image(systemName: "trash")
         }
         .help("Move to Trash")
+        .accessibilityLabel("Move to Trash")
       }
     }
   }
@@ -981,6 +992,7 @@ struct ToolbarActionGroup: View {
         .foregroundStyle(item.enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
         .disabled(!item.enabled)
         .help(item.help)
+        .accessibilityLabel(Text(item.help))
       }
     }
     .padding(2)
@@ -1240,6 +1252,7 @@ struct UploadFailureBanner: View {
       Image(systemName: "exclamationmark.triangle.fill")
         .foregroundStyle(.yellow)
         .font(.system(size: 16))
+        .accessibilityHidden(true)
 
       VStack(alignment: .leading, spacing: 2) {
         Text("Upload failed: \(filename)")
@@ -1261,6 +1274,7 @@ struct UploadFailureBanner: View {
           .foregroundStyle(.secondary)
       }
       .buttonStyle(.plain)
+      .accessibilityLabel("Dismiss")
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)

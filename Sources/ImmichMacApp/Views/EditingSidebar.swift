@@ -199,6 +199,7 @@ struct EditingSidebar: View {
           Image(systemName: "rotate.left")
         }
         .help("Rotate Left 90°")
+        .accessibilityLabel("Rotate Left 90°")
 
         Button {
           pipeline.rotateRight()
@@ -206,6 +207,7 @@ struct EditingSidebar: View {
           Image(systemName: "rotate.right")
         }
         .help("Rotate Right 90°")
+        .accessibilityLabel("Rotate Right 90°")
 
         Button {
           pipeline.flipHorizontal.toggle()
@@ -214,6 +216,7 @@ struct EditingSidebar: View {
             .foregroundStyle(pipeline.flipHorizontal ? Color.accentColor : .primary)
         }
         .help("Flip Horizontal")
+        .accessibilityLabel("Flip Horizontal")
 
         Button {
           pipeline.flipVertical.toggle()
@@ -222,6 +225,7 @@ struct EditingSidebar: View {
             .foregroundStyle(pipeline.flipVertical ? Color.accentColor : .primary)
         }
         .help("Flip Vertical")
+        .accessibilityLabel("Flip Vertical")
       }
       .buttonStyle(.bordered)
     }

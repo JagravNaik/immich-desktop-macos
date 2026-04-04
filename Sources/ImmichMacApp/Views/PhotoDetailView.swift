@@ -163,6 +163,7 @@ struct PhotoDetailView: View {
         Image(systemName: "photo")
           .font(.system(size: 64))
           .foregroundColor(.white.opacity(0.3))
+          .accessibilityHidden(true)
       }
 
       // Video layer
@@ -246,6 +247,7 @@ struct PhotoDetailView: View {
     } label: {
       HStack(spacing: 4) {
         Image(systemName: "livephoto")
+          .accessibilityHidden(true)
         if appState.isViewingLivePhoto {
           Text("LIVE")
             .font(.system(size: 10, weight: .bold))
@@ -257,6 +259,7 @@ struct PhotoDetailView: View {
       .background(.ultraThinMaterial, in: Capsule())
     }
     .buttonStyle(.plain)
+    .accessibilityLabel(appState.isViewingLivePhoto ? "Exit Live Photo" : "View Live Photo")
   }
 
   // MARK: - Dismiss Drag Gesture

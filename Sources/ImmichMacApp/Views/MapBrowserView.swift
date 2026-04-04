@@ -248,6 +248,7 @@ struct MapBrowserView: View {
             Image(systemName: "arrow.clockwise")
           }
           .buttonStyle(.bordered)
+          .accessibilityLabel("Refresh Map")
           .padding(14)
         }
       }

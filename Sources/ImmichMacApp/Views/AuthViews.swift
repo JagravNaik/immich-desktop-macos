@@ -183,6 +183,7 @@ struct AuthShell<Content: View>: View {
         Image(systemName: "photo.stack")
           .font(.system(size: 34, weight: .semibold))
           .foregroundStyle(.white)
+          .accessibilityHidden(true)
       }
 
       VStack(spacing: 8) {

@@ -638,6 +638,7 @@ struct LibraryGridView: View {
       Image(systemName: "photo.on.rectangle.angled")
         .font(.system(size: 48, weight: .light))
         .foregroundStyle(.quaternary)
+        .accessibilityHidden(true)
 
       VStack(spacing: 6) {
         Text(appState.emptyStateTitle)
@@ -805,16 +806,20 @@ struct PhotoGridCell: View {
         if item.isFavorite {
           Image(systemName: "heart.fill")
             .foregroundStyle(.white)
+            .accessibilityHidden(true)
         }
         if item.isVideo {
           Image(systemName: "video.fill")
             .foregroundStyle(.white)
+            .accessibilityHidden(true)
         } else if item.isLivePhoto {
           Image(systemName: "livephoto")
             .foregroundStyle(.white)
+            .accessibilityHidden(true)
         }
         if let count = item.stackCount, count > 0 {
           Image(systemName: "square.stack")
+            .accessibilityHidden(true)
           Text("+\(count)").font(.caption2)
         }
       }

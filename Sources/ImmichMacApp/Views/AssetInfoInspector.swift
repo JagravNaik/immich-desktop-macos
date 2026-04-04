@@ -90,6 +90,7 @@ struct AssetInfoInspector: View {
           Image(systemName: "camera")
             .font(.title3)
             .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
 
           VStack(alignment: .leading, spacing: 1) {
             Text([exif.make, exif.model].compactMap { $0 }.joined(separator: " "))
@@ -129,6 +130,7 @@ struct AssetInfoInspector: View {
           Image(systemName: "camera")
             .font(.title3)
             .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
           Text("No camera metadata")
             .font(.subheadline)
             .foregroundStyle(.secondary)

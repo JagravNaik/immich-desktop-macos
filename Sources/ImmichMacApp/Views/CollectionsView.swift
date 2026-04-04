@@ -182,6 +182,7 @@ struct PersonCard: View {
           Image(systemName: "person.fill")
             .font(.title)
             .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
         }
       }
 
@@ -377,6 +378,7 @@ struct MediaTypeCard: View {
         Image(systemName: "chevron.right")
           .font(.caption)
           .foregroundStyle(.tertiary)
+          .accessibilityHidden(true)
       }
       .padding(12)
       .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))

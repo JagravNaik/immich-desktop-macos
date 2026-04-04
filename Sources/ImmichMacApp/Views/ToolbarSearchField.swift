@@ -34,6 +34,7 @@ struct ToolbarSearchField: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help("Search (⌘F)")
+        .accessibilityLabel("Search")
         .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .trailing)))
       }
     }
