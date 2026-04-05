@@ -16,11 +16,13 @@ let package = Package(
   ],
   targets: [
     .target(
-      name: "ImmichCore"
+      name: "ImmichCore",
+      exclude: ["AGENTS.md"]
     ),
     .target(
       name: "ImmichAPI",
-      dependencies: ["ImmichCore"]
+      dependencies: ["ImmichCore"],
+      exclude: ["AGENTS.md"]
     ),
     .target(
       name: "ImmichPersistence",
@@ -36,7 +38,8 @@ let package = Package(
     ),
     .executableTarget(
       name: "ImmichMacApp",
-      dependencies: ["ImmichCore", "ImmichAPI", "ImmichPersistence", "ImmichMedia", "ImmichSync"]
+      dependencies: ["ImmichCore", "ImmichAPI", "ImmichPersistence", "ImmichMedia", "ImmichSync"],
+      exclude: ["AGENTS.md", "State/AGENTS.md", "Views/AGENTS.md"]
     ),
     .testTarget(
       name: "ImmichAPITests",
