@@ -45,17 +45,16 @@ struct CollectionsView: View {
           .font(.title2.weight(.semibold))
         Spacer()
         Button("Show All") {
-          // TODO: Add a dedicated people browser destination.
+          appState.sidebarSelection = .allPeople
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .disabled(true)
       }
 
       ScrollView(.horizontal, showsIndicators: false) {
         LazyHStack(spacing: 16) {
           ForEach(appState.people.filter { !$0.isHidden }.prefix(20)) { person in
-            PersonCard(person: person, context: appState.thumbnailContext)
+            PersonCard(person: person, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
               .onTapGesture {
                 appState.sidebarSelection = .person(id: person.id)
               }
@@ -75,11 +74,10 @@ struct CollectionsView: View {
           .font(.title2.weight(.semibold))
         Spacer()
         Button("Show All") {
-          // TODO: Add a dedicated memories browser destination.
+          appState.sidebarSelection = .allMemories
         }
-          .buttonStyle(.plain)
-          .foregroundStyle(.secondary)
-          .disabled(true)
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
       }
 
       ScrollView(.horizontal, showsIndicators: false) {
@@ -162,6 +160,7 @@ struct CollectionsView: View {
 struct PersonCard: View {
   let person: Person
   let context: AppState.ThumbnailContext?
+  @ObservedObject var thumbnailStore: ThumbnailStore
 
   @State private var thumbnail: NSImage?
 
@@ -193,13 +192,7 @@ struct PersonCard: View {
     }
     .task {
       guard let context else { return }
-      let url = context.baseURL.appending(path: "people").appending(path: person.id).appending(path: "thumbnail")
-      var request = URLRequest(url: url)
-      context.apply(to: &request)
-      if let (data, response) = try? await URLSession.shared.data(for: request),
-         let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-        self.thumbnail = NSImage(data: data)
-      }
+      thumbnail = await thumbnailStore.loadPersonImage(personID: person.id, context: context)
     }
   }
 }

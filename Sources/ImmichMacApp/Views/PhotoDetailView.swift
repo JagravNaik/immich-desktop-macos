@@ -11,7 +11,7 @@ struct PhotoDetailView: View {
   let initialDisplayImage: NSImage?
   let isHeroTransitioning: Bool
   let onDismissPresentationChanged: (InteractiveDismissPresentation) -> Void
-  let onDismiss: () -> Void
+  let onDismiss: (InteractiveDismissPresentation) -> Void
 
   @State private var image: NSImage?
   @State private var currentItemID: String?
@@ -326,8 +326,9 @@ struct PhotoDetailView: View {
     if offset.height > 120 {
       dragOffset = offset
       dismissProgress = min(max(offset.height / 360, 0), 1)
-      onDismissPresentationChanged(currentDismissPresentation)
-      onDismiss()
+      let presentation = currentDismissPresentation
+      onDismissPresentationChanged(presentation)
+      onDismiss(presentation)
       return
     }
     withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -350,15 +351,15 @@ struct PhotoDetailView: View {
 
   private var keyboardShortcuts: some View {
     Group {
-      Button("") { onDismiss() }
+      Button("") { onDismiss(.identity) }
       .keyboardShortcut(.escape, modifiers: [])
       .opacity(0)
 
-      Button("") { onDismiss() }
+      Button("") { onDismiss(.identity) }
       .keyboardShortcut(.space, modifiers: [])
       .opacity(0)
 
-      Button("") { onDismiss() }
+      Button("") { onDismiss(.identity) }
       .keyboardShortcut(.return, modifiers: [])
       .opacity(0)
 

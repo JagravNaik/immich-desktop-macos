@@ -16,6 +16,9 @@ enum SidebarDestination: Hashable {
   case allAlbums
   case album(id: String)
 
+  case allPeople
+  case allMemories
+
   // People
   case person(id: String)
 
@@ -41,6 +44,8 @@ enum SidebarDestination: Hashable {
     case .pinnedAlbum: "Pinned Album"
     case .allAlbums: "All Albums"
     case .album: "Album"
+    case .allPeople: "People"
+    case .allMemories: "Memories"
     case .person: "Person"
     case .videos: "Videos"
     case .livePhotos: "Live Photos"
@@ -61,6 +66,8 @@ enum SidebarDestination: Hashable {
     case .pinnedAlbum: "pin.fill"
     case .allAlbums: "rectangle.stack"
     case .album: "rectangle.stack"
+    case .allPeople: "person.2"
+    case .allMemories: "memories"
     case .person: "person.crop.circle"
     case .videos: "video"
     case .livePhotos: "livephoto"
@@ -158,8 +165,8 @@ struct SidebarView: View {
 
       ForEach(appState.albums.prefix(8)) { album in
         Label(album.albumName, systemImage: album.shared ? "rectangle.stack.person.crop" : "rectangle.stack")
-          .tag(SidebarDestination.album(id: album.id))
           .badge(album.assetCount)
+          .tag(SidebarDestination.album(id: album.id))
       }
     } header: {
       sectionHeader("Albums", isExpanded: $sectionState.isAlbumsExpanded)

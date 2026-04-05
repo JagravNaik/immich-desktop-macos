@@ -1,6 +1,7 @@
 #if canImport(SwiftUI) && canImport(AppKit)
 import SwiftUI
 import AppKit
+import ImmichCore
 
 let photoHeroCoordinateSpaceName = "ImmichPhotoHero"
 
@@ -29,6 +30,7 @@ struct MainContentView: View {
   @State private var isHeroExpanded = false
   @State private var interactiveDismissPresentation: InteractiveDismissPresentation = .identity
   @State private var isSearchPresented = false
+  @State private var showSearchSuggestions = false
 
   struct HeroTransitionState: Equatable {
     enum Direction: Equatable {
@@ -136,77 +138,9 @@ struct MainContentView: View {
   @ViewBuilder
   private var detailArea: some View {
     ZStack {
-      VStack(spacing: 0) {
-        contentHeader
-        routedContentView
-      }
-      .background(.background)
-      .opacity(browserOpacity)
-      .allowsHitTesting(!shouldPresentViewer)
-      .simultaneousGesture(TapGesture().onEnded {
-        dismissSearchFieldFocus()
-      })
-      .overlay(alignment: .bottom) {
-        if let notification = appState.uploadNotification {
-          UploadFailureBanner(
-            filename: notification.filename,
-            reason: notification.reason,
-            onDismiss: { appState.dismissUploadNotification() }
-          )
-          .transition(.move(edge: .bottom).combined(with: .opacity))
-          .padding(.bottom, 16)
-          .padding(.horizontal, 16)
-        }
-      }
-
-      if shouldPresentViewer, let item = appState.selectedItem {
-        PhotoDetailView(
-          appState: appState,
-          thumbnailStore: thumbnailStore,
-          editingPipeline: editingPipeline,
-          initialDisplayImage: heroSeedImage(for: item),
-          isHeroTransitioning: heroTransition?.itemID == item.id,
-          onDismissPresentationChanged: { interactiveDismissPresentation = $0 },
-          onDismiss: closeViewer
-        )
-        .opacity(viewerOpacity)
-        .allowsHitTesting(appState.isViewingPhoto && heroTransition == nil)
-
-        if appState.isEditing {
-          HStack(spacing: 0) {
-            Spacer()
-            EditingSidebar(appState: appState, pipeline: editingPipeline, item: item)
-              .transition(.move(edge: .trailing))
-          }
-          .opacity(viewerOpacity)
-        }
-      }
-
-      if let heroTransition {
-        HeroOpenOverlay(
-          heroState: heroTransition,
-          isExpanded: isHeroExpanded
-        )
-        .zIndex(3)
-      }
-    }
-    .coordinateSpace(name: photoHeroCoordinateSpaceName)
-    .onChange(of: appState.searchText) { _, newValue in
-      appState.performSmartSearch(query: newValue)
-    }
-    .onChange(of: isSearchPresented) { _, presented in
-      if presented {
-        appState.selectedItemID = nil
-      } else {
-        appState.searchText = ""
-      }
-    }
-    .onChange(of: appState.selectedItemID) { _, newID in
-      if newID != nil && isSearchPresented {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-          isSearchPresented = false
-        }
-      }
+      detailBackgroundLayer
+      detailOverlayLayer
+      searchSuggestionsLayer
     }
     .background {
       Button("") {
@@ -239,6 +173,107 @@ struct MainContentView: View {
       } else {
         browserToolbar
       }
+    }
+    .coordinateSpace(name: photoHeroCoordinateSpaceName)
+    .onChange(of: appState.searchText) { _, newValue in
+      showSearchSuggestions = newValue.isEmpty && isSearchPresented
+      appState.performSearch(query: newValue)
+    }
+    .onChange(of: isSearchPresented) { _, presented in
+      if presented {
+        appState.selectedItemID = nil
+        showSearchSuggestions = appState.searchText.isEmpty
+      } else {
+        appState.searchText = ""
+        showSearchSuggestions = false
+      }
+    }
+    .onChange(of: appState.selectedItemID) { _, newID in
+      if newID != nil && isSearchPresented {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+          isSearchPresented = false
+        }
+      }
+    }
+  }
+
+  private var detailBackgroundLayer: some View {
+    VStack(spacing: 0) {
+      contentHeader
+      routedContentView
+    }
+    .background(.background)
+    .opacity(browserOpacity)
+    .allowsHitTesting(!shouldPresentViewer)
+    .simultaneousGesture(TapGesture().onEnded {
+      dismissSearchFieldFocus()
+    })
+    .overlay(alignment: .bottom) {
+      if let notification = appState.uploadNotification {
+        UploadFailureBanner(
+          filename: notification.filename,
+          reason: notification.reason,
+          onDismiss: { appState.dismissUploadNotification() }
+        )
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .padding(.bottom, 16)
+        .padding(.horizontal, 16)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var detailOverlayLayer: some View {
+    if shouldPresentViewer, let item = appState.selectedItem {
+      PhotoDetailView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        editingPipeline: editingPipeline,
+        initialDisplayImage: heroSeedImage(for: item),
+        isHeroTransitioning: heroTransition?.itemID == item.id,
+        onDismissPresentationChanged: { interactiveDismissPresentation = $0 },
+        onDismiss: closeViewer
+      )
+      .opacity(viewerOpacity)
+      .allowsHitTesting(appState.isViewingPhoto && heroTransition == nil)
+
+      if appState.isEditing {
+        HStack(spacing: 0) {
+          Spacer()
+          EditingSidebar(appState: appState, pipeline: editingPipeline, item: item)
+            .transition(.move(edge: .trailing))
+        }
+        .opacity(viewerOpacity)
+      }
+    }
+
+    if let heroTransition {
+      HeroOpenOverlay(
+        heroState: heroTransition,
+        isExpanded: isHeroExpanded
+      )
+      .zIndex(3)
+    }
+  }
+
+  @ViewBuilder
+  private var searchSuggestionsLayer: some View {
+    if showSearchSuggestions && !appState.recentSearches.isEmpty {
+      SearchSuggestionsOverlay(
+        recentSearches: appState.recentSearches,
+        onSelect: { query in
+          appState.searchText = query
+          showSearchSuggestions = false
+        },
+        onClearAll: {
+          appState.clearRecentSearches()
+        }
+      )
+      .frame(maxWidth: 260, alignment: .trailing)
+      .padding(.trailing, 16)
+      .padding(.top, 56)
+      .zIndex(10)
+      .transition(.opacity)
     }
   }
 
@@ -295,6 +330,8 @@ struct MainContentView: View {
     case .imports: "Imports"
     case .recentlyDeleted: "Recently Deleted"
     case .allAlbums: "Albums"
+    case .allPeople: "People"
+    case .allMemories: "Memories"
     case .album(let id): appState.albums.first(where: { $0.id == id })?.albumName ?? "Album"
     case .pinnedAlbum(let id): appState.albums.first(where: { $0.id == id })?.albumName ?? "Album"
     case .person(let id): appState.people.first(where: { $0.id == id })?.name ?? "Person"
@@ -318,6 +355,10 @@ struct MainContentView: View {
       )
     case .allAlbums:
       AllAlbumsView(appState: appState, thumbnailStore: thumbnailStore)
+    case .allPeople:
+      AllPeopleView(appState: appState, thumbnailStore: thumbnailStore)
+    case .allMemories:
+      AllMemoriesView(appState: appState, thumbnailStore: thumbnailStore)
     case .album(let id), .pinnedAlbum(let id):
       LibraryGridView(
         appState: appState,
@@ -406,7 +447,9 @@ struct MainContentView: View {
     ToolbarItem(placement: .automatic) {
       ToolbarSearchField(
         text: $appState.searchText,
-        isPresented: $isSearchPresented
+        isPresented: $isSearchPresented,
+        searchType: $appState.searchType,
+        searchFilters: $appState.searchFilters
       )
     }
 
@@ -662,7 +705,7 @@ struct MainContentView: View {
     }
   }
 
-  private func closeViewer() {
+  private func closeViewer(_ presentation: InteractiveDismissPresentation = .identity) {
     guard appState.isViewingPhoto else { return }
 
     appState.isViewingLivePhoto = false
@@ -680,8 +723,8 @@ struct MainContentView: View {
       return
     }
 
-    let expandedPresentation = interactiveDismissPresentation.isInteractive
-      ? interactiveDismissPresentation
+    let expandedPresentation = presentation.isInteractive
+      ? presentation
       : .identity
 
     heroTransition = HeroTransitionState(
@@ -739,7 +782,7 @@ struct MainContentView: View {
 
   private var showsPhotoGridZoomControl: Bool {
     switch appState.sidebarSelection {
-    case .collections, .map, .allAlbums:
+    case .collections, .map, .allAlbums, .allPeople, .allMemories:
       return false
     default:
       return true
@@ -838,6 +881,72 @@ struct AllAlbumsView: View {
                 Task { await appState.deleteAlbum(album.id) }
               }
             }
+          }
+        }
+        .padding(20)
+      }
+    }
+  }
+}
+
+struct AllPeopleView: View {
+  @ObservedObject var appState: AppState
+  @ObservedObject var thumbnailStore: ThumbnailStore
+
+  private var visiblePeople: [Person] {
+    appState.people.filter { !$0.isHidden }
+  }
+
+  var body: some View {
+    if visiblePeople.isEmpty {
+      VStack(spacing: 12) {
+        Image(systemName: "person.2")
+          .font(.system(size: 42, weight: .light))
+          .foregroundStyle(.quaternary)
+        Text("No people")
+          .font(.title3.weight(.medium))
+          .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else {
+      ScrollView {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 130), spacing: 16)], spacing: 20) {
+          ForEach(visiblePeople) { person in
+            PersonCard(person: person, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
+              .onTapGesture {
+                appState.sidebarSelection = .person(id: person.id)
+              }
+          }
+        }
+        .padding(20)
+      }
+    }
+  }
+}
+
+struct AllMemoriesView: View {
+  @ObservedObject var appState: AppState
+  @ObservedObject var thumbnailStore: ThumbnailStore
+
+  var body: some View {
+    if appState.memories.isEmpty {
+      VStack(spacing: 12) {
+        Image(systemName: "memories")
+          .font(.system(size: 42, weight: .light))
+          .foregroundStyle(.quaternary)
+        Text("No memories")
+          .font(.title3.weight(.medium))
+          .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else {
+      ScrollView {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 16)], spacing: 16) {
+          ForEach(appState.memories) { memory in
+            MemoryCard(memory: memory, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
+              .onTapGesture {
+                appState.sidebarSelection = .memory(id: memory.id)
+              }
           }
         }
         .padding(20)

@@ -429,13 +429,49 @@ public struct Person: Identifiable, Hashable, Sendable {
 
 // MARK: - Search
 
+public enum SearchType: String, CaseIterable, Identifiable, Sendable {
+  case smart = "Smart"
+  case filename = "Filename"
+  case description = "Description"
+  case ocr = "OCR"
+
+  public var id: String { rawValue }
+}
+
+public struct SearchFilters: Sendable {
+  public var cameraMake: String?
+  public var cameraModel: String?
+  public var city: String?
+  public var country: String?
+  public var takenAfter: Date?
+  public var takenBefore: Date?
+  public var mediaType: MediaType?
+  public var isFavorite: Bool?
+
+  public enum MediaType: String, CaseIterable, Identifiable, Sendable {
+    case all = "All"
+    case image = "Image"
+    case video = "Video"
+    public var id: String { rawValue }
+  }
+
+  public init() {}
+
+  public var isEmpty: Bool {
+    cameraMake == nil && cameraModel == nil && city == nil && country == nil
+      && takenAfter == nil && takenBefore == nil && mediaType == nil && isFavorite == nil
+  }
+}
+
 public struct SearchResult: Sendable {
   public let assets: [RemoteTimelineAsset]
   public let totalCount: Int
+  public let nextPage: String?
 
-  public init(assets: [RemoteTimelineAsset], totalCount: Int) {
+  public init(assets: [RemoteTimelineAsset], totalCount: Int, nextPage: String? = nil) {
     self.assets = assets
     self.totalCount = totalCount
+    self.nextPage = nextPage
   }
 }
 

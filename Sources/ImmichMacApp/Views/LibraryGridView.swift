@@ -259,7 +259,7 @@ struct LibraryGridView: View {
     ScrollViewReader { proxy in
       Group {
         if appState.filteredItems.isEmpty {
-          if appState.isLoadingTimeline {
+          if appState.isLoadingTimeline || appState.isSearching {
             loadingView
           } else {
             emptyView
@@ -635,7 +635,7 @@ struct LibraryGridView: View {
 
   private var emptyView: some View {
     VStack(spacing: 16) {
-      Image(systemName: "photo.on.rectangle.angled")
+      Image(systemName: !appState.searchText.isEmpty ? "magnifyingglass" : "photo.on.rectangle.angled")
         .font(.system(size: 48, weight: .light))
         .foregroundStyle(.quaternary)
         .accessibilityHidden(true)

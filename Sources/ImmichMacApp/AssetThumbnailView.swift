@@ -148,6 +148,50 @@ final class ThumbnailStore: ObservableObject {
     )
   }
 
+  func loadPersonImage(
+    personID: String,
+    context: AppState.ThumbnailContext
+  ) async -> NSImage? {
+    guard !Task.isCancelled else { return nil }
+
+    let cacheKey = "person::\(context.baseURL.absoluteString)::\(personID)"
+    if let cached = cache.object(forKey: cacheKey as NSString) {
+      return cached
+    }
+
+    let waiterID = UUID()
+    let task = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID) ?? {
+      let task = Task<NSImage?, Never> { [context] in
+        await Self.loadPersonRemoteImage(personID: personID, context: context)
+      }
+
+      inFlightRegistry.insert(task: task, cacheKey: cacheKey, waiterID: waiterID)
+      return task
+    }()
+
+    return await withTaskCancellationHandler(
+      operation: {
+        let image = await task.value
+        guard !Task.isCancelled else {
+          inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
+          return nil
+        }
+
+        inFlightRegistry.clear(cacheKey: cacheKey)
+
+        if let image {
+          let cost = cacheCost(for: image)
+          cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
+        }
+
+        return image
+      },
+      onCancel: {
+        inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
+      }
+    )
+  }
+
   private func cacheKey(
     for item: AppState.PhotoItem,
     context: AppState.ThumbnailContext?,
@@ -199,6 +243,30 @@ final class ThumbnailStore: ObservableObject {
       }
 
       return await decodeImage(from: data, size: size)
+    } catch {
+      return nil
+    }
+  }
+
+  private static func loadPersonRemoteImage(
+    personID: String,
+    context: AppState.ThumbnailContext
+  ) async -> NSImage? {
+    let url = context.baseURL.appending(path: "people").appending(path: personID).appending(path: "thumbnail")
+
+    var request = URLRequest(url: url)
+    context.apply(to: &request)
+
+    do {
+      let (data, response) = try await URLSession.shared.data(for: request)
+      guard
+        let httpResponse = response as? HTTPURLResponse,
+        (200...299).contains(httpResponse.statusCode)
+      else {
+        return nil
+      }
+
+      return await decodeImage(from: data, size: .thumbnail)
     } catch {
       return nil
     }

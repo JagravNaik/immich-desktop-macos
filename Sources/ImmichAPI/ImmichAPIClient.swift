@@ -128,7 +128,11 @@ public protocol ImmichAPIClient: Sendable {
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
-  func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult
+  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
+  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
+  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
+  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
+  func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String]
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
   func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
@@ -313,11 +317,28 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   // MARK: - People
 
   public func fetchPeople(server: ImmichServer, session: UserSession) async throws -> [Person] {
-    var components = URLComponents(url: server.baseURL.appending(path: "people"), resolvingAgainstBaseURL: false)
-    components?.queryItems = [URLQueryItem(name: "withHidden", value: "false")]
-    let request = authorizedRequest(url: components?.url ?? server.baseURL.appending(path: "people"), session: session)
-    let response: PeopleResponse = try await perform(request)
-    return response.people.map { $0.toModel() }
+    var allPeople: [Person] = []
+    var page = 1
+    let pageSize = 1000
+
+    while true {
+      var components = URLComponents(url: server.baseURL.appending(path: "people"), resolvingAgainstBaseURL: false)
+      components?.queryItems = [
+        URLQueryItem(name: "withHidden", value: "false"),
+        URLQueryItem(name: "page", value: String(page)),
+        URLQueryItem(name: "size", value: String(pageSize)),
+      ]
+
+      let request = authorizedRequest(url: components?.url ?? server.baseURL.appending(path: "people"), session: session)
+      let response: PeopleResponse = try await perform(request)
+      allPeople.append(contentsOf: response.people.map { $0.toModel() })
+
+      guard response.hasNextPage == true else {
+        return allPeople
+      }
+
+      page += 1
+    }
   }
 
   // MARK: - Asset Detail
@@ -387,21 +408,65 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   // MARK: - Search
 
-  public func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult {
+  public func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
     var request = authorizedRequest(url: server.baseURL.appending(path: "search/smart"), session: session)
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(SmartSearchRequest(query: query))
+    request.httpBody = try JSONEncoder().encode(SmartSearchRequest(query: query, filters: filters))
     let response: SearchAssetsResponse = try await perform(request)
     let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
-    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count)
+    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+  }
+
+  public func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: query, filters: filters))
+    let response: SearchAssetsResponse = try await perform(request)
+    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
+    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+  }
+
+  public func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(description: query, filters: filters))
+    let response: SearchAssetsResponse = try await perform(request)
+    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
+    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+  }
+
+  public func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(ocr: query, filters: filters))
+    let response: SearchAssetsResponse = try await perform(request)
+    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
+    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+  }
+
+  public func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String] {
+    var components = URLComponents(url: server.baseURL.appending(path: "search/suggestions"), resolvingAgainstBaseURL: false)
+    var queryItems = [URLQueryItem(name: "type", value: type)]
+    for (key, value) in filters {
+      queryItems.append(URLQueryItem(name: key, value: value))
+    }
+    components?.queryItems = queryItems
+    guard let url = components?.url else { throw ImmichAPIError.invalidResponse(url: "search/suggestions") }
+    var request = authorizedRequest(url: url, session: session)
+    request.httpMethod = "GET"
+    let response: [String?] = try await perform(request)
+    return response.compactMap { $0 }
   }
 
   public func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] {
     var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(personIds: [personId]))
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(personIds: [personId], filters: SearchFilters()))
     let response: SearchAssetsResponse = try await perform(request)
     return response.assets.items.compactMap { $0.toTimelineAsset() }
   }
@@ -410,7 +475,9 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: "Screenshot", type: "IMAGE", size: 1000))
+    var filters = SearchFilters()
+    filters.mediaType = .image
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: "Screenshot", filters: filters))
     let response: SearchAssetsResponse = try await perform(request)
     return response.assets.items.compactMap { $0.toTimelineAsset() }
   }
@@ -1352,6 +1419,7 @@ private struct AlbumAssetStackResponse: Decodable {
 private struct PeopleResponse: Decodable {
   let total: Int
   let people: [PersonResponse]
+  let hasNextPage: Bool?
 }
 
 private struct PersonResponse: Decodable {
@@ -1475,15 +1543,101 @@ private struct AssetStatisticsResponse: Decodable {
 // MARK: - Search DTOs
 
 private struct SmartSearchRequest: Encodable {
-  let query: String
+  let query: String?
+  let takenAfter: String?
+  let takenBefore: String?
+  let make: String?
+  let model: String?
+  let city: String?
+  let country: String?
+  let type: String?
+  let isFavorite: Bool?
+  let withStacked: Bool?
+  let withPeople: Bool?
+  let withExif: Bool?
+
+  init(query: String, filters: SearchFilters) {
+    self.query = query.isEmpty ? nil : query
+    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
+    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.make = filters.cameraMake
+    self.model = filters.cameraModel
+    self.city = filters.city
+    self.country = filters.country
+    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
+    self.isFavorite = filters.isFavorite
+    self.withStacked = true
+    self.withPeople = nil
+    self.withExif = nil
+  }
+
+  private static func encodeDate(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+  }
 }
 
 private struct MetadataSearchRequest: Encodable {
   var personIds: [String]?
   var originalFileName: String?
+  var description: String?
+  var ocr: String?
   var type: String?
   var size: Int?
   var page: Int?
+  var takenAfter: String?
+  var takenBefore: String?
+  var make: String?
+  var model: String?
+  var city: String?
+  var country: String?
+  var isFavorite: Bool?
+  var withStacked: Bool?
+  var withExif: Bool?
+
+  init(originalFileName: String? = nil, description: String? = nil, ocr: String? = nil, filters: SearchFilters) {
+    self.originalFileName = originalFileName
+    self.description = description
+    self.ocr = ocr
+    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
+    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.make = filters.cameraMake
+    self.model = filters.cameraModel
+    self.city = filters.city
+    self.country = filters.country
+    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
+    self.isFavorite = filters.isFavorite
+    self.withStacked = true
+    self.withExif = false
+    self.page = 1
+    self.size = 1000
+  }
+
+  init(personIds: [String], filters: SearchFilters) {
+    self.personIds = personIds
+    self.originalFileName = nil
+    self.description = nil
+    self.ocr = nil
+    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
+    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.make = filters.cameraMake
+    self.model = filters.cameraModel
+    self.city = filters.city
+    self.country = filters.country
+    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
+    self.isFavorite = filters.isFavorite
+    self.withStacked = true
+    self.withExif = false
+    self.page = 1
+    self.size = 1000
+  }
+
+  private static func encodeDate(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: date)
+  }
 }
 
 private struct SearchAssetsResponse: Decodable {
@@ -1492,6 +1646,7 @@ private struct SearchAssetsResponse: Decodable {
   struct SearchAssetsPage: Decodable {
     let items: [AssetDetailResponse]
     let total: Int?
+    let nextPage: String?
   }
 }
 

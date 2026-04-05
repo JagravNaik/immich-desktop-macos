@@ -530,8 +530,24 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { [] }
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
-  func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult {
+  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
     SearchResult(assets: [], totalCount: 0)
+  }
+
+  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    SearchResult(assets: [], totalCount: 0)
+  }
+
+  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    SearchResult(assets: [], totalCount: 0)
+  }
+
+  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    SearchResult(assets: [], totalCount: 0)
+  }
+
+  func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String] {
+    []
   }
 
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] { [] }

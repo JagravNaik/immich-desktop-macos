@@ -136,10 +136,15 @@ final class AppState: ObservableObject {
   @Published var searchText = ""
   @Published var photoGridScaleIndex = AppState.initialPhotoGridScaleIndex()
 
-  // Smart search
+  // Search
   @Published var searchResults: [PhotoItem] = []
   @Published var isSearching = false
   @Published var searchTotalCount = 0
+  @Published var searchError: String?
+  @Published var searchType: SearchType = .smart
+  @Published var searchFilters = SearchFilters()
+  @Published var searchNextPage: String?
+  @Published var recentSearches: [String] = []
   private var searchTask: Task<Void, Never>?
 
   // Album detail
@@ -345,6 +350,8 @@ final class AppState: ObservableObject {
         return mapSelectionItems
       case .memory:
         return activeMemoryItems
+      case .allPeople, .allMemories:
+        return []
       case .recentlyDeleted:
         return trashedItems
       case .allAlbums, .collections:
@@ -353,8 +360,7 @@ final class AppState: ObservableObject {
     }()
 
     guard !searchText.isEmpty else { return sectionFiltered }
-    // If we have server search results, show those instead of local filter
-    if !searchResults.isEmpty || isSearching {
+    if !searchResults.isEmpty || isSearching || searchError != nil {
       return searchResults
     }
     return sectionFiltered.filter {
@@ -464,11 +470,20 @@ final class AppState: ObservableObject {
       }
       return mapMarkers.isEmpty ? "No mapped items" : "\(mapMarkers.count) mapped items"
     }
+    if sidebarSelection == .allPeople {
+      return "\(people.filter { !$0.isHidden }.count) people"
+    }
+    if sidebarSelection == .allMemories {
+      return "\(memories.count) memories"
+    }
     return "\(filteredItems.count) items"
   }
 
   var emptyStateTitle: String {
-    switch sidebarSelection {
+    if !searchText.isEmpty && !isSearching {
+      return "No Results"
+    }
+    return switch sidebarSelection {
     case .library: isLoadingTimeline ? "Loading timeline" : "Library is empty"
     case .map: isLoadingMap ? "Loading map" : "No places yet"
     case .favorites: "No favorites yet"
@@ -483,6 +498,9 @@ final class AppState: ObservableObject {
   }
 
   var emptyStateMessage: String {
+    if !searchText.isEmpty && !isSearching {
+      return searchError ?? "No results found for \"\(searchText)\""
+    }
     switch sidebarSelection {
     case .library:
       if isLoadingTimeline { return "Fetching latest from your Immich library." }
@@ -533,6 +551,7 @@ final class AppState: ObservableObject {
 
   init(apiClient: any ImmichAPIClient = URLSessionImmichAPIClient()) {
     self.apiClient = apiClient
+    loadRecentSearches()
   }
 
   // MARK: - Auth Actions
@@ -740,6 +759,11 @@ final class AppState: ObservableObject {
     searchResults = []
     isSearching = false
     searchTotalCount = 0
+    searchError = nil
+    searchNextPage = nil
+    searchType = .smart
+    searchFilters = SearchFilters()
+    recentSearches = []
     selectedItemID = nil
     isMultiSelectMode = false
     selectedItemIDs = []
@@ -904,9 +928,9 @@ final class AppState: ObservableObject {
     lastLoadedMapMarkerIDs = []
   }
 
-  // MARK: - Smart Search
+  // MARK: - Search
 
-  func performSmartSearch(query: String) {
+  func performSearch(query: String) {
     searchTask?.cancel()
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -914,12 +938,13 @@ final class AppState: ObservableObject {
       searchResults = []
       isSearching = false
       searchTotalCount = 0
+      searchError = nil
+      searchNextPage = nil
       return
     }
 
     isSearching = true
     searchTask = Task {
-      // Debounce: wait 300ms so we don't fire on every keystroke
       do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
       guard !Task.isCancelled else { return }
       guard let connectedServer, let currentSession else {
@@ -927,21 +952,108 @@ final class AppState: ObservableObject {
         return
       }
 
+      let result: SearchResult
       do {
-        let result = try await apiClient.searchAssets(
-          server: connectedServer, session: currentSession, query: trimmed
-        )
+        switch searchType {
+        case .smart:
+          result = try await apiClient.searchAssets(
+            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
+          )
+        case .filename:
+          result = try await apiClient.searchMetadataText(
+            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
+          )
+        case .description:
+          result = try await apiClient.searchMetadataDescription(
+            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
+          )
+        case .ocr:
+          result = try await apiClient.searchMetadataOCR(
+            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
+          )
+        }
         guard !Task.isCancelled else { return }
         searchResults = result.assets.filter { !$0.isTrashed }.map {
           Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
         }
         searchTotalCount = result.totalCount
+        searchNextPage = result.nextPage
+        searchError = nil
+        saveRecentSearch(trimmed)
       } catch {
         guard !Task.isCancelled else { return }
-        immichLog("[Search] Smart search failed: \(error)")
+        immichLog("[Search] Search failed (\(searchType.rawValue)): \(error)")
+        searchResults = []
+        searchTotalCount = 0
+        searchNextPage = nil
+        searchError = "Search unavailable. Check your server connection."
       }
       isSearching = false
     }
+  }
+
+  func loadMoreSearchResults() async {
+    guard !searchNextPage!.isEmpty else { return }
+    guard let connectedServer, let currentSession else { return }
+    guard !isSearching else { return }
+
+    isSearching = true
+    defer { isSearching = false }
+
+    do {
+      let result: SearchResult
+      switch searchType {
+      case .smart:
+        result = try await apiClient.searchAssets(
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+        )
+      case .filename:
+        result = try await apiClient.searchMetadataText(
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+        )
+      case .description:
+        result = try await apiClient.searchMetadataDescription(
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+        )
+      case .ocr:
+        result = try await apiClient.searchMetadataOCR(
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+        )
+      }
+      let newItems = result.assets.filter { !$0.isTrashed }.map {
+        Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
+      }
+      searchResults.append(contentsOf: newItems)
+      searchNextPage = result.nextPage
+    } catch {
+      immichLog("[Search] Pagination failed: \(error)")
+    }
+  }
+
+  func resetSearchState() {
+    searchResults = []
+    isSearching = false
+    searchTotalCount = 0
+    searchError = nil
+    searchNextPage = nil
+  }
+
+  func saveRecentSearch(_ query: String) {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    var recent = recentSearches.filter { $0 != trimmed }
+    recent.insert(trimmed, at: 0)
+    recentSearches = Array(recent.prefix(10))
+    UserDefaults.standard.set(recentSearches, forKey: "immich.recentSearches")
+  }
+
+  func clearRecentSearches() {
+    recentSearches = []
+    UserDefaults.standard.removeObject(forKey: "immich.recentSearches")
+  }
+
+  func loadRecentSearches() {
+    recentSearches = UserDefaults.standard.stringArray(forKey: "immich.recentSearches") ?? []
   }
 
   // MARK: - Timeline Loading
