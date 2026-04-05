@@ -294,24 +294,21 @@ struct AlbumCard: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      ZStack {
-        RoundedRectangle(cornerRadius: 10)
-          .fill(.quaternary)
-          .aspectRatio(1, contentMode: .fit)
-
-        if let coverImage {
-          Image(nsImage: coverImage)
-            .resizable()
-            .scaledToFill()
-            .aspectRatio(1, contentMode: .fill)
-            .clipped()
-        } else {
-          Image(systemName: album.shared ? "rectangle.stack.person.crop" : "rectangle.stack")
-            .font(.title)
-            .foregroundStyle(.secondary)
+      RoundedRectangle(cornerRadius: 10)
+        .fill(.quaternary)
+        .aspectRatio(1, contentMode: .fit)
+        .overlay {
+          if let coverImage {
+            Image(nsImage: coverImage)
+              .resizable()
+              .scaledToFill()
+          } else {
+            Image(systemName: album.shared ? "rectangle.stack.person.crop" : "rectangle.stack")
+              .font(.title)
+              .foregroundStyle(.secondary)
+          }
         }
-      }
-      .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
 
       VStack(alignment: .leading, spacing: 2) {
         Text(album.albumName)

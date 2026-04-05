@@ -130,6 +130,7 @@ public protocol ImmichAPIClient: Sendable {
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
   func searchAssets(server: ImmichServer, session: UserSession, query: String) async throws -> SearchResult
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
+  func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String)
@@ -401,6 +402,15 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(personIds: [personId]))
+    let response: SearchAssetsResponse = try await perform(request)
+    return response.assets.items.compactMap { $0.toTimelineAsset() }
+  }
+
+  public func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: "Screenshot", type: "IMAGE", size: 1000))
     let response: SearchAssetsResponse = try await perform(request)
     return response.assets.items.compactMap { $0.toTimelineAsset() }
   }
@@ -1469,7 +1479,11 @@ private struct SmartSearchRequest: Encodable {
 }
 
 private struct MetadataSearchRequest: Encodable {
-  let personIds: [String]
+  var personIds: [String]?
+  var originalFileName: String?
+  var type: String?
+  var size: Int?
+  var page: Int?
 }
 
 private struct SearchAssetsResponse: Decodable {

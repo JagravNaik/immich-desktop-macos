@@ -535,6 +535,7 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   }
 
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] { [] }
+  func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { [] }
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker] { mapMarkersResponse }
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory] { [] }
 

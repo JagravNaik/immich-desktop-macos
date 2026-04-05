@@ -353,6 +353,15 @@ struct MainContentView: View {
         onOpenAsset: handleOpenAsset,
         onHeroFramesChanged: { heroItemFrames = $0 }
       )
+    case .screenshots:
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
+        .task { await appState.loadScreenshots() }
     default:
       LibraryGridView(
         appState: appState,

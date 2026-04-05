@@ -64,7 +64,9 @@ final class AppState: ObservableObject {
     let aspectRatio: CGFloat
 
     var isLivePhoto: Bool { livePhotoVideoID != nil }
-    var isPanorama: Bool { projectionType == "EQUIRECTANGULAR" }
+    var isPanorama: Bool {
+      projectionType == "EQUIRECTANGULAR" || (!isVideo && aspectRatio > 2.0)
+    }
     var dayOfMonth: Int { Calendar(identifier: .gregorian).component(.day, from: date) }
     var gridAspectRatio: CGFloat {
       if aspectRatio.isFinite, aspectRatio > 0 {
@@ -157,6 +159,10 @@ final class AppState: ObservableObject {
   // Trash
   @Published var trashedItems: [PhotoItem] = []
   @Published var isLoadingTrash = false
+
+  // Screenshots (server-side search)
+  @Published var screenshotItems: [PhotoItem] = []
+  @Published var isLoadingScreenshots = false
 
   // Viewer
   @Published var selectedItemID: String?
@@ -328,7 +334,7 @@ final class AppState: ObservableObject {
       case .panoramas:
         return libraryItems.filter(\.isPanorama)
       case .screenshots:
-        return libraryItems.filter { $0.title.localizedCaseInsensitiveContains("screenshot") }
+        return screenshotItems
       case .imports:
         return libraryItems.filter(\.isImported)
       case .album, .pinnedAlbum:
@@ -469,6 +475,7 @@ final class AppState: ObservableObject {
     case .videos: "No videos yet"
     case .livePhotos: "No Live Photos yet"
     case .panoramas: "No panoramas yet"
+    case .screenshots: "No screenshots yet"
     case .imports: "No imports yet"
     case .recentlyDeleted: "Trash is empty"
     default: "No items"
@@ -746,6 +753,8 @@ final class AppState: ObservableObject {
     isLoadingAlbum = false
     trashedItems = []
     isLoadingTrash = false
+    screenshotItems = []
+    isLoadingScreenshots = false
     uploadRows = []
     sidebarSelection = .library
     timelineBuckets = []
@@ -1124,6 +1133,28 @@ final class AppState: ObservableObject {
       rebuildLibrarySections()
     } catch {
       immichLog("[Person] Failed to load person \(personID): \(error)")
+    }
+  }
+
+  // MARK: - Screenshot Loading
+
+  func loadScreenshots() async {
+    guard let connectedServer, let currentSession else { return }
+    guard !isLoadingScreenshots else { return }
+
+    screenshotItems = []
+    isLoadingScreenshots = true
+    defer { isLoadingScreenshots = false }
+
+    do {
+      let assets = try await apiClient.fetchScreenshots(
+        server: connectedServer, session: currentSession
+      )
+      screenshotItems = assets.filter { !$0.isTrashed }.map {
+        Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
+      }
+    } catch {
+      immichLog("[Screenshots] Failed to load screenshots: \(error)")
     }
   }
 
