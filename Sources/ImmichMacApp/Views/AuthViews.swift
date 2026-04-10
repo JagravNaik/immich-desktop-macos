@@ -220,6 +220,7 @@ struct ServerSetupCard: View {
       TextField("https://demo.immich.app", text: $appState.serverURLText)
         .textFieldStyle(PremiumTextFieldStyle())
         .autocorrectionDisabled()
+        .submitLabel(.go)
 
       Button {
         Task { await appState.connect() }
@@ -236,6 +237,10 @@ struct ServerSetupCard: View {
       statusLabel
     }
     .glassCard()
+    .onSubmit {
+      guard !appState.isConnecting else { return }
+      Task { await appState.connect() }
+    }
   }
 
   @ViewBuilder
@@ -327,9 +332,11 @@ struct LoginCard: View {
       TextField("Email", text: $appState.emailText)
         .textFieldStyle(PremiumTextFieldStyle())
         .autocorrectionDisabled()
+        .submitLabel(.next)
 
       SecureField("Password", text: $appState.passwordText)
         .textFieldStyle(PremiumTextFieldStyle())
+        .submitLabel(.go)
 
       Button {
         Task { await appState.signIn() }
@@ -361,6 +368,10 @@ struct LoginCard: View {
         .disabled(appState.isSigningIn)
       }
     }
+    .onSubmit {
+      guard !appState.isSigningIn else { return }
+      Task { await appState.signIn() }
+    }
   }
 
   private var apiKeyFields: some View {
@@ -371,6 +382,7 @@ struct LoginCard: View {
 
       SecureField("API Key", text: $appState.apiKeyText)
         .textFieldStyle(PremiumTextFieldStyle())
+        .submitLabel(.go)
 
       Button {
         Task { await appState.signInWithAPIKey() }
@@ -383,6 +395,10 @@ struct LoginCard: View {
       }
       .buttonStyle(PremiumButtonStyle())
       .disabled(appState.isSigningIn)
+    }
+    .onSubmit {
+      guard !appState.isSigningIn else { return }
+      Task { await appState.signInWithAPIKey() }
     }
   }
 

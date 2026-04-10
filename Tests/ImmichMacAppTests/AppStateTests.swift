@@ -10,6 +10,7 @@ final class AppStateTests: XCTestCase {
     "immich.email",
     "immich.authMethod",
     "immich.photoGridScaleIndex",
+    "immich.dismissedReleaseVersionsByServer",
   ]
   private static let keychainAccounts = [
     "immich.password",
@@ -259,6 +260,19 @@ final class AppStateTests: XCTestCase {
   }
 
   @MainActor
+  func testRefreshVersionAnnouncementShowsForMajorOrMinorUpdate() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setVersionCheckState(VersionCheckState(checkedAt: nil, releaseVersion: "v1.133.0"))
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.refreshVersionAnnouncement()
+
+    XCTAssertTrue(appState.showVersionAnnouncement)
+    XCTAssertEqual(appState.availableReleaseServerVersion, "1.132.0")
+    XCTAssertEqual(appState.availableReleaseVersion, "v1.133.0")
+  }
+
+  @MainActor
   func testSelectionAndArrowNavigationFollowFilteredItems() {
     let appState = AppState(apiClient: MockImmichAPIClient())
     appState.libraryItems = [
@@ -418,6 +432,7 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   private var assetDetailsByID: [String: AssetDetail] = [:]
   private var favoriteUpdates: [FavoriteUpdate] = []
   private var favoriteError: Error?
+  private var versionCheckState = VersionCheckState(checkedAt: nil, releaseVersion: nil)
 
   func setMapMarkersResult(_ markers: [MapMarker]) {
     mapMarkersResponse = markers
@@ -431,12 +446,20 @@ private actor MockImmichAPIClient: ImmichAPIClient {
     favoriteError = error
   }
 
+  func setVersionCheckState(_ state: VersionCheckState) {
+    versionCheckState = state
+  }
+
   func recordedFavoriteUpdates() -> [FavoriteUpdate] {
     favoriteUpdates
   }
 
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo {
     ServerInfo(version: "1.132.0")
+  }
+
+  func fetchVersionCheckState(server: ImmichServer, session: UserSession) async throws -> VersionCheckState {
+    versionCheckState
   }
 
   func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration {

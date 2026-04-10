@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import ImmichMedia
+import ImmichAPI
 
 #if canImport(AppKit)
 import AppKit
@@ -9,6 +10,83 @@ import ImageIO
 
 @MainActor
 final class ThumbnailStore: ObservableObject {
+  enum LoadClass: Sendable {
+    case background
+    case interactive
+  }
+
+  private enum CachePolicy {
+    static let countLimit = 1200
+    static let totalCostLimit = 192 * 1024 * 1024 // 192 MB
+    static let maxThumbnailCacheCost = 4 * 1024 * 1024 // 4 MB
+    static let maxPreviewCacheCost = 16 * 1024 * 1024 // 16 MB
+    static let telemetryLogInterval: Duration = .seconds(30)
+    static let telemetryRequestLogStride = 500
+  }
+
+  private struct CacheTelemetry {
+    var requests = 0
+    var cacheHits = 0
+    var cacheMisses = 0
+    var inFlightJoins = 0
+    var inFlightStarts = 0
+    var successfulLoads = 0
+    var failedLoads = 0
+    var insertions = 0
+    var evictions = 0
+    var skippedOriginalCache = 0
+    var skippedLargeCache = 0
+    var peakEstimatedCachedBytes = 0
+  }
+
+  private actor LoadLimiter {
+    private let maxConcurrent: Int
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(maxConcurrent: Int) {
+      self.maxConcurrent = max(1, maxConcurrent)
+    }
+
+    func withPermit<T: Sendable>(_ operation: @escaping @Sendable () async -> T) async -> T {
+      await acquire()
+      defer { release() }
+      return await operation()
+    }
+
+    private func acquire() async {
+      if active < maxConcurrent {
+        active += 1
+        return
+      }
+
+      await withCheckedContinuation { continuation in
+        waiters.append(continuation)
+      }
+    }
+
+    private func release() {
+      if !waiters.isEmpty {
+        let continuation = waiters.removeFirst()
+        continuation.resume()
+        return
+      }
+
+      active = max(active - 1, 0)
+    }
+  }
+
+  private final class CacheDelegateProxy: NSObject, NSCacheDelegate {
+    weak var owner: ThumbnailStore?
+
+    func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
+      guard let image = obj as? NSImage else { return }
+      Task { @MainActor [weak owner] in
+        owner?.handleCacheEviction(image)
+      }
+    }
+  }
+
   private final class InFlightRegistry: @unchecked Sendable {
     private struct InFlightLoad {
       let task: Task<NSImage?, Never>
@@ -64,15 +142,39 @@ final class ThumbnailStore: ObservableObject {
 
   private let cache: NSCache<NSString, NSImage> = {
     let c = NSCache<NSString, NSImage>()
-    c.countLimit = 2000
-    c.totalCostLimit = 512 * 1024 * 1024 // 512 MB
+    c.countLimit = CachePolicy.countLimit
+    c.totalCostLimit = CachePolicy.totalCostLimit
     return c
   }()
+  private let cacheDelegateProxy = CacheDelegateProxy()
   private let localThumbnailLoader = ThumbnailLoader()
   private let inFlightRegistry = InFlightRegistry()
+  private let backgroundLoadLimiter = LoadLimiter(maxConcurrent: 4)
+  private let interactiveLoadLimiter = LoadLimiter(maxConcurrent: 2)
+  private var telemetry = CacheTelemetry()
+  private var estimatedCachedBytes = 0
+  private var cachedCostByImageID: [ObjectIdentifier: Int] = [:]
+  private var telemetryLogTask: Task<Void, Never>?
+  private static let bytesFormatter: ByteCountFormatter = {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useKB, .useMB, .useGB]
+    formatter.countStyle = .memory
+    formatter.includesUnit = true
+    return formatter
+  }()
 
   private struct DecodedImageResult: @unchecked Sendable {
     let cgImage: CGImage?
+  }
+
+  init() {
+    cacheDelegateProxy.owner = self
+    cache.delegate = cacheDelegateProxy
+    startTelemetryLogging()
+  }
+
+  deinit {
+    telemetryLogTask?.cancel()
   }
 
   /// Synchronous cache-only lookup — returns nil if not cached, never triggers a network fetch.
@@ -88,36 +190,48 @@ final class ThumbnailStore: ObservableObject {
   func loadImage(
     for item: AppState.PhotoItem,
     context: AppState.ThumbnailContext?,
-    size: ThumbnailSize = .thumbnail
+    size: ThumbnailSize = .thumbnail,
+    loadClass: LoadClass = .background
   ) async -> NSImage? {
     guard !Task.isCancelled else { return nil }
 
     let cacheKey = cacheKey(for: item, context: context, size: size)
     if let cached = cache.object(forKey: cacheKey as NSString) {
+      recordCacheHit()
       return cached
     }
+    recordCacheMiss()
 
     let waiterID = UUID()
-    let task = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID) ?? {
-      let task = Task<NSImage?, Never> { [item, context, size, localThumbnailLoader] in
-        guard !Task.isCancelled else { return nil }
+    let existingTask = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID)
+    if existingTask != nil {
+      telemetry.inFlightJoins += 1
+    }
+    let task = existingTask ?? {
+      telemetry.inFlightStarts += 1
+      let limiter = loadClass == .interactive ? interactiveLoadLimiter : backgroundLoadLimiter
+      let taskPriority: TaskPriority = loadClass == .interactive ? .userInitiated : .utility
+      let task = Task<NSImage?, Never>(priority: taskPriority) { [item, context, size, localThumbnailLoader, limiter] in
+        await limiter.withPermit {
+          guard !Task.isCancelled else { return nil }
 
-        switch item.source {
-        case .localFile(let fileURL):
-          if size == .original {
-            return await Self.loadFullResolutionImage(from: fileURL)
+          switch item.source {
+          case .localFile(let fileURL):
+            if size == .original {
+              return await Self.loadFullResolutionImage(from: fileURL)
+            }
+            return await localThumbnailLoader.loadThumbnail(
+              for: fileURL,
+              maxPixelSize: size.maxPixelSize
+            )
+          case .remoteAsset(let assetID):
+            guard let context else { return nil }
+            return await Self.loadRemoteImage(
+              assetID: assetID,
+              context: context,
+              size: size
+            )
           }
-          return await localThumbnailLoader.loadThumbnail(
-            for: fileURL,
-            maxPixelSize: size.maxPixelSize
-          )
-        case .remoteAsset(let assetID):
-          guard let context else { return nil }
-          return await Self.loadRemoteImage(
-            assetID: assetID,
-            context: context,
-            size: size
-          )
         }
       }
 
@@ -136,8 +250,10 @@ final class ThumbnailStore: ObservableObject {
         inFlightRegistry.clear(cacheKey: cacheKey)
 
         if let image {
-          let cost = cacheCost(for: image)
-          cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
+          telemetry.successfulLoads += 1
+          cacheImageIfNeeded(image, key: cacheKey, size: size)
+        } else {
+          telemetry.failedLoads += 1
         }
 
         return image
@@ -156,13 +272,22 @@ final class ThumbnailStore: ObservableObject {
 
     let cacheKey = "person::\(context.baseURL.absoluteString)::\(personID)"
     if let cached = cache.object(forKey: cacheKey as NSString) {
+      recordCacheHit()
       return cached
     }
+    recordCacheMiss()
 
     let waiterID = UUID()
-    let task = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID) ?? {
-      let task = Task<NSImage?, Never> { [context] in
-        await Self.loadPersonRemoteImage(personID: personID, context: context)
+    let existingTask = inFlightRegistry.existingTask(cacheKey: cacheKey, waiterID: waiterID)
+    if existingTask != nil {
+      telemetry.inFlightJoins += 1
+    }
+    let task = existingTask ?? {
+      telemetry.inFlightStarts += 1
+      let task = Task<NSImage?, Never>(priority: .utility) { [context, backgroundLoadLimiter] in
+        await backgroundLoadLimiter.withPermit {
+          await Self.loadPersonRemoteImage(personID: personID, context: context)
+        }
       }
 
       inFlightRegistry.insert(task: task, cacheKey: cacheKey, waiterID: waiterID)
@@ -180,8 +305,11 @@ final class ThumbnailStore: ObservableObject {
         inFlightRegistry.clear(cacheKey: cacheKey)
 
         if let image {
-          let cost = cacheCost(for: image)
-          cache.setObject(image, forKey: cacheKey as NSString, cost: cost)
+          telemetry.successfulLoads += 1
+          // Person thumbnails are always thumbnail-sized in practice.
+          cacheImageIfNeeded(image, key: cacheKey, size: .thumbnail)
+        } else {
+          telemetry.failedLoads += 1
         }
 
         return image
@@ -215,6 +343,103 @@ final class ThumbnailStore: ObservableObject {
     }
 
     return max(Int(image.size.width * image.size.height * 4), 1)
+  }
+
+  private func cacheImageIfNeeded(_ image: NSImage, key: String, size: ThumbnailSize) {
+    // Keep full-resolution image memory ephemeral: it is shown in the detail view
+    // but should not remain in long-lived cache.
+    guard size != .original else {
+      telemetry.skippedOriginalCache += 1
+      return
+    }
+
+    let cost = cacheCost(for: image)
+    switch size {
+    case .thumbnail:
+      guard cost <= CachePolicy.maxThumbnailCacheCost else {
+        telemetry.skippedLargeCache += 1
+        return
+      }
+    case .preview:
+      guard cost <= CachePolicy.maxPreviewCacheCost else {
+        telemetry.skippedLargeCache += 1
+        return
+      }
+    case .original:
+      return
+    }
+
+    if let existing = cache.object(forKey: key as NSString) {
+      unregisterCachedImage(existing)
+    }
+    cache.setObject(image, forKey: key as NSString, cost: cost)
+    registerCachedImage(image, cost: cost)
+    telemetry.insertions += 1
+  }
+
+  private func recordCacheHit() {
+    telemetry.requests += 1
+    telemetry.cacheHits += 1
+    maybeLogTelemetryForRequestStride()
+  }
+
+  private func recordCacheMiss() {
+    telemetry.requests += 1
+    telemetry.cacheMisses += 1
+    maybeLogTelemetryForRequestStride()
+  }
+
+  private func maybeLogTelemetryForRequestStride() {
+    guard telemetry.requests > 0 else { return }
+    guard telemetry.requests % CachePolicy.telemetryRequestLogStride == 0 else { return }
+    logTelemetry(reason: "request_stride")
+  }
+
+  private func registerCachedImage(_ image: NSImage, cost: Int) {
+    let id = ObjectIdentifier(image)
+    if let previousCost = cachedCostByImageID[id] {
+      estimatedCachedBytes = max(estimatedCachedBytes - previousCost, 0)
+    }
+    cachedCostByImageID[id] = cost
+    estimatedCachedBytes += cost
+    telemetry.peakEstimatedCachedBytes = max(telemetry.peakEstimatedCachedBytes, estimatedCachedBytes)
+  }
+
+  private func unregisterCachedImage(_ image: NSImage) {
+    let id = ObjectIdentifier(image)
+    guard let cost = cachedCostByImageID.removeValue(forKey: id) else { return }
+    estimatedCachedBytes = max(estimatedCachedBytes - cost, 0)
+  }
+
+  private func handleCacheEviction(_ image: NSImage) {
+    telemetry.evictions += 1
+    unregisterCachedImage(image)
+  }
+
+  private func startTelemetryLogging() {
+    telemetryLogTask = Task { [weak self] in
+      while let self, !Task.isCancelled {
+        do {
+          try await Task.sleep(for: CachePolicy.telemetryLogInterval)
+        } catch {
+          break
+        }
+        guard !Task.isCancelled else { break }
+        self.logTelemetry(reason: "periodic")
+      }
+    }
+  }
+
+  func logTelemetry(reason: String = "manual") {
+    let hitRate = telemetry.requests > 0
+      ? (Double(telemetry.cacheHits) / Double(telemetry.requests)) * 100
+      : 0
+    let cachedBytesText = Self.bytesFormatter.string(fromByteCount: Int64(estimatedCachedBytes))
+    let peakBytesText = Self.bytesFormatter.string(fromByteCount: Int64(telemetry.peakEstimatedCachedBytes))
+
+    immichLog(
+      "[ThumbnailCache] reason=\(reason) requests=\(telemetry.requests) hitRate=\(String(format: "%.1f", hitRate))% hits=\(telemetry.cacheHits) misses=\(telemetry.cacheMisses) inFlight(join/start)=\(telemetry.inFlightJoins)/\(telemetry.inFlightStarts) loads(ok/fail)=\(telemetry.successfulLoads)/\(telemetry.failedLoads) entries~=\(cachedCostByImageID.count) cached~=\(cachedBytesText) peak~=\(peakBytesText) insertions=\(telemetry.insertions) evictions=\(telemetry.evictions) skipped(original/large)=\(telemetry.skippedOriginalCache)/\(telemetry.skippedLargeCache)"
+    )
   }
 
   private static func loadRemoteImage(
@@ -273,7 +498,7 @@ final class ThumbnailStore: ObservableObject {
   }
 
   private static func loadFullResolutionImage(from fileURL: URL) async -> NSImage? {
-    let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
+    let result = await Task.detached(priority: .utility) { () -> DecodedImageResult in
       guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
         return DecodedImageResult(cgImage: nil)
       }
@@ -288,7 +513,7 @@ final class ThumbnailStore: ObservableObject {
   }
 
   private static func decodeImage(from data: Data, size: ThumbnailSize) async -> NSImage? {
-    let result = await Task.detached(priority: .userInitiated) { () -> DecodedImageResult in
+    let result = await Task.detached(priority: .utility) { () -> DecodedImageResult in
       guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
         return DecodedImageResult(cgImage: nil)
       }
@@ -367,9 +592,9 @@ final class ThumbnailStore: ObservableObject {
     var maxPixelSize: ThumbnailPixelSize {
       switch self {
       case .thumbnail:
-        return 512
+        return 320
       case .preview:
-        return 2048
+        return 1536
       case .original:
         return 4096
       }

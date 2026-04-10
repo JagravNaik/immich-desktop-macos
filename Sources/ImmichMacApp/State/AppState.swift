@@ -8,11 +8,49 @@ import ImmichAPI
 import ImmichCore
 import ImmichSync
 
+private func oauthCallbackResult(callbackURL: URL?, error: Error?) -> Result<URL, Error> {
+  if let error {
+    return .failure(error)
+  }
+  if let callbackURL {
+    return .success(callbackURL)
+  }
+  return .failure(ImmichAPIError.invalidResponse(url: "oauth"))
+}
+
 // MARK: - OAuth Presentation Context Provider
 
-private final class OAuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
-  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-    NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+private final class OAuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding, @unchecked Sendable {
+  private let anchor: ASPresentationAnchor
+
+  init(anchor: ASPresentationAnchor) {
+    self.anchor = anchor
+  }
+
+  nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    anchor
+  }
+}
+
+private final class OAuthSessionCoordinator: @unchecked Sendable {
+  private let presentationContextProvider: OAuthPresentationContext
+  private var activeSession: ASWebAuthenticationSession?
+
+  init(presentationContextProvider: OAuthPresentationContext) {
+    self.presentationContextProvider = presentationContextProvider
+  }
+
+  func authenticate(url: URL, callbackScheme: String) async throws -> URL {
+    try await withCheckedThrowingContinuation { continuation in
+      let authSession = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackScheme) { [weak self] callbackURL, error in
+        self?.activeSession = nil
+        continuation.resume(with: oauthCallbackResult(callbackURL: callbackURL, error: error))
+      }
+      authSession.presentationContextProvider = presentationContextProvider
+      authSession.prefersEphemeralWebBrowserSession = false
+      activeSession = authSession
+      authSession.start()
+    }
   }
 }
 
@@ -120,11 +158,13 @@ final class AppState: ObservableObject {
   @Published var oauthEnabled = false
   @Published var oauthButtonText = "OAuth"
   @Published var passwordLoginEnabled = true
-  private var activeOAuthSession: ASWebAuthenticationSession?
-  private let oauthContextProvider = OAuthPresentationContext()
   @Published var connectedServerVersion: String?
   @Published var connectedServerDisplayURL: String?
+  @Published var availableReleaseVersion: String?
+  @Published var availableReleaseServerVersion: String?
+  @Published var showVersionAnnouncement = false
   @Published var currentSession: UserSession?
+  @Published var isOAuthSession = false
 
   // Navigation
   @Published var sidebarSelection: SidebarDestination? = .library
@@ -285,6 +325,7 @@ final class AppState: ObservableObject {
 
   private static let timelinePageSize = 6
   private static let photoGridScaleKey = "immich.photoGridScaleIndex"
+  private static let dismissedReleaseVersionsKey = "immich.dismissedReleaseVersionsByServer"
   private static let photoGridThumbnailWidths: [CGFloat] = [110, 130, 150, 170, 190, 220, 250]
   private static let defaultPhotoGridScaleIndex = 3
   private static let timelineBucketFormatter: ISO8601DateFormatter = {
@@ -302,6 +343,36 @@ final class AppState: ObservableObject {
     formatter.dateFormat = "yyyy"
     return formatter
   }()
+
+  private struct SemanticVersion: Comparable {
+    let major: Int
+    let minor: Int
+    let patch: Int
+
+    static func parse(_ rawValue: String) -> SemanticVersion? {
+      let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return nil }
+
+      let withoutPrefix = trimmed.hasPrefix("v") ? String(trimmed.dropFirst()) : trimmed
+      let core = withoutPrefix.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? withoutPrefix
+      let parts = core.split(separator: ".").map(String.init)
+
+      guard parts.count >= 2,
+            let major = Int(parts[0]),
+            let minor = Int(parts[1]) else {
+        return nil
+      }
+
+      let patch = parts.count >= 3 ? (Int(parts[2]) ?? 0) : 0
+      return SemanticVersion(major: major, minor: minor, patch: patch)
+    }
+
+    static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+      if lhs.major != rhs.major { return lhs.major < rhs.major }
+      if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
+      return lhs.patch < rhs.patch
+    }
+  }
 
   // MARK: - Computed Properties
 
@@ -599,6 +670,7 @@ final class AppState: ObservableObject {
       let session = try await apiClient.login(server: connectedServer, email: trimmedEmail, password: passwordText)
       emailText = trimmedEmail
       authMethod = .password
+      isOAuthSession = false
       UserDefaults.standard.set(AuthMethod.password.rawValue, forKey: "immich.authMethod")
       UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
       do {
@@ -631,6 +703,7 @@ final class AppState: ObservableObject {
     do {
       let session = try await apiClient.loginWithAPIKey(server: connectedServer, apiKey: trimmedKey)
       authMethod = .apiKey
+      isOAuthSession = false
       UserDefaults.standard.set(AuthMethod.apiKey.rawValue, forKey: "immich.authMethod")
       do {
         try KeychainHelper.save(account: "immich.apiKey", password: trimmedKey)
@@ -680,8 +753,12 @@ final class AppState: ObservableObject {
 
     Task {
       do {
-        let redirectUri = "immich://oauth-callback"
+        let callbackScheme = "app.immich"
+        let redirectUri = "\(callbackScheme):///oauth-callback"
         let oauthURL = try await apiClient.startOAuth(server: connectedServer, redirectUri: redirectUri)
+        let presentationAnchor = NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+        let oauthContextProvider = OAuthPresentationContext(anchor: presentationAnchor)
+        let oauthSessionCoordinator = OAuthSessionCoordinator(presentationContextProvider: oauthContextProvider)
 
         guard let url = URL(string: oauthURL) else {
           statusText = "Invalid OAuth URL from server"
@@ -689,24 +766,10 @@ final class AppState: ObservableObject {
           return
         }
 
-        let callbackURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-          let authSession = ASWebAuthenticationSession(url: url, callbackURLScheme: "immich") { [weak self] callbackURL, error in
-            self?.activeOAuthSession = nil
-            if let error {
-              continuation.resume(throwing: error)
-            } else if let callbackURL {
-              continuation.resume(returning: callbackURL)
-            } else {
-              continuation.resume(throwing: ImmichAPIError.invalidResponse(url: "oauth"))
-            }
-          }
-          authSession.presentationContextProvider = self.oauthContextProvider
-          authSession.prefersEphemeralWebBrowserSession = false
-          self.activeOAuthSession = authSession
-          authSession.start()
-        }
+        let callbackURL = try await oauthSessionCoordinator.authenticate(url: url, callbackScheme: callbackScheme)
 
         let session = try await apiClient.finishOAuth(server: connectedServer, oauthCallbackUrl: callbackURL.absoluteString)
+        isOAuthSession = true
         currentSession = session
         emailText = session.userEmail
         UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
@@ -728,6 +791,10 @@ final class AppState: ObservableObject {
   func signOut() {
     webSocketService.disconnect()
     currentSession = nil
+    isOAuthSession = false
+    showVersionAnnouncement = false
+    availableReleaseVersion = nil
+    availableReleaseServerVersion = nil
     passwordText = ""
     apiKeyText = ""
     resetLibraryState()
@@ -739,6 +806,9 @@ final class AppState: ObservableObject {
     webSocketService.disconnect()
     isWebSocketConnected = false
     uploadNotification = nil
+    showVersionAnnouncement = false
+    availableReleaseVersion = nil
+    availableReleaseServerVersion = nil
     connectedServer = nil
     connectedServerDisplayURL = nil
     connectedServerVersion = nil
@@ -749,6 +819,7 @@ final class AppState: ObservableObject {
     passwordText = ""
     apiKeyText = ""
     currentSession = nil
+    isOAuthSession = false
     resetLibraryState()
     appPhase = .serverSetup
     statusText = "Enter your Immich server URL to continue."
@@ -813,6 +884,9 @@ final class AppState: ObservableObject {
     hoveredItemID = nil
     librarySections = []
     panoramasCount = 0
+    showVersionAnnouncement = false
+    availableReleaseVersion = nil
+    availableReleaseServerVersion = nil
   }
 
   // MARK: - Data Loading
@@ -824,7 +898,65 @@ final class AppState: ObservableObject {
     }
     async let timelineTask: () = loadRemoteTimeline(reset: true)
     async let collectionsTask: () = loadCollections()
-    _ = await (timelineTask, collectionsTask)
+    async let versionAnnouncementTask: () = refreshVersionAnnouncement()
+    _ = await (timelineTask, collectionsTask, versionAnnouncementTask)
+  }
+
+  func dismissVersionAnnouncement() {
+    if let connectedServer, let releaseVersion = availableReleaseVersion {
+      setDismissedReleaseVersion(releaseVersion, for: connectedServer)
+    }
+    showVersionAnnouncement = false
+    availableReleaseVersion = nil
+    availableReleaseServerVersion = nil
+  }
+
+  func refreshVersionAnnouncement() async {
+    guard hasAdminAccess, let connectedServer, let currentSession else { return }
+
+    do {
+      let versionCheck = try await apiClient.fetchVersionCheckState(server: connectedServer, session: currentSession)
+      guard let releaseVersion = versionCheck.releaseVersion else { return }
+      let serverVersion = connectedServerVersion ?? releaseVersion
+      evaluateVersionAnnouncement(
+        releaseVersion: releaseVersion,
+        serverVersion: serverVersion,
+        server: connectedServer
+      )
+    } catch {
+      immichLog("[VersionAnnouncement] Version check failed: \(error.localizedDescription)")
+    }
+  }
+
+  private func evaluateVersionAnnouncement(
+    releaseVersion: String,
+    serverVersion: String,
+    server: ImmichServer
+  ) {
+    guard let releaseSemver = SemanticVersion.parse(releaseVersion),
+          let serverSemver = SemanticVersion.parse(serverVersion) else {
+      return
+    }
+
+    guard releaseSemver > serverSemver else { return }
+    guard releaseSemver.major != serverSemver.major || releaseSemver.minor != serverSemver.minor else { return }
+    guard dismissedReleaseVersion(for: server) != releaseVersion else { return }
+
+    availableReleaseVersion = releaseVersion
+    availableReleaseServerVersion = serverVersion
+    showVersionAnnouncement = true
+    immichLog("[VersionAnnouncement] New release available: \(releaseVersion) (server: \(serverVersion))")
+  }
+
+  private func dismissedReleaseVersion(for server: ImmichServer) -> String? {
+    let releasesByServer = UserDefaults.standard.dictionary(forKey: Self.dismissedReleaseVersionsKey) as? [String: String] ?? [:]
+    return releasesByServer[server.baseURL.absoluteString]
+  }
+
+  private func setDismissedReleaseVersion(_ releaseVersion: String, for server: ImmichServer) {
+    var releasesByServer = UserDefaults.standard.dictionary(forKey: Self.dismissedReleaseVersionsKey) as? [String: String] ?? [:]
+    releasesByServer[server.baseURL.absoluteString] = releaseVersion
+    UserDefaults.standard.set(releasesByServer, forKey: Self.dismissedReleaseVersionsKey)
   }
 
   func loadCollections() async {
@@ -889,13 +1021,14 @@ final class AppState: ObservableObject {
     lastLoadedMapMarkerIDs = Set(markers.map(\.id))
     defer { isLoadingMapSelection = false }
 
-    let loadedItems = await Self.loadMapSelectionItems(
+    let loadedSelectionItems = await Self.loadMapSelectionItems(
       markers: markers,
       server: connectedServer,
       session: currentSession,
       apiClient: apiClient
     )
-      .map { Self.makePhotoItem(from: $0.detail, marker: $0.marker) }
+    let loadedItems = loadedSelectionItems
+      .map(Self.makePhotoItem(from:))
       .sorted { lhs, rhs in
         if lhs.date != rhs.date {
           return lhs.date > rhs.date
@@ -915,8 +1048,8 @@ final class AppState: ObservableObject {
       return "Unable to load items for this place."
     }
 
-    if loadedItems.count < markers.count {
-      return "Some items couldn't be loaded for this place."
+    if loadedSelectionItems.contains(where: { !$0.hasFullDetail }) {
+      return "Some item details couldn't be loaded, but all assets are shown."
     }
 
     return nil
@@ -1927,6 +2060,24 @@ final class AppState: ObservableObject {
     self.selectedItemID = filteredItems[idx - 1].id
   }
 
+  var nextItem: PhotoItem? {
+    guard !filteredItems.isEmpty else { return nil }
+    guard let selectedItemID,
+          let idx = filteredItems.firstIndex(where: { $0.id == selectedItemID }),
+          idx < filteredItems.count - 1 else {
+      return filteredItems.first
+    }
+    return filteredItems[idx + 1]
+  }
+
+  var previousItem: PhotoItem? {
+    guard !filteredItems.isEmpty else { return nil }
+    guard let selectedItemID,
+          let idx = filteredItems.firstIndex(where: { $0.id == selectedItemID }),
+          idx > 0 else { return nil }
+    return filteredItems[idx - 1]
+  }
+
   // MARK: - Pressure / Force Touch
 
   func handlePressureChange(stage: Int, pressure: Double) {
@@ -2124,8 +2275,12 @@ final class AppState: ObservableObject {
   }
 
   private struct LoadedMapSelectionItem: Sendable {
-    let detail: AssetDetail
+    let detail: AssetDetail?
     let marker: MapMarker
+
+    var hasFullDetail: Bool {
+      detail != nil
+    }
   }
 
   private nonisolated static func loadMapSelectionItems(
@@ -2137,19 +2292,20 @@ final class AppState: ObservableObject {
     let concurrencyLimit = min(8, markers.count)
     guard concurrencyLimit > 0 else { return [] }
 
-    return await withTaskGroup(of: LoadedMapSelectionItem?.self, returning: [LoadedMapSelectionItem].self) { group in
+    return await withTaskGroup(of: LoadedMapSelectionItem.self, returning: [LoadedMapSelectionItem].self) { group in
       var markerIterator = markers.makeIterator()
       var loaded: [LoadedMapSelectionItem] = []
 
       func addNextTask() {
         guard let marker = markerIterator.next() else { return }
         group.addTask {
-          do {
-            let detail = try await apiClient.fetchAssetDetail(server: server, session: session, assetId: marker.id)
-            return LoadedMapSelectionItem(detail: detail, marker: marker)
-          } catch {
-            return nil
-          }
+          let detail = await loadMapSelectionDetail(
+            marker: marker,
+            server: server,
+            session: session,
+            apiClient: apiClient
+          )
+          return LoadedMapSelectionItem(detail: detail, marker: marker)
         }
       }
 
@@ -2158,9 +2314,7 @@ final class AppState: ObservableObject {
       }
 
       while let result = await group.next() {
-        if let result {
-          loaded.append(result)
-        }
+        loaded.append(result)
         addNextTask()
       }
 
@@ -2168,31 +2322,83 @@ final class AppState: ObservableObject {
     }
   }
 
-  private static func makePhotoItem(from detail: AssetDetail, marker: MapMarker) -> PhotoItem {
-    let lowercasedType = detail.type.lowercased()
-    let isVideo = lowercasedType.contains("video")
-    let width = max(CGFloat(detail.width ?? 1), 1)
-    let height = max(CGFloat(detail.height ?? 1), 1)
-    let fallbackDate = detail.localDateTime ?? detail.fileCreatedAt ?? .now
+  private nonisolated static func loadMapSelectionDetail(
+    marker: MapMarker,
+    server: ImmichServer,
+    session: UserSession,
+    apiClient: any ImmichAPIClient
+  ) async -> AssetDetail? {
+    let maxAttempts = 3
+    for attempt in 0..<maxAttempts {
+      do {
+        return try await apiClient.fetchAssetDetail(server: server, session: session, assetId: marker.id)
+      } catch {
+        if attempt == maxAttempts - 1 {
+          return nil
+        }
+        let delayNanoseconds = UInt64(150_000_000 * (attempt + 1))
+        try? await Task.sleep(nanoseconds: delayNanoseconds)
+      }
+    }
+    return nil
+  }
+
+  private static func makePhotoItem(from loadedItem: LoadedMapSelectionItem) -> PhotoItem {
+    if let detail = loadedItem.detail {
+      let lowercasedType = detail.type.lowercased()
+      let isVideo = lowercasedType.contains("video")
+      let width = max(CGFloat(detail.width ?? 1), 1)
+      let height = max(CGFloat(detail.height ?? 1), 1)
+      let fallbackDate = detail.localDateTime ?? detail.fileCreatedAt ?? .distantPast
+
+      return PhotoItem(
+        id: detail.id,
+        source: .remoteAsset(id: detail.id),
+        title: detail.originalFileName,
+        date: fallbackDate,
+        isFavorite: detail.isFavorite,
+        isVideo: isVideo,
+        isImported: false,
+        livePhotoVideoID: detail.livePhotoVideoId,
+        latitude: detail.exif?.latitude ?? loadedItem.marker.latitude,
+        longitude: detail.exif?.longitude ?? loadedItem.marker.longitude,
+        durationText: isVideo ? detail.duration : nil,
+        city: detail.exif?.city ?? loadedItem.marker.city,
+        country: detail.exif?.country ?? loadedItem.marker.country,
+        stackCount: nil,
+        timeBucketKey: timelineBucketKey(for: fallbackDate),
+        projectionType: nil,
+        aspectRatio: width / height
+      )
+    }
+
+    let marker = loadedItem.marker
+    let titleParts = [marker.city, marker.country]
+      .compactMap { value -> String? in
+        guard let value, !value.isEmpty else { return nil }
+        return value
+      }
+    let title = titleParts.isEmpty ? "Pinned Photo" : titleParts.joined(separator: ", ")
+    let fallbackDate = Date.distantPast
 
     return PhotoItem(
-      id: detail.id,
-      source: .remoteAsset(id: detail.id),
-      title: detail.originalFileName,
+      id: marker.id,
+      source: .remoteAsset(id: marker.id),
+      title: title,
       date: fallbackDate,
-      isFavorite: detail.isFavorite,
-      isVideo: isVideo,
+      isFavorite: false,
+      isVideo: false,
       isImported: false,
-      livePhotoVideoID: detail.livePhotoVideoId,
-      latitude: detail.exif?.latitude ?? marker.latitude,
-      longitude: detail.exif?.longitude ?? marker.longitude,
-      durationText: isVideo ? detail.duration : nil,
-      city: detail.exif?.city ?? marker.city,
-      country: detail.exif?.country ?? marker.country,
+      livePhotoVideoID: nil,
+      latitude: marker.latitude,
+      longitude: marker.longitude,
+      durationText: nil,
+      city: marker.city,
+      country: marker.country,
       stackCount: nil,
       timeBucketKey: timelineBucketKey(for: fallbackDate),
       projectionType: nil,
-      aspectRatio: width / height
+      aspectRatio: 1
     )
   }
 
@@ -2290,6 +2496,9 @@ extension AppState: ImmichWebSocketDelegate {
   func webSocketDidConnect() {
     isWebSocketConnected = true
     immichLog("[WebSocket] Connected — live sync active")
+    Task {
+      await refreshVersionAnnouncement()
+    }
   }
 
   func webSocketDidDisconnect() {
@@ -2338,6 +2547,16 @@ extension AppState: ImmichWebSocketDelegate {
     Task {
       await loadRemoteTimeline(reset: true)
     }
+  }
+
+  func webSocketDidReceiveReleaseNotification(releaseVersion: String, serverVersion: String?) {
+    guard hasAdminAccess, let connectedServer else { return }
+    let effectiveServerVersion = serverVersion ?? connectedServerVersion ?? releaseVersion
+    evaluateVersionAnnouncement(
+      releaseVersion: releaseVersion,
+      serverVersion: effectiveServerVersion,
+      server: connectedServer
+    )
   }
 
   private func parseAssetResponseDTO(_ json: [String: Any]) -> PhotoItem? {

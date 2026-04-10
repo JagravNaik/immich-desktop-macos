@@ -33,7 +33,7 @@ public final class ThumbnailLoader: @unchecked Sendable {
 
     let url = fileURL
     let pixelSize = maxPixelSize
-    let result = await Task.detached(priority: .userInitiated) { () -> DetachedThumbnailResult in
+    let result = await Task.detached(priority: .utility) { () -> DetachedThumbnailResult in
       guard
         let source = CGImageSourceCreateWithURL(url as CFURL, nil),
         let cgImage = CGImageSourceCreateThumbnailAtIndex(

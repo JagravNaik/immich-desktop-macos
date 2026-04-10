@@ -120,6 +120,25 @@ struct MainContentView: View {
     .sheet(isPresented: $appState.showAdminUsersSheet) {
       AdminUsersSheet(appState: appState)
     }
+    .alert("Immich Update Available", isPresented: $appState.showVersionAnnouncement) {
+      Button("Release Notes") {
+        if let releaseVersion = appState.availableReleaseVersion,
+           let url = URL(string: "https://github.com/immich-app/immich/releases/tag/\(releaseVersion)") {
+          NSWorkspace.shared.open(url)
+        }
+        appState.dismissVersionAnnouncement()
+      }
+      Button("Dismiss", role: .cancel) {
+        appState.dismissVersionAnnouncement()
+      }
+    } message: {
+      if let releaseVersion = appState.availableReleaseVersion,
+         let serverVersion = appState.availableReleaseServerVersion {
+        Text("Server \(serverVersion) is running. Immich \(releaseVersion) is available.")
+      } else {
+        Text("A newer Immich server version is available.")
+      }
+    }
   }
 
   private func dismissViewer() {
@@ -164,6 +183,11 @@ struct MainContentView: View {
 
       Button("") { appState.zoomOutPhotoGrid() }
         .keyboardShortcut("-", modifiers: .command)
+        .hidden()
+        .accessibilityHidden(true)
+
+      Button("") { thumbnailStore.logTelemetry(reason: "keyboard_shortcut") }
+        .keyboardShortcut("m", modifiers: [.command, .shift])
         .hidden()
         .accessibilityHidden(true)
     }
@@ -503,6 +527,7 @@ struct MainContentView: View {
       .accessibilityLabel(appState.isMultiSelectMode ? "Exit Selection" : "Select Multiple")
 
       Button {
+        thumbnailStore.logTelemetry(reason: "pre_refresh")
         Task { await appState.loadRemoteTimeline(reset: true) }
       } label: {
         Image(systemName: "arrow.clockwise")
@@ -693,7 +718,7 @@ struct MainContentView: View {
 
     DispatchQueue.main.async {
       guard heroTransition?.itemID == item.id else { return }
-      withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+      withAnimation(.easeInOut(duration: 0.24)) {
         isHeroExpanded = true
       }
     }
@@ -739,7 +764,7 @@ struct MainContentView: View {
 
     DispatchQueue.main.async {
       guard heroTransition?.itemID == item.id else { return }
-      withAnimation(.spring(response: 0.36, dampingFraction: 0.9)) {
+      withAnimation(.easeInOut(duration: 0.22)) {
         appState.isViewingPhoto = false
         isHeroExpanded = false
       }
@@ -759,10 +784,12 @@ struct MainContentView: View {
   }
 
   private func bestAvailableHeroImage(for item: AppState.PhotoItem) -> NSImage? {
-    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .original)
-      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
+    // Prefer smaller decoded images for hero transitions to keep open/close animations
+    // responsive even when full-resolution assets are loaded in the detail view.
+    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
       ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
       ?? heroTransition?.image
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .original)
   }
 
   private func preferredHeroAspectRatio(for item: AppState.PhotoItem, image: NSImage?) -> CGFloat {
@@ -1044,14 +1071,18 @@ struct PhotoGridZoomControl: View {
       toolbarButton(systemName: "minus", isEnabled: canZoomOut, action: onZoomOut)
         .help("Show More Photos")
 
-      Rectangle()
-        .fill(.quaternary)
-        .frame(width: 1, height: 16)
+      ZStack {
+        Rectangle()
+          .fill(.quaternary)
+          .frame(width: 1, height: 18)
+      }
+      .frame(width: 10, height: 28)
 
       toolbarButton(systemName: "plus", isEnabled: canZoomIn, action: onZoomIn)
         .help("Show Fewer Photos")
     }
-    .padding(2)
+    .frame(height: 32)
+    .padding(3)
     .background(.ultraThinMaterial, in: Capsule(style: .continuous))
     .overlay {
       Capsule(style: .continuous)
@@ -1063,7 +1094,7 @@ struct PhotoGridZoomControl: View {
     Button(action: action) {
       Image(systemName: systemName)
         .font(.system(size: 11, weight: .semibold))
-        .frame(width: 28, height: 24)
+        .frame(width: 32, height: 26)
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)

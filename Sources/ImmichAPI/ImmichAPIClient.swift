@@ -114,6 +114,7 @@ private func uploadTimestampString(for date: Date) -> String {
 
 public protocol ImmichAPIClient: Sendable {
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo
+  func fetchVersionCheckState(server: ImmichServer, session: UserSession) async throws -> VersionCheckState
   func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration
   func login(server: ImmichServer, email: String, password: String) async throws -> UserSession
   func loginWithAPIKey(server: ImmichServer, apiKey: String) async throws -> UserSession
@@ -214,6 +215,12 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return try await fetchVersion(server: server)
   }
 
+  public func fetchVersionCheckState(server: ImmichServer, session: UserSession) async throws -> VersionCheckState {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "server/version-check"), session: session)
+    request.httpMethod = "GET"
+    return try await perform(request)
+  }
+
   public func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration {
     async let features: ServerFeaturesResponse = perform(URLRequest(url: server.baseURL.appending(path: "server/features")))
     async let config: ServerConfigResponse = perform(URLRequest(url: server.baseURL.appending(path: "server/config")))
@@ -267,7 +274,6 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     components?.queryItems = [
       URLQueryItem(name: "order", value: "desc"),
       URLQueryItem(name: "visibility", value: "timeline"),
-      URLQueryItem(name: "withCoordinates", value: "true"),
       URLQueryItem(name: "withStacked", value: "true"),
     ]
 
@@ -286,7 +292,6 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       URLQueryItem(name: "order", value: "desc"),
       URLQueryItem(name: "timeBucket", value: timeBucket),
       URLQueryItem(name: "visibility", value: "timeline"),
-      URLQueryItem(name: "withCoordinates", value: "true"),
       URLQueryItem(name: "withStacked", value: "true"),
     ]
 

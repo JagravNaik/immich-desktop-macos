@@ -6,18 +6,142 @@ import ImmichCore
 
 typealias AssetMapMarker = ImmichCore.MapMarker
 
-private struct PlaceGroup: Identifiable {
-  let id: String
-  let title: String
-  let subtitle: String?
-  let count: Int
-  let marker: AssetMapMarker
-  let markers: [AssetMapMarker]
-}
-
 private struct MapViewportRequest {
   let id = UUID()
   let region: MKCoordinateRegion
+}
+
+private struct DisplayMapMarker: Identifiable, Hashable {
+  let id: String
+  let latitude: Double
+  let longitude: Double
+  let city: String?
+  let country: String?
+  let members: [AssetMapMarker]
+
+  var coordinate: CLLocationCoordinate2D {
+    CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+  }
+
+  var representative: AssetMapMarker {
+    members[0]
+  }
+
+  var count: Int {
+    members.count
+  }
+
+  func contains(markerID: String?) -> Bool {
+    guard let markerID else { return false }
+    return members.contains { $0.id == markerID }
+  }
+}
+
+private enum MapMarkerAggregator {
+  static func aggregate(_ markers: [AssetMapMarker]) -> [DisplayMapMarker] {
+    guard markers.count > 1 else {
+      return markers.map {
+        DisplayMapMarker(
+          id: $0.id,
+          latitude: $0.latitude,
+          longitude: $0.longitude,
+          city: $0.city,
+          country: $0.country,
+          members: [$0]
+        )
+      }
+    }
+
+    let coordinateStep = aggregationStep(for: markers.count)
+    var buckets: [BucketKey: [AssetMapMarker]] = [:]
+    buckets.reserveCapacity(markers.count)
+
+    for marker in markers {
+      let key = BucketKey(marker: marker, coordinateStep: coordinateStep)
+      buckets[key, default: []].append(marker)
+    }
+
+    return buckets.values
+      .map(makeDisplayMarker)
+      .sorted { lhs, rhs in
+        if lhs.count != rhs.count {
+          return lhs.count > rhs.count
+        }
+        return lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+      }
+  }
+
+  private struct BucketKey: Hashable {
+    let latitudeBucket: Int
+    let longitudeBucket: Int
+    let city: String
+    let country: String
+
+    init(marker: AssetMapMarker, coordinateStep: Double) {
+      latitudeBucket = Int((marker.latitude / coordinateStep).rounded())
+      longitudeBucket = Int((marker.longitude / coordinateStep).rounded())
+      city = marker.city?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+      country = marker.country?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+  }
+
+  private static func aggregationStep(for markerCount: Int) -> Double {
+    switch markerCount {
+    case 0..<2_000:
+      return 0.0025
+    case 2_000..<5_000:
+      return 0.005
+    case 5_000..<12_000:
+      return 0.01
+    case 12_000..<25_000:
+      return 0.025
+    default:
+      return 0.05
+    }
+  }
+
+  private static func makeDisplayMarker(from members: [AssetMapMarker]) -> DisplayMapMarker {
+    let representative = members[0]
+    let latitude = members.map(\.latitude).reduce(0, +) / Double(members.count)
+    let longitude = members.map(\.longitude).reduce(0, +) / Double(members.count)
+    let sortedMembers = members.sorted { lhs, rhs in
+      if lhs.city != rhs.city {
+        return (lhs.city ?? "").localizedCaseInsensitiveCompare(rhs.city ?? "") == .orderedAscending
+      }
+      if lhs.country != rhs.country {
+        return (lhs.country ?? "").localizedCaseInsensitiveCompare(rhs.country ?? "") == .orderedAscending
+      }
+      return lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+    }
+
+    return DisplayMapMarker(
+      id: sortedMembers.map(\.id).joined(separator: "|"),
+      latitude: latitude,
+      longitude: longitude,
+      city: representative.city,
+      country: representative.country,
+      members: sortedMembers
+    )
+  }
+}
+
+private enum MapDisplayMode: String, CaseIterable, Identifiable {
+  case map = "Map"
+  case satellite = "Satellite"
+  case grid = "Grid"
+
+  var id: String { rawValue }
+
+  var mapType: MKMapType {
+    switch self {
+    case .map:
+      return .standard
+    case .satellite:
+      return .satellite
+    case .grid:
+      return .hybrid
+    }
+  }
 }
 
 // MapKit is surprisingly strict here: invalid spans or center coordinates can throw inside
@@ -180,324 +304,334 @@ struct MapBrowserView: View {
   @State private var selectionError: String?
   @State private var hasPositionedCamera = false
   @State private var viewportRequest: MapViewportRequest?
-  @State private var cachedPlaceGroups: [PlaceGroup] = []
-
-  private let inspectorWidth: CGFloat = 340
+  @State private var displayMode: MapDisplayMode = .map
+  @State private var searchText = ""
+  @State private var isShowingLocationGallery = false
 
   var body: some View {
-    HStack(spacing: 0) {
-      mapPane
-        .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
-
-      Divider()
-
-      inspectorPane
-        .frame(width: inspectorWidth)
-        .frame(maxHeight: .infinity)
-        .background(.ultraThinMaterial)
+    ZStack {
+      mapBackground
+      floatingChrome
+      if isShowingLocationGallery {
+        locationGalleryOverlay
+      }
     }
-    .transaction {
-      $0.animation = nil
-      $0.disablesAnimations = true
-    }
-    .animation(nil, value: appState.selectedMapMarkerID)
-    .animation(nil, value: appState.isLoadingMapSelection)
-    .animation(nil, value: appState.mapSelectionItems.count)
+    .clipped()
     .task {
       if appState.mapMarkers.isEmpty {
         await refreshMarkers()
-      } else {
-        cachedPlaceGroups = buildPlaceGroups(from: appState.mapMarkers)
-        if !hasPositionedCamera {
-          focus(on: appState.mapMarkers)
-        }
+      } else if !hasPositionedCamera {
+        focus(on: displayMarkers.isEmpty ? allDisplayMarkers : displayMarkers)
       }
     }
     .onChange(of: appState.mapMarkers) { _, markers in
-      cachedPlaceGroups = buildPlaceGroups(from: markers)
-      guard !markers.isEmpty, !hasPositionedCamera else { return }
+      guard !markers.isEmpty else { return }
+      if !hasPositionedCamera {
+        let aggregatedMarkers = MapMarkerAggregator.aggregate(markers)
+        focus(on: displayMarkers.isEmpty ? aggregatedMarkers : displayMarkers)
+      }
+    }
+    .onChange(of: searchText) { _, _ in
+      selectionError = nil
+      let markers = displayMarkers
+      guard !markers.isEmpty else { return }
       focus(on: markers)
     }
   }
 
-  private var mapPane: some View {
+  private var filteredMarkers: [AssetMapMarker] {
+    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else { return appState.mapMarkers }
+    let needle = query.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+
+    return appState.mapMarkers.filter { marker in
+      [
+        marker.city,
+        marker.country,
+        markerSearchLabel(for: marker),
+      ]
+        .compactMap { $0 }
+        .contains { value in
+          value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).contains(needle)
+        }
+    }
+  }
+
+  private var displayMarkers: [DisplayMapMarker] {
+    MapMarkerAggregator.aggregate(filteredMarkers)
+  }
+
+  private var allDisplayMarkers: [DisplayMapMarker] {
+    MapMarkerAggregator.aggregate(appState.mapMarkers)
+  }
+
+  private var selectedMarker: DisplayMapMarker? {
+    allDisplayMarkers.first { $0.contains(markerID: appState.selectedMapMarkerID) }
+  }
+
+  private var mapBackground: some View {
     ZStack {
       if appState.isLoadingMap && appState.mapMarkers.isEmpty {
         ProgressView("Loading map…")
           .controlSize(.large)
+          .tint(.white)
       } else if appState.mapMarkers.isEmpty {
         ContentUnavailableView(
           "No places yet",
           systemImage: "map",
           description: Text(loadError ?? "Photos and videos with location data will appear here.")
         )
+      } else if filteredMarkers.isEmpty {
+        PlacesMapView(
+          markers: allDisplayMarkers,
+          selectedMarkerID: selectedMarker?.id,
+          viewportRequest: viewportRequest,
+          mapType: displayMode.mapType,
+          thumbnailStore: thumbnailStore,
+          thumbnailContext: appState.thumbnailContext,
+          onSelectMarkers: handleMarkerSelection,
+          onOpenMarkers: handleMarkerOpen
+        )
+        .overlay {
+          ContentUnavailableView(
+            "No Matching Places",
+            systemImage: "magnifyingglass",
+            description: Text("Try a different city or country.")
+          )
+          .padding(32)
+          .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
       } else {
         PlacesMapView(
-          groups: cachedPlaceGroups,
-          selectedMarkerID: appState.selectedMapMarkerID,
+          markers: displayMarkers,
+          selectedMarkerID: selectedMarker?.id,
           viewportRequest: viewportRequest,
-          onSelectMarkerID: { markerID in
-            guard let group = cachedPlaceGroups.first(where: { $0.marker.id == markerID }) else { return }
-            Task { await selectGroup(group, shouldFocus: false) }
-          }
+          mapType: displayMode.mapType,
+          thumbnailStore: thumbnailStore,
+          thumbnailContext: appState.thumbnailContext,
+          onSelectMarkers: handleMarkerSelection,
+          onOpenMarkers: handleMarkerOpen
         )
-        .overlay(alignment: Alignment.topTrailing) {
-          Button {
-            Task { await refreshMarkers() }
-          } label: {
-            Image(systemName: "arrow.clockwise")
-          }
-          .buttonStyle(.bordered)
-          .accessibilityLabel("Refresh Map")
-          .padding(14)
-        }
+      }
+    }
+    .background(Color.black)
+  }
+
+  private var floatingChrome: some View {
+    VStack(spacing: 0) {
+      HStack(alignment: .top, spacing: 16) {
+        mapStylePicker
+          .padding(.top, 18)
+
+        Spacer(minLength: 0)
+
+        searchBar
+          .frame(width: 300)
+          .padding(.top, 18)
+          .padding(.trailing, 18)
+      }
+
+      Spacer(minLength: 0)
+
+      if let marker = selectedMarker, !appState.mapSelectionItems.isEmpty || appState.isLoadingMapSelection || selectionError != nil {
+        selectedLocationTray(for: marker)
+          .padding(.horizontal, 24)
+          .padding(.bottom, 20)
+          .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
   }
 
-  private var inspectorPane: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      VStack(alignment: .leading, spacing: 6) {
-        Text("Places")
-          .font(.title2.weight(.semibold))
-        Text("\(cachedPlaceGroups.count) places • \(appState.mapMarkers.count) items")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      }
-      .padding(18)
-
-      if let loadError {
-        Text(loadError)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .padding(.horizontal, 18)
-          .padding(.bottom, 10)
-      }
-
-      Divider()
-
-      selectedMarkerSection
-        .padding(18)
-
-      Divider()
-
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 10) {
-          ForEach(cachedPlaceGroups) { group in
-            Button {
-              Task { await selectGroup(group, shouldFocus: true) }
-            } label: {
-              HStack(alignment: .top, spacing: 10) {
-                Image(systemName: appState.selectedMapMarkerID == group.marker.id ? "mappin.circle.fill" : "map")
-                  .foregroundStyle(appState.selectedMapMarkerID == group.marker.id ? Color.accentColor : .secondary)
-                  .frame(width: 18, height: 18)
-                  .padding(.top, 1)
-
-                VStack(alignment: .leading, spacing: 2) {
-                  Text(group.title)
-                    .font(.subheadline.weight(.medium))
-                    .multilineTextAlignment(.leading)
-                  if let subtitle = group.subtitle {
-                    Text(subtitle)
-                      .font(.caption)
-                      .foregroundStyle(.secondary)
-                  }
-                }
-
-                Spacer()
-
-                Text("\(group.count)")
-                  .font(.caption.monospacedDigit())
-                  .foregroundStyle(.tertiary)
-              }
-              .padding(10)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                  .fill(appState.selectedMapMarkerID == group.marker.id ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08))
-              )
-            }
-            .buttonStyle(.plain)
-          }
+  private var locationGalleryOverlay: some View {
+    ZStack {
+      Color.black.opacity(0.4)
+        .ignoresSafeArea()
+        .onTapGesture {
+          isShowingLocationGallery = false
         }
-        .padding(18)
+
+      VStack(spacing: 0) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text(selectedMarker.map(markerLabel(for:)) ?? "Location")
+              .font(.title2.weight(.semibold))
+            Text("\(appState.mapSelectionItems.count) item\(appState.mapSelectionItems.count == 1 ? "" : "s")")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+
+          Spacer()
+
+          Button {
+            isShowingLocationGallery = false
+          } label: {
+            Image(systemName: "xmark")
+              .font(.system(size: 13, weight: .bold))
+              .frame(width: 28, height: 28)
+              .background(.white.opacity(0.08), in: Circle())
+          }
+          .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+
+        Divider()
+
+        LibraryGridView(
+          appState: appState,
+          thumbnailStore: thumbnailStore,
+          heroHiddenItemID: nil,
+          onOpenAsset: onOpenAsset,
+          onHeroFramesChanged: { _ in }
+        )
+      }
+      .frame(minWidth: 900, minHeight: 620)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+      .overlay {
+        RoundedRectangle(cornerRadius: 26, style: .continuous)
+          .strokeBorder(.white.opacity(0.12))
+      }
+      .shadow(color: .black.opacity(0.28), radius: 30, y: 16)
+      .padding(36)
+    }
+    .zIndex(5)
+    .transition(.opacity)
+  }
+
+  private var mapStylePicker: some View {
+    Picker("Map Style", selection: $displayMode) {
+      ForEach(MapDisplayMode.allCases) { mode in
+        Text(mode.rawValue)
+          .tag(mode)
       }
     }
+    .pickerStyle(.segmented)
+    .padding(5)
+    .background(.ultraThinMaterial, in: Capsule())
+    .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+    .padding(.leading, 18)
+    .frame(maxWidth: 320)
+  }
+
+  private var searchBar: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "magnifyingglass")
+        .foregroundStyle(.secondary)
+      TextField("", text: $searchText, prompt: Text("Search Places"))
+        .textFieldStyle(.plain)
+        .foregroundStyle(.primary)
+
+      if !searchText.isEmpty {
+        Button {
+          searchText = ""
+        } label: {
+          Image(systemName: "xmark.circle.fill")
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .background(.ultraThinMaterial, in: Capsule())
+    .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
   }
 
   @ViewBuilder
-  private var selectedMarkerSection: some View {
-    if let group = selectedPlaceGroup {
-      let marker = group.marker
-      VStack(alignment: .leading, spacing: 12) {
-        Label("Selected Location", systemImage: "mappin.and.ellipse")
-          .font(.headline)
-
-        VStack(alignment: .leading, spacing: 2) {
+  private func selectedLocationTray(for marker: DisplayMapMarker) -> some View {
+    VStack(alignment: .leading, spacing: 14) {
+      HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 3) {
           Text(markerLabel(for: marker))
-            .font(.subheadline.weight(.medium))
-          Text(coordinateLabel(for: marker))
-            .font(.caption.monospacedDigit())
+            .font(.headline.weight(.semibold))
+          Text("\(appState.mapSelectionItems.count) item\(appState.mapSelectionItems.count == 1 ? "" : "s")")
+            .font(.caption)
             .foregroundStyle(.secondary)
         }
 
-        if appState.isLoadingMapSelection {
-          HStack(spacing: 8) {
-            ProgressView()
-              .controlSize(.small)
-            Text("Loading \(group.count) items…")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        } else if !appState.mapSelectionItems.isEmpty {
-          VStack(alignment: .leading, spacing: 10) {
-            Text("\(appState.mapSelectionItems.count) items at this location")
-              .font(.caption)
-              .foregroundStyle(.secondary)
+        Spacer()
 
-            ScrollView(.horizontal, showsIndicators: true) {
-              LazyHStack(alignment: .top, spacing: 10) {
-                ForEach(appState.mapSelectionItems) { item in
-                  Button {
-                    onOpenAsset(
-                      item,
-                      .zero,
-                      thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
-                        ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
-                    )
-                  } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                      AssetThumbnailView(item: item, context: appState.thumbnailContext, store: thumbnailStore)
-                        .aspectRatio(item.gridAspectRatio, contentMode: .fill)
-                        .frame(width: 110, height: 110)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay {
-                          RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(appState.selectedItemID == item.id ? Color.accentColor : Color.clear, lineWidth: 2)
-                        }
+        Button {
+          appState.clearMapSelection()
+          selectionError = nil
+          isShowingLocationGallery = false
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 11, weight: .bold))
+            .frame(width: 28, height: 28)
+            .background(.white.opacity(0.08), in: Circle())
+        }
+        .buttonStyle(.plain)
 
-                      Text(item.title)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+        Button("Open in Maps") {
+          openInMaps(marker)
+        }
+        .buttonStyle(.bordered)
+      }
 
-                      if item.isVideo, let durationText = item.durationText {
-                        Text(durationText)
-                          .font(.caption2.monospacedDigit())
-                          .foregroundStyle(.secondary)
-                      }
-                    }
-                    .frame(width: 110, alignment: .leading)
+      if appState.isLoadingMapSelection {
+        HStack(spacing: 8) {
+          ProgressView()
+            .controlSize(.small)
+          Text("Loading nearby photos…")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      } else if appState.mapSelectionItems.isEmpty {
+        Text(selectionError ?? "No photos available here yet.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      } else {
+        ScrollView(.horizontal, showsIndicators: false) {
+          LazyHStack(spacing: 12) {
+            ForEach(appState.mapSelectionItems.prefix(18)) { item in
+              Button {
+                onOpenAsset(item, .zero, heroImage(for: item))
+              } label: {
+                ZStack(alignment: .bottomLeading) {
+                  AssetThumbnailView(item: item, context: appState.thumbnailContext, store: thumbnailStore)
+                    .frame(width: 120, height: 120)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                  if item.isVideo, let durationText = item.durationText {
+                    Text(durationText)
+                      .font(.caption2.monospacedDigit().weight(.semibold))
+                      .padding(.horizontal, 7)
+                      .padding(.vertical, 4)
+                      .background(.black.opacity(0.7), in: Capsule())
+                      .foregroundStyle(.white)
+                      .padding(8)
                   }
-                  .buttonStyle(.plain)
                 }
-              }
-              .padding(.vertical, 2)
-            }
-
-            HStack {
-              if let selectedItem = appState.selectedItem {
-                Button("Open Selected") {
-                  onOpenAsset(
-                    selectedItem,
-                    .zero,
-                    thumbnailStore.cachedImage(for: selectedItem, context: appState.thumbnailContext, size: .preview)
-                      ?? thumbnailStore.cachedImage(for: selectedItem, context: appState.thumbnailContext, size: .thumbnail)
-                  )
+                .overlay {
+                  RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(appState.selectedItemID == item.id ? Color.accentColor : .white.opacity(0.42), lineWidth: appState.selectedItemID == item.id ? 2.5 : 1)
                 }
-                .buttonStyle(.borderedProminent)
+                .shadow(color: .black.opacity(0.18), radius: 14, y: 7)
               }
-
-              Button("Open in Maps") {
-                openInMaps(marker)
-              }
-              .buttonStyle(.bordered)
+              .buttonStyle(.plain)
             }
           }
-        } else {
-          if let selectionError {
-            Text(selectionError)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          } else {
-            Text("Loading asset preview…")
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-
-          HStack {
-            ProgressView()
-              .controlSize(.small)
-            Button("Open in Maps") {
-              openInMaps(marker)
-            }
-            .buttonStyle(.bordered)
-          }
+          .padding(.vertical, 2)
         }
       }
-    } else {
-      VStack(alignment: .leading, spacing: 8) {
-        Label("Selected Location", systemImage: "mappin.and.ellipse")
-          .font(.headline)
-        Text("Select a pin on the map to preview an asset and open it in the viewer.")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      }
     }
+    .padding(18)
+    .frame(maxWidth: 820, alignment: .leading)
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    .overlay {
+      RoundedRectangle(cornerRadius: 24, style: .continuous)
+        .strokeBorder(.white.opacity(0.12))
+    }
+    .shadow(color: .black.opacity(0.2), radius: 18, y: 10)
   }
 
-  private var selectedPlaceGroup: PlaceGroup? {
-    guard let selectedMapMarkerID = appState.selectedMapMarkerID else { return nil }
-    return cachedPlaceGroups.first { $0.marker.id == selectedMapMarkerID }
+  private func heroImage(for item: AppState.PhotoItem) -> NSImage? {
+    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
   }
 
-  private func buildPlaceGroups(from markers: [AssetMapMarker]) -> [PlaceGroup] {
-    let grouped = Dictionary(grouping: markers, by: placeKey(for:))
-    return grouped.compactMap { key, markers in
-      // Sort deterministically so the representative marker (and thus pin coordinate
-      // and selectedMapMarkerID) is stable across refreshes regardless of Dictionary
-      // grouping order.
-      let sortedMarkers = markers.sorted { lhs, rhs in
-        lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
-      }
-      guard let representative = sortedMarkers.first else { return nil }
-      let label = markerLabel(for: representative)
-      let parts = label.split(separator: ",", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-      let title = parts.first ?? label
-      let subtitle = parts.count > 1 ? parts[1] : nil
-      return PlaceGroup(
-        id: key,
-        title: title,
-        subtitle: subtitle,
-        count: sortedMarkers.count,
-        marker: representative,
-        markers: sortedMarkers
-      )
-    }
-    .sorted {
-      if $0.count != $1.count {
-        return $0.count > $1.count
-      }
-      return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-    }
-  }
-
-  private func placeKey(for marker: AssetMapMarker) -> String {
-    let city = marker.city?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let country = marker.country?.trimmingCharacters(in: .whitespacesAndNewlines)
-    if let city, !city.isEmpty, let country, !country.isEmpty {
-      return "\(city.lowercased())|\(country.lowercased())"
-    }
-    if let city, !city.isEmpty {
-      return city.lowercased()
-    }
-    if let country, !country.isEmpty {
-      return country.lowercased()
-    }
-    return marker.id
-  }
-
-  private func markerLabel(for marker: AssetMapMarker) -> String {
+  private func markerLabel(for marker: DisplayMapMarker) -> String {
     let parts = [marker.city, marker.country]
       .compactMap { value -> String? in
         guard let value, !value.isEmpty else { return nil }
@@ -509,39 +643,86 @@ struct MapBrowserView: View {
     return "Pinned Photo"
   }
 
-  private func coordinateLabel(for marker: AssetMapMarker) -> String {
-    String(format: "%.4f, %.4f", marker.latitude, marker.longitude)
+  private func markerSearchLabel(for marker: AssetMapMarker) -> String {
+    let parts = [marker.city, marker.country]
+      .compactMap { value -> String? in
+        guard let value, !value.isEmpty else { return nil }
+        return value
+      }
+    if !parts.isEmpty {
+      return parts.joined(separator: ", ")
+    }
+    return "Pinned Photo"
   }
 
   private func refreshMarkers() async {
     loadError = await appState.loadMapMarkers()
     selectionError = nil
-    cachedPlaceGroups = buildPlaceGroups(from: appState.mapMarkers)
-    if !appState.mapMarkers.isEmpty {
-      focus(on: appState.mapMarkers)
+    let markers = displayMarkers.isEmpty ? allDisplayMarkers : displayMarkers
+    if !markers.isEmpty {
+      focus(on: markers)
     }
   }
 
-  private func selectGroup(_ group: PlaceGroup, shouldFocus: Bool) async {
+  private func handleMarkerSelection(_ markers: [DisplayMapMarker]) {
+    DispatchQueue.main.async {
+      Task {
+        await selectMarkers(markers)
+      }
+    }
+  }
+
+  private func handleMarkerOpen(_ markers: [DisplayMapMarker]) {
+    DispatchQueue.main.async {
+      Task {
+        await openMarkers(markers)
+      }
+    }
+  }
+
+  private func selectMarkers(_ markers: [DisplayMapMarker]) async {
+    guard let first = markers.first else { return }
     selectionError = nil
-    if shouldFocus {
-      focus(on: group.marker)
+    isShowingLocationGallery = false
+
+    if markers.count > 1 {
+      appState.clearMapSelection()
+      focus(on: markers)
+      return
     }
-    selectionError = await appState.selectMapMarker(group.marker, markers: group.markers)
+
+    focus(on: first)
+    selectionError = await appState.selectMapMarker(first.representative, markers: first.members)
   }
 
-  private func focus(on marker: AssetMapMarker) {
-    guard let region = MapViewportBuilder.singleMarkerRegion(for: marker) else { return }
+  private func openMarkers(_ markers: [DisplayMapMarker]) async {
+    guard let first = markers.first else { return }
+    selectionError = nil
+
+    if markers.count > 1 {
+      focus(on: markers)
+    } else {
+      focus(on: first)
+    }
+
+    selectionError = await appState.selectMapMarker(first.representative, markers: first.members)
+    if selectionError == nil || !appState.mapSelectionItems.isEmpty {
+      isShowingLocationGallery = !appState.mapSelectionItems.isEmpty
+    }
+  }
+
+  private func focus(on marker: DisplayMapMarker) {
+    guard let region = MapViewportBuilder.singleMarkerRegion(for: marker.representative) else { return }
     viewportRequest = MapViewportRequest(region: region)
   }
 
-  private func focus(on markers: [AssetMapMarker]) {
-    guard let region = MapViewportBuilder.region(containing: markers) else { return }
+  private func focus(on markers: [DisplayMapMarker]) {
+    guard let region = MapViewportBuilder.region(containing: markers.map(\.representative)) else { return }
     hasPositionedCamera = true
     viewportRequest = MapViewportRequest(region: region)
   }
 
-  private func openInMaps(_ marker: AssetMapMarker) {
+  private func openInMaps(_ marker: DisplayMapMarker) {
     let coordinate = marker.coordinate
     var components = URLComponents(string: "https://maps.apple.com")
     components?.queryItems = [
@@ -559,24 +740,65 @@ private extension AssetMapMarker {
   }
 }
 
+private extension AppState.PhotoItem {
+  static func mapThumbnailPlaceholder(for marker: DisplayMapMarker) -> Self {
+    let title = [marker.city, marker.country]
+      .compactMap { $0 }
+      .filter { !$0.isEmpty }
+      .joined(separator: ", ")
+
+    return AppState.PhotoItem(
+      id: marker.id,
+      source: .remoteAsset(id: marker.representative.id),
+      title: title.isEmpty ? "Pinned Photo" : title,
+      date: .distantPast,
+      isFavorite: false,
+      isVideo: false,
+      isImported: false,
+      livePhotoVideoID: nil,
+      latitude: marker.latitude,
+      longitude: marker.longitude,
+      durationText: nil,
+      city: marker.city,
+      country: marker.country,
+      stackCount: nil,
+      timeBucketKey: "map",
+      projectionType: nil,
+      aspectRatio: 1
+    )
+  }
+}
+
 private struct PlacesMapView: NSViewRepresentable {
-  let groups: [PlaceGroup]
+  let markers: [DisplayMapMarker]
   let selectedMarkerID: String?
   let viewportRequest: MapViewportRequest?
-  let onSelectMarkerID: (String) -> Void
+  let mapType: MKMapType
+  let thumbnailStore: ThumbnailStore
+  let thumbnailContext: AppState.ThumbnailContext?
+  let onSelectMarkers: ([DisplayMapMarker]) -> Void
+  let onOpenMarkers: ([DisplayMapMarker]) -> Void
 
   func makeCoordinator() -> Coordinator {
-    Coordinator(onSelectMarkerID: onSelectMarkerID)
+    Coordinator(
+      thumbnailStore: thumbnailStore,
+      thumbnailContext: thumbnailContext,
+      onSelectMarkers: onSelectMarkers,
+      onOpenMarkers: onOpenMarkers
+    )
   }
 
   func makeNSView(context: Context) -> MKMapView {
     let mapView = MKMapView()
     mapView.delegate = context.coordinator
-    mapView.mapType = .standard
-    mapView.showsCompass = true
-    mapView.showsZoomControls = true
+    mapView.mapType = mapType
+    mapView.showsCompass = false
+    mapView.showsZoomControls = false
+    mapView.showsScale = false
     mapView.pointOfInterestFilter = .includingAll
-    mapView.register(PlaceAnnotationView.self, forAnnotationViewWithReuseIdentifier: PlaceAnnotationView.reuseIdentifier)
+    mapView.isPitchEnabled = false
+    mapView.register(PhotoMarkerAnnotationView.self, forAnnotationViewWithReuseIdentifier: PhotoMarkerAnnotationView.reuseIdentifier)
+    mapView.register(PhotoClusterAnnotationView.self, forAnnotationViewWithReuseIdentifier: PhotoClusterAnnotationView.reuseIdentifier)
     return mapView
   }
 
@@ -585,9 +807,16 @@ private struct PlacesMapView: NSViewRepresentable {
     context.coordinator.isUpdating = true
     defer { context.coordinator.isUpdating = false }
 
-    context.coordinator.onSelectMarkerID = onSelectMarkerID
-    context.coordinator.updateAnnotations(groups, on: mapView)
+    context.coordinator.onSelectMarkers = onSelectMarkers
+    context.coordinator.onOpenMarkers = onOpenMarkers
+    context.coordinator.thumbnailContext = thumbnailContext
+    context.coordinator.thumbnailStore = thumbnailStore
+    context.coordinator.updateAnnotations(markers, on: mapView)
     context.coordinator.applySelection(selectedMarkerID, on: mapView)
+
+    if mapView.mapType != mapType {
+      mapView.mapType = mapType
+    }
 
     if let viewportRequest {
       context.coordinator.queueViewportRequest(viewportRequest, on: mapView)
@@ -595,35 +824,56 @@ private struct PlacesMapView: NSViewRepresentable {
   }
 
   final class Coordinator: NSObject, MKMapViewDelegate {
-    var onSelectMarkerID: (String) -> Void
-    var lastViewportRequestID: UUID?
-    var selectedMarkerID: String?
+    var thumbnailStore: ThumbnailStore
+    var thumbnailContext: AppState.ThumbnailContext?
+    var onSelectMarkers: ([DisplayMapMarker]) -> Void
+    var onOpenMarkers: ([DisplayMapMarker]) -> Void
     var isUpdating = false
+
     private var annotationSignatures: Set<String> = []
+    private var selectedMarkerID: String?
     private var lastAppliedSelectedMarkerID: String?
     private var pendingViewportRequest: MapViewportRequest?
+    private var lastViewportRequestID: UUID?
     private var isViewportApplyScheduled = false
 
-    init(onSelectMarkerID: @escaping (String) -> Void) {
-      self.onSelectMarkerID = onSelectMarkerID
+    init(
+      thumbnailStore: ThumbnailStore,
+      thumbnailContext: AppState.ThumbnailContext?,
+      onSelectMarkers: @escaping ([DisplayMapMarker]) -> Void,
+      onOpenMarkers: @escaping ([DisplayMapMarker]) -> Void
+    ) {
+      self.thumbnailStore = thumbnailStore
+      self.thumbnailContext = thumbnailContext
+      self.onSelectMarkers = onSelectMarkers
+      self.onOpenMarkers = onOpenMarkers
     }
 
-    func updateAnnotations(_ groups: [PlaceGroup], on mapView: MKMapView) {
-      let newSignatures = Set(groups.map { "\($0.id)|\($0.count)|\($0.marker.latitude)|\($0.marker.longitude)|\($0.title)|\($0.subtitle ?? "")" })
+    func updateAnnotations(_ markers: [DisplayMapMarker], on mapView: MKMapView) {
+      let newSignatures = Set(markers.map { "\($0.id)|\($0.latitude)|\($0.longitude)|\($0.city ?? "")|\($0.country ?? "")" })
       guard newSignatures != annotationSignatures else { return }
 
       annotationSignatures = newSignatures
       lastAppliedSelectedMarkerID = nil
       mapView.removeAnnotations(mapView.annotations)
-      let annotations = groups.map(PlaceAnnotation.init)
-      mapView.addAnnotations(annotations)
+      mapView.addAnnotations(markers.map(PhotoMapAnnotation.init))
     }
 
     func applySelection(_ selectedMarkerID: String?, on mapView: MKMapView) {
       self.selectedMarkerID = selectedMarkerID
       guard lastAppliedSelectedMarkerID != selectedMarkerID else { return }
       lastAppliedSelectedMarkerID = selectedMarkerID
-      refreshAnnotationViews(on: mapView)
+
+      for annotation in mapView.annotations {
+        guard let view = mapView.view(for: annotation) else { continue }
+
+        if let markerAnnotation = annotation as? PhotoMapAnnotation,
+           let markerView = view as? PhotoMarkerAnnotationView {
+          markerView.setSelected(markerAnnotation.marker.id == selectedMarkerID)
+        } else if let clusterView = view as? PhotoClusterAnnotationView {
+          clusterView.setSelected(false)
+        }
+      }
     }
 
     func queueViewportRequest(_ request: MapViewportRequest, on mapView: MKMapView) {
@@ -634,31 +884,50 @@ private struct PlacesMapView: NSViewRepresentable {
     }
 
     func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
-      guard let annotation = annotation as? PlaceAnnotation else { return nil }
-      let view = mapView.dequeueReusableAnnotationView(
-        withIdentifier: PlaceAnnotationView.reuseIdentifier,
-        for: annotation
-      )
-      guard let placeView = view as? PlaceAnnotationView else { return view }
-      placeView.configure(
-        with: annotation,
-        isSelected: selectedMarkerID == annotation.group.marker.id
-      )
-      placeView.onPress = { [weak self] tappedAnnotation in
-        self?.onSelectMarkerID(tappedAnnotation.group.marker.id)
-      }
-      return placeView
-    }
+      switch annotation {
+      case let cluster as MKClusterAnnotation:
+        let view = mapView.dequeueReusableAnnotationView(
+          withIdentifier: PhotoClusterAnnotationView.reuseIdentifier,
+          for: cluster
+        )
+        guard let clusterView = view as? PhotoClusterAnnotationView else { return view }
+        clusterView.configure(
+          cluster,
+          thumbnailStore: thumbnailStore,
+          thumbnailContext: thumbnailContext
+        )
+        clusterView.onPress = { [weak self] in
+          let markers = cluster.memberAnnotations.compactMap { ($0 as? PhotoMapAnnotation)?.marker }
+          self?.onSelectMarkers(markers)
+        }
+        clusterView.onDoublePress = { [weak self] in
+          let markers = cluster.memberAnnotations.compactMap { ($0 as? PhotoMapAnnotation)?.marker }
+          self?.onOpenMarkers(markers)
+        }
+        return clusterView
 
-    private func refreshAnnotationViews(on mapView: MKMapView) {
-      for annotation in mapView.annotations {
-        guard
-          let placeAnnotation = annotation as? PlaceAnnotation,
-          let view = mapView.view(for: annotation) as? PlaceAnnotationView
-        else { continue }
+      case let marker as PhotoMapAnnotation:
+        let view = mapView.dequeueReusableAnnotationView(
+          withIdentifier: PhotoMarkerAnnotationView.reuseIdentifier,
+          for: marker
+        )
+        guard let markerView = view as? PhotoMarkerAnnotationView else { return view }
+        markerView.configure(
+          marker: marker.marker,
+          isSelected: marker.marker.id == selectedMarkerID,
+          thumbnailStore: thumbnailStore,
+          thumbnailContext: thumbnailContext
+        )
+        markerView.onPress = { [weak self] in
+          self?.onSelectMarkers([marker.marker])
+        }
+        markerView.onDoublePress = { [weak self] in
+          self?.onOpenMarkers([marker.marker])
+        }
+        return markerView
 
-        let isSelected = selectedMarkerID == placeAnnotation.group.marker.id
-        view.configure(with: placeAnnotation, isSelected: isSelected)
+      default:
+        return nil
       }
     }
 
@@ -674,9 +943,6 @@ private struct PlacesMapView: NSViewRepresentable {
 
     private func applyPendingViewport(on mapView: MKMapView) {
       guard let request = pendingViewportRequest else { return }
-      // `MKMapView.setRegion` can be invoked while SwiftUI is still resizing the AppKit host.
-      // Waiting until the map has a real window and non-trivial bounds keeps us out of the
-      // `MKWhenSized` layout recursion that caused the earlier crash reports.
       guard mapView.window != nil, mapView.bounds.width > 32, mapView.bounds.height > 32 else {
         scheduleViewportApply(on: mapView)
         return
@@ -688,70 +954,236 @@ private struct PlacesMapView: NSViewRepresentable {
       }
 
       pendingViewportRequest = nil
-      mapView.setRegion(region, animated: false)
+      mapView.setRegion(region, animated: true)
     }
   }
 }
 
-private final class PlaceAnnotation: NSObject, MKAnnotation {
-  let group: PlaceGroup
+private final class PhotoMapAnnotation: NSObject, MKAnnotation {
+  let marker: DisplayMapMarker
 
-  var coordinate: CLLocationCoordinate2D { group.marker.coordinate }
-  var title: String? { group.title }
-  var subtitle: String? { group.subtitle }
+  var coordinate: CLLocationCoordinate2D { marker.coordinate }
+  var title: String? {
+    [marker.city, marker.country]
+      .compactMap { $0 }
+      .filter { !$0.isEmpty }
+      .joined(separator: ", ")
+  }
 
-  init(group: PlaceGroup) {
-    self.group = group
+  init(marker: DisplayMapMarker) {
+    self.marker = marker
   }
 }
 
-private final class PlaceAnnotationView: MKMarkerAnnotationView {
-  static let reuseIdentifier = "ImmichPlaceAnnotationView"
+private final class PhotoPinCardView: NSView {
+  private let imageView = NSImageView()
+  private let countLabel = NSTextField(labelWithString: "")
+  private let placeholderLayer = CALayer()
 
-  var onPress: ((PlaceAnnotation) -> Void)?
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    wantsLayer = true
+    layer?.masksToBounds = false
+    layer?.cornerRadius = 16
+    layer?.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor
+    layer?.borderColor = NSColor.white.withAlphaComponent(0.88).cgColor
+    layer?.borderWidth = 2
+    layer?.shadowColor = NSColor.black.withAlphaComponent(0.32).cgColor
+    layer?.shadowOpacity = 1
+    layer?.shadowRadius = 14
+    layer?.shadowOffset = CGSize(width: 0, height: 8)
 
-  override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
-    super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-    setup()
+    imageView.translatesAutoresizingMaskIntoConstraints = false
+    imageView.imageScaling = .scaleAxesIndependently
+    imageView.wantsLayer = true
+    imageView.layer?.cornerRadius = 14
+    imageView.layer?.masksToBounds = true
+    addSubview(imageView)
+
+    countLabel.translatesAutoresizingMaskIntoConstraints = false
+    countLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+    countLabel.textColor = .white
+    countLabel.backgroundColor = .clear
+    countLabel.lineBreakMode = .byClipping
+    countLabel.maximumNumberOfLines = 1
+    countLabel.isHidden = true
+    addSubview(countLabel)
+
+    placeholderLayer.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+    placeholderLayer.cornerRadius = 14
+    layer?.addSublayer(placeholderLayer)
+
+    NSLayoutConstraint.activate([
+      imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+      imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+      imageView.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+      imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+
+      countLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+      countLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+    ])
   }
 
   required init?(coder: NSCoder) {
-    super.init(coder: coder)
-    setup()
+    fatalError("init(coder:) has not been implemented")
   }
 
-  private func setup() {
-    canShowCallout = false
-    animatesWhenAdded = false
-    titleVisibility = .hidden
-    subtitleVisibility = .hidden
-    displayPriority = .required
-    collisionMode = .circle
+  override func layout() {
+    super.layout()
+    placeholderLayer.frame = bounds.insetBy(dx: 2, dy: 2)
   }
 
-  func configure(with annotation: PlaceAnnotation, isSelected: Bool) {
-    markerTintColor = isSelected ? .controlAccentColor : .systemRed
-    glyphTintColor = .white
-    clusteringIdentifier = nil
+  func update(image: NSImage?, count: Int?, selected: Bool) {
+    imageView.image = image
+    placeholderLayer.isHidden = image != nil
+    layer?.borderColor = selected ? NSColor.controlAccentColor.cgColor : NSColor.white.withAlphaComponent(0.88).cgColor
+    layer?.borderWidth = selected ? 3 : 2
 
-    if annotation.group.count > 1 {
-      glyphText = annotation.group.count > 99 ? "99+" : "\(annotation.group.count)"
-      glyphImage = nil
+    if let count, count > 1 {
+      countLabel.stringValue = "\(count)"
+      countLabel.isHidden = false
     } else {
-      glyphText = nil
-      let configuration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-      glyphImage = NSImage(systemSymbolName: "photo", accessibilityDescription: annotation.group.title)?
-        .withSymbolConfiguration(configuration)
+      countLabel.stringValue = ""
+      countLabel.isHidden = true
     }
+  }
+}
+
+private class BasePhotoAnnotationView: MKAnnotationView {
+  let cardView = PhotoPinCardView(frame: NSRect(x: 0, y: 0, width: 76, height: 76))
+  var onPress: (() -> Void)?
+  var onDoublePress: (() -> Void)?
+
+  override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
+    super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
+    canShowCallout = false
+    collisionMode = .rectangle
+    displayPriority = .required
+    frame = NSRect(x: 0, y: 0, width: 76, height: 76)
+    centerOffset = CGPoint(x: 0, y: -38)
+    wantsLayer = false
+    addSubview(cardView)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func layout() {
+    super.layout()
+    cardView.frame = bounds
   }
 
   override func mouseUp(with event: NSEvent) {
     super.mouseUp(with: event)
-    guard let annotation = annotation as? PlaceAnnotation else {
-      return
+    if event.clickCount >= 2 {
+      onDoublePress?()
+    } else {
+      onPress?()
+    }
+  }
+}
+
+private final class PhotoMarkerAnnotationView: BasePhotoAnnotationView {
+  static let reuseIdentifier = "ImmichPhotoMarkerAnnotationView"
+
+  private var imageTask: Task<Void, Never>?
+  private var representedMarkerID: String?
+
+  override func prepareForReuse() {
+    super.prepareForReuse()
+    imageTask?.cancel()
+    imageTask = nil
+    representedMarkerID = nil
+    cardView.update(image: nil, count: nil, selected: false)
+  }
+
+  func configure(
+    marker: DisplayMapMarker,
+    isSelected: Bool,
+    thumbnailStore: ThumbnailStore,
+    thumbnailContext: AppState.ThumbnailContext?
+  ) {
+    clusteringIdentifier = "immich-map-asset"
+    representedMarkerID = marker.id
+    cardView.update(
+      image: thumbnailStore.cachedImage(for: .mapThumbnailPlaceholder(for: marker), context: thumbnailContext, size: .thumbnail),
+      count: marker.count,
+      selected: isSelected
+    )
+
+    imageTask?.cancel()
+    imageTask = Task { @MainActor [weak self] in
+      let placeholder = AppState.PhotoItem.mapThumbnailPlaceholder(for: marker)
+      let image = await thumbnailStore.loadImage(for: placeholder, context: thumbnailContext, size: .thumbnail)
+      guard let self, self.representedMarkerID == marker.id else { return }
+      self.cardView.update(image: image, count: marker.count, selected: isSelected)
+    }
+  }
+
+  func setSelected(_ isSelected: Bool) {
+    let count = (annotation as? PhotoMapAnnotation)?.marker.count
+    cardView.update(image: cardViewImage, count: count, selected: isSelected)
+  }
+
+  private var cardViewImage: NSImage? {
+    cardView.subviews.compactMap { ($0 as? NSImageView)?.image }.first
+  }
+}
+
+private final class PhotoClusterAnnotationView: BasePhotoAnnotationView {
+  static let reuseIdentifier = "ImmichPhotoClusterAnnotationView"
+
+  private var imageTask: Task<Void, Never>?
+  private var representedClusterMemberIDs: [String] = []
+
+  override func prepareForReuse() {
+    super.prepareForReuse()
+    imageTask?.cancel()
+    imageTask = nil
+    representedClusterMemberIDs = []
+    clusteringIdentifier = nil
+    cardView.update(image: nil, count: nil, selected: false)
+  }
+
+  func configure(
+    _ cluster: MKClusterAnnotation,
+    thumbnailStore: ThumbnailStore,
+    thumbnailContext: AppState.ThumbnailContext?
+  ) {
+    let markers = cluster.memberAnnotations.compactMap { ($0 as? PhotoMapAnnotation)?.marker }
+    let representative = markers.first
+    representedClusterMemberIDs = markers.flatMap(\.members).map(\.id)
+    clusteringIdentifier = nil
+    let totalCount = markers.reduce(0) { $0 + $1.count }
+
+    if let representative {
+      cardView.update(
+        image: thumbnailStore.cachedImage(for: .mapThumbnailPlaceholder(for: representative), context: thumbnailContext, size: .thumbnail),
+        count: totalCount,
+        selected: false
+      )
+    } else {
+      cardView.update(image: nil, count: totalCount, selected: false)
     }
 
-    onPress?(annotation)
+    imageTask?.cancel()
+    guard let representative else { return }
+
+    imageTask = Task { @MainActor [weak self] in
+      let placeholder = AppState.PhotoItem.mapThumbnailPlaceholder(for: representative)
+      let image = await thumbnailStore.loadImage(for: placeholder, context: thumbnailContext, size: .thumbnail)
+      guard let self, self.representedClusterMemberIDs == markers.flatMap(\.members).map(\.id) else { return }
+      self.cardView.update(image: image, count: totalCount, selected: false)
+    }
+  }
+
+  func setSelected(_ isSelected: Bool) {
+    cardView.update(image: cardViewImage, count: representedClusterMemberIDs.count, selected: isSelected)
+  }
+
+  private var cardViewImage: NSImage? {
+    cardView.subviews.compactMap { ($0 as? NSImageView)?.image }.first
   }
 }
 #endif

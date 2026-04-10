@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 
 private let photoGridCoordinateSpace = "ImmichPhotoGrid"
+private let libraryTopAnchorID = "ImmichLibraryTopAnchor"
 
 private struct PhotoGridItemFramePreferenceKey: PreferenceKey {
   static let defaultValue: [String: CGRect] = [:]
@@ -33,6 +34,8 @@ struct LibraryGridView: View {
   @State private var heroItemFrames: [String: CGRect] = [:]
   @State private var dragSelectionState: DragSelectionState?
   @State private var keyboardScrollTargetID: String?
+  @State private var pendingTimelineScrollToTop = false
+  @FocusState private var isKeyboardFocused: Bool
 
   private struct SpatialBucket: Hashable {
     let x: Int
@@ -67,9 +70,10 @@ struct LibraryGridView: View {
 
   // MARK: - Years Grid
 
-  private var yearsGrid: some View {
+  private func yearsGrid(scrollProxy: ScrollViewProxy) -> some View {
     let context = appState.thumbnailContext
-    return ScrollView {
+    return interactiveGridChrome(
+      ScrollView {
       LazyVGrid(columns: yearsGridColumns, spacing: 8) {
         ForEach(appState.libraryYearSections) { section in
           if let item = section.representativeItem ?? section.items.first {
@@ -102,24 +106,19 @@ struct LibraryGridView: View {
       }
       .padding(.horizontal, 8)
       .padding(.vertical, 8)
-    }
-    .overlay { scrubSelectionOverlay }
-    .coordinateSpace(name: photoGridCoordinateSpace)
-    .onTapGesture { appState.selectedItemID = nil }
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
-    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
-      heroItemFrames = frames
-      onHeroFramesChanged(frames)
-    }
+    },
+      clearSelection: { appState.selectedItemID = nil }
+    )
     .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
   }
 
   // MARK: - Months Mosaic
 
-  private var monthsMosaic: some View {
+  private func monthsMosaic(scrollProxy: ScrollViewProxy) -> some View {
     let context = appState.thumbnailContext
     let sections = appState.librarySections
-    return ScrollView {
+    return interactiveGridChrome(
+      ScrollView {
       LazyVStack(alignment: .leading, spacing: 16) {
         ForEach(sections) { section in
           VStack(alignment: .leading, spacing: 8) {
@@ -153,15 +152,9 @@ struct LibraryGridView: View {
       }
       .padding(.horizontal, 8)
       .padding(.vertical, 8)
-    }
-    .overlay { scrubSelectionOverlay }
-    .coordinateSpace(name: photoGridCoordinateSpace)
-    .onTapGesture { appState.selectedItemID = nil }
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
-    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
-      heroItemFrames = frames
-      onHeroFramesChanged(frames)
-    }
+    },
+      clearSelection: { appState.selectedItemID = nil }
+    )
     .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
   }
 
@@ -265,19 +258,25 @@ struct LibraryGridView: View {
             emptyView
           }
         } else if isLibraryTimeline && appState.timelineViewMode == .years {
-          yearsGrid
+          yearsGrid(scrollProxy: proxy)
         } else if isLibraryTimeline && appState.timelineViewMode == .months {
-          monthsMosaic
+          monthsMosaic(scrollProxy: proxy)
         } else {
-          flatGrid
+          flatGrid(scrollProxy: proxy)
         }
       }
-      .focusable()
-      .focusEffectDisabled()
       .animation(.easeInOut(duration: 0.25), value: appState.timelineViewMode)
       .onChange(of: appState.isMultiSelectMode) { _, isEnabled in
         if !isEnabled {
           dragSelectionState = nil
+        }
+      }
+      .onChange(of: appState.timelineViewMode) { previousMode, newMode in
+        guard isLibraryTimeline else { return }
+        guard previousMode != .allPhotos, newMode == .allPhotos else { return }
+        pendingTimelineScrollToTop = true
+        DispatchQueue.main.async {
+          isKeyboardFocused = true
         }
       }
       .onChange(of: keyboardScrollTargetID) { _, targetID in
@@ -290,19 +289,6 @@ struct LibraryGridView: View {
             keyboardScrollTargetID = nil
           }
         }
-      }
-      .onKeyPress(.leftArrow) { moveSelection(by: -1, shouldScrollIntoView: true); return .handled }
-      .onKeyPress(.rightArrow) { moveSelection(by: 1, shouldScrollIntoView: true); return .handled }
-      .onKeyPress(.upArrow) { moveSelectionVertically(.up, shouldScrollIntoView: true); return .handled }
-      .onKeyPress(.downArrow) { moveSelectionVertically(.down, shouldScrollIntoView: true); return .handled }
-      .onKeyPress(.return) {
-        guard !appState.isViewingPhoto else { return .ignored }
-        openSelected()
-        return .handled
-      }
-      .dropDestination(for: URL.self) { urls, _ in
-        appState.importFiles(urls)
-        return true
       }
     }
   }
@@ -331,6 +317,40 @@ struct LibraryGridView: View {
   private enum VerticalSelectionDirection {
     case up
     case down
+  }
+
+  private func interactiveGridChrome<Content: View>(
+    _ content: Content,
+    clearSelection: @escaping () -> Void
+  ) -> some View {
+    content
+      .focusable()
+      .focused($isKeyboardFocused)
+      .focusEffectDisabled()
+      .overlay { scrubSelectionOverlay }
+      .coordinateSpace(name: photoGridCoordinateSpace)
+      .onTapGesture {
+        clearSelection()
+        isKeyboardFocused = true
+      }
+      .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
+      .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
+        heroItemFrames = frames
+        onHeroFramesChanged(frames)
+      }
+      .onKeyPress(.leftArrow) { moveSelection(by: -1, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.rightArrow) { moveSelection(by: 1, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.upArrow) { moveSelectionVertically(.up, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.downArrow) { moveSelectionVertically(.down, shouldScrollIntoView: true); return .handled }
+      .onKeyPress(.return) {
+        guard !appState.isViewingPhoto else { return .ignored }
+        openSelected()
+        return .handled
+      }
+      .dropDestination(for: URL.self) { urls, _ in
+        appState.importFiles(urls)
+        return true
+      }
   }
 
   private func moveSelection(by offset: Int, shouldScrollIntoView: Bool = false) {
@@ -574,10 +594,15 @@ struct LibraryGridView: View {
 
   // MARK: - Flat Grid
 
-  private var flatGrid: some View {
+  private func flatGrid(scrollProxy: ScrollViewProxy) -> some View {
     let context = appState.thumbnailContext
     let selectedID = appState.selectedItemID
-    return ScrollView {
+    return interactiveGridChrome(
+      ScrollView {
+      Color.clear
+        .frame(height: 0)
+        .id(libraryTopAnchorID)
+
       LazyVGrid(columns: gridColumns, spacing: appState.photoGridSpacing) {
         ForEach(appState.filteredItems) { item in
           PhotoGridCell(
@@ -610,15 +635,21 @@ struct LibraryGridView: View {
       .padding(.horizontal, appState.photoGridPadding)
       .padding(.vertical, appState.photoGridPadding)
     }
-    .overlay { scrubSelectionOverlay }
-    .coordinateSpace(name: photoGridCoordinateSpace)
-    .onTapGesture { appState.selectedItemID = nil }
-    .onPreferenceChange(PhotoGridItemFramePreferenceKey.self) { updateItemFrames($0) }
-    .onPreferenceChange(PhotoHeroSourceFramePreferenceKey.self) { frames in
-      heroItemFrames = frames
-      onHeroFramesChanged(frames)
-    }
+    .onAppear {
+      isKeyboardFocused = true
+      guard pendingTimelineScrollToTop else { return }
+      scrollToMostRecent(using: scrollProxy)
+    },
+      clearSelection: { appState.selectedItemID = nil }
+    )
     .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+  }
+
+  private func scrollToMostRecent(using proxy: ScrollViewProxy) {
+    withAnimation(.easeInOut(duration: 0.22)) {
+      proxy.scrollTo(libraryTopAnchorID, anchor: .top)
+    }
+    pendingTimelineScrollToTop = false
   }
 
   // MARK: - Empty / Loading

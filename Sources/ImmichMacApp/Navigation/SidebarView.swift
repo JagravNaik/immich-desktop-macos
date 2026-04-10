@@ -226,7 +226,7 @@ struct SidebarView: View {
           Text(session.userEmail)
             .font(.caption)
             .foregroundStyle(.secondary)
-          Label(session.authenticationModeLabel, systemImage: session.usesAPIKey ? "key.fill" : "person.crop.circle.badge.checkmark")
+          Label(accountAuthenticationModeLabel, systemImage: accountAuthenticationModeIcon)
             .font(.caption2)
             .foregroundStyle(.tertiary)
         }
@@ -272,6 +272,20 @@ struct SidebarView: View {
       }
       .buttonStyle(.plain)
     }
+  }
+
+  private var accountAuthenticationModeLabel: String {
+    if appState.isOAuthSession {
+      return "OAuth"
+    }
+    return appState.currentSession?.authenticationModeLabel ?? "Password"
+  }
+
+  private var accountAuthenticationModeIcon: String {
+    if appState.isOAuthSession {
+      return "globe"
+    }
+    return appState.currentSession?.usesAPIKey == true ? "key.fill" : "person.crop.circle.badge.checkmark"
   }
 
   // MARK: - Status Bar

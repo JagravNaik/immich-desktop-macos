@@ -42,6 +42,16 @@ public struct ServerInfo: Decodable, Sendable {
   }
 }
 
+public struct VersionCheckState: Decodable, Sendable {
+  public let checkedAt: String?
+  public let releaseVersion: String?
+
+  public init(checkedAt: String? = nil, releaseVersion: String? = nil) {
+    self.checkedAt = checkedAt
+    self.releaseVersion = releaseVersion
+  }
+}
+
 public struct ServerLoginConfiguration: Sendable {
   public let isInitialized: Bool
   public let isOnboarded: Bool

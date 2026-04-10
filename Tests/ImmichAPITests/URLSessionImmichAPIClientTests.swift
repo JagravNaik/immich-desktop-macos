@@ -53,6 +53,33 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertEqual(info.repository, "immich-app/immich")
   }
 
+  func testFetchVersionCheckStateUsesAuthorizedVersionCheckEndpoint() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/server/version-check")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "secret")
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"checkedAt":"2026-04-07T17:04:00.000Z","releaseVersion":"v1.133.0"}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      apiKey: "secret",
+      isAdmin: true,
+      shouldChangePassword: false,
+      userEmail: "admin@example.com",
+      userID: "admin-1",
+      userName: "Admin"
+    )
+
+    let state = try await client.fetchVersionCheckState(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session
+    )
+
+    XCTAssertEqual(state.checkedAt, "2026-04-07T17:04:00.000Z")
+    XCTAssertEqual(state.releaseVersion, "v1.133.0")
+  }
+
   func testFetchLoginConfigurationLoadsServerFeaturesAndConfig() async throws {
     let client = URLSessionImmichAPIClient(session: makeSession { request in
       let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!

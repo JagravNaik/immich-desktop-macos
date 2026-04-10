@@ -12,6 +12,7 @@ protocol ImmichWebSocketDelegate: AnyObject {
   func webSocketDidReceiveAssetDelete(assetID: String)
   func webSocketDidReceiveAssetTrash(assetIDs: [String])
   func webSocketDidReceiveAssetRestore(assetIDs: [String])
+  func webSocketDidReceiveReleaseNotification(releaseVersion: String, serverVersion: String?)
 }
 
 final class ImmichWebSocketService: NSObject, @unchecked Sendable {
@@ -184,6 +185,15 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
       }
     case "on_session_delete":
       immichLog("[WebSocket] Session deleted by server")
+    case "on_new_release":
+      if let payload = eventData as? [String: Any],
+         let releaseVersion = payload["releaseVersion"] as? String {
+        let serverVersion = payload["serverVersion"] as? String
+        delegate?.webSocketDidReceiveReleaseNotification(
+          releaseVersion: releaseVersion,
+          serverVersion: serverVersion
+        )
+      }
     default:
       break
     }
