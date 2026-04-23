@@ -324,6 +324,551 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.isPeeking)
   }
 
+  // MARK: - Auth Flow Tests
+
+  @MainActor
+  func testSignOutResetsStateToLoginPhase() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    XCTAssertEqual(appState.appPhase, .library)
+    XCTAssertNotNil(appState.currentSession)
+
+    appState.signOut()
+
+    XCTAssertEqual(appState.appPhase, .login)
+    XCTAssertNil(appState.currentSession)
+    XCTAssertTrue(appState.libraryItems.isEmpty)
+    XCTAssertTrue(appState.albums.isEmpty)
+    XCTAssertFalse(appState.isOAuthSession)
+    XCTAssertTrue(appState.passwordText.isEmpty)
+    XCTAssertTrue(appState.apiKeyText.isEmpty)
+    XCTAssertFalse(appState.showVersionAnnouncement)
+  }
+
+  @MainActor
+  func testChangeServerResetsToServerSetupPhase() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    appState.changeServer()
+
+    XCTAssertEqual(appState.appPhase, .serverSetup)
+    XCTAssertNil(appState.currentSession)
+    XCTAssertTrue(appState.serverURLText.isEmpty)
+    XCTAssertTrue(appState.emailText.isEmpty)
+    XCTAssertTrue(appState.passwordText.isEmpty)
+    XCTAssertTrue(appState.apiKeyText.isEmpty)
+    XCTAssertNil(appState.connectedServerVersion)
+    XCTAssertNil(appState.connectedServerDisplayURL)
+    XCTAssertEqual(appState.statusText, "Enter your Immich server URL to continue.")
+  }
+
+  @MainActor
+  func testConnectWithInvalidURLSetsStatusText() async {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.serverURLText = "not-a-url"
+
+    await appState.connect()
+
+    XCTAssertEqual(appState.statusText, "Invalid server URL")
+  }
+
+  @MainActor
+  func testSignInWithEmptyEmailSetsStatusText() async {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.serverURLText = "https://demo.example"
+    await appState.connect()
+
+    appState.emailText = ""
+    appState.passwordText = "password"
+    await appState.signIn()
+
+    XCTAssertEqual(appState.statusText, "Enter your email address.")
+    XCTAssertEqual(appState.appPhase, .login)
+  }
+
+  @MainActor
+  func testSignInWithEmptyPasswordSetsStatusText() async {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.serverURLText = "https://demo.example"
+    await appState.connect()
+
+    appState.emailText = "test@example.com"
+    appState.passwordText = ""
+    await appState.signIn()
+
+    XCTAssertEqual(appState.statusText, "Enter your password.")
+    XCTAssertEqual(appState.appPhase, .login)
+  }
+
+  @MainActor
+  func testSignInWithEmptyAPIKeySetsStatusText() async {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.serverURLText = "https://demo.example"
+    await appState.connect()
+
+    appState.apiKeyText = ""
+    await appState.signInWithAPIKey()
+
+    XCTAssertEqual(appState.statusText, "Enter an API key.")
+    XCTAssertEqual(appState.appPhase, .login)
+  }
+
+  @MainActor
+  func testPasswordSignInSucceeds() async {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.serverURLText = "https://demo.example"
+    await appState.connect()
+
+    appState.emailText = "demo@immich.app"
+    appState.passwordText = "demo"
+    await appState.signIn()
+
+    XCTAssertEqual(appState.appPhase, .library)
+    XCTAssertEqual(appState.currentSession?.userEmail, "demo@immich.app")
+    XCTAssertEqual(appState.currentSession?.userName, "Test User")
+  }
+
+  // MARK: - Trash & Restore Tests
+
+  @MainActor
+  func testTrashItemRemovesFromAllCollections() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "trash-1")
+
+    appState.libraryItems = [item]
+    appState.activeAlbumItems = [item]
+    appState.activePersonItems = [item]
+    appState.rebuildLibrarySections()
+
+    appState.trashItem("trash-1")
+
+    XCTAssertTrue(appState.libraryItems.isEmpty)
+    XCTAssertTrue(appState.activeAlbumItems.isEmpty)
+    XCTAssertTrue(appState.activePersonItems.isEmpty)
+  }
+
+  @MainActor
+  func testTrashSelectedItemDeselectsIt() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item1 = makePhotoItem(id: "keep-1")
+    let item2 = makePhotoItem(id: "trash-2")
+
+    appState.libraryItems = [item1, item2]
+    appState.selectedItemID = "trash-2"
+    appState.isViewingPhoto = true
+
+    appState.trashItem("trash-2")
+
+    XCTAssertNotEqual(appState.selectedItemID, "trash-2")
+    XCTAssertFalse(appState.isViewingPhoto)
+  }
+
+  @MainActor
+  func testRestoreItemMovesFromTrashToLibrary() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "restore-1")
+
+    appState.trashedItems = [item]
+    appState.libraryItems = []
+
+    appState.restoreItem("restore-1")
+
+    XCTAssertTrue(appState.trashedItems.isEmpty)
+    XCTAssertEqual(appState.libraryItems.count, 1)
+    XCTAssertEqual(appState.libraryItems.first?.id, "restore-1")
+  }
+
+  // MARK: - Album CRUD Tests
+
+  @MainActor
+  func testCreateAlbumInsertsAtFront() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.createAlbum(name: "Test Album", description: "A test")
+
+    XCTAssertEqual(appState.albums.count, 1)
+    XCTAssertEqual(appState.albums.first?.albumName, "Test Album")
+  }
+
+  @MainActor
+  func testDeleteAlbumRemovesAndUnpins() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.createAlbum(name: "To Delete")
+    let albumID = appState.albums.first!.id
+    appState.pinnedAlbumIDs.insert(albumID)
+
+    await appState.deleteAlbum(albumID)
+
+    XCTAssertTrue(appState.albums.isEmpty)
+    XCTAssertFalse(appState.pinnedAlbumIDs.contains(albumID))
+  }
+
+  @MainActor
+  func testDeleteActiveAlbumNavigatesToAllAlbums() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.createAlbum(name: "Active Album")
+    let albumID = appState.albums.first!.id
+    appState.activeAlbumID = albumID
+    appState.sidebarSelection = .album(id: albumID)
+
+    await appState.deleteAlbum(albumID)
+
+    XCTAssertNil(appState.activeAlbumID)
+    XCTAssertTrue(appState.activeAlbumItems.isEmpty)
+    XCTAssertEqual(appState.sidebarSelection, .allAlbums)
+  }
+
+  @MainActor
+  func testRenameAlbumUpdatesName() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.createAlbum(name: "Old Name")
+    let albumID = appState.albums.first!.id
+
+    await appState.renameAlbum(albumID, newName: "New Name")
+
+    XCTAssertEqual(appState.albums.first?.albumName, "New Name")
+  }
+
+  // MARK: - Multi-Select Tests
+
+  @MainActor
+  func testToggleItemSelectionAddsAndRemoves() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+
+    appState.toggleItemSelection("item-1")
+    XCTAssertTrue(appState.selectedItemIDs.contains("item-1"))
+
+    appState.toggleItemSelection("item-1")
+    XCTAssertFalse(appState.selectedItemIDs.contains("item-1"))
+  }
+
+  @MainActor
+  func testSelectAllItemsSelectsAllFilteredItems() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.libraryItems = [
+      makePhotoItem(id: "a"),
+      makePhotoItem(id: "b"),
+      makePhotoItem(id: "c"),
+    ]
+    appState.sidebarSelection = .library
+
+    appState.selectAllItems()
+
+    XCTAssertEqual(appState.selectedItemIDs, ["a", "b", "c"])
+    XCTAssertTrue(appState.allItemsSelected)
+  }
+
+  @MainActor
+  func testDeselectAllItemsClearsSelection() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.selectedItemIDs = ["a", "b"]
+
+    appState.deselectAllItems()
+
+    XCTAssertTrue(appState.selectedItemIDs.isEmpty)
+  }
+
+  @MainActor
+  func testBatchTrashRemovesAndClearsSelection() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    appState.libraryItems = [
+      makePhotoItem(id: "keep"),
+      makePhotoItem(id: "trash-a"),
+      makePhotoItem(id: "trash-b"),
+    ]
+    appState.selectedItemIDs = ["trash-a", "trash-b"]
+    appState.isMultiSelectMode = true
+
+    appState.batchTrash()
+
+    XCTAssertEqual(appState.libraryItems.count, 1)
+    XCTAssertEqual(appState.libraryItems.first?.id, "keep")
+    XCTAssertTrue(appState.selectedItemIDs.isEmpty)
+  }
+
+  @MainActor
+  func testSetItemSelectionAddAndRemove() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+
+    appState.setItemSelection("item-1", isSelected: true)
+    XCTAssertTrue(appState.selectedItemIDs.contains("item-1"))
+
+    appState.setItemSelection("item-1", isSelected: false)
+    XCTAssertFalse(appState.selectedItemIDs.contains("item-1"))
+  }
+
+  // MARK: - Search State Tests
+
+  @MainActor
+  func testPerformSearchEmptyQueryClearsResults() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.searchResults = [makePhotoItem(id: "old-result")]
+    appState.isSearching = true
+    appState.searchTotalCount = 5
+
+    appState.performSearch(query: "")
+
+    XCTAssertTrue(appState.searchResults.isEmpty)
+    XCTAssertFalse(appState.isSearching)
+    XCTAssertEqual(appState.searchTotalCount, 0)
+    XCTAssertNil(appState.searchError)
+  }
+
+  @MainActor
+  func testResetSearchStateClearsAll() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.searchResults = [makePhotoItem(id: "r")]
+    appState.isSearching = true
+    appState.searchTotalCount = 10
+    appState.searchError = "Something"
+    appState.searchNextPage = "next"
+
+    appState.resetSearchState()
+
+    XCTAssertTrue(appState.searchResults.isEmpty)
+    XCTAssertFalse(appState.isSearching)
+    XCTAssertEqual(appState.searchTotalCount, 0)
+    XCTAssertNil(appState.searchError)
+    XCTAssertNil(appState.searchNextPage)
+  }
+
+  @MainActor
+  func testSaveRecentSearchDeduplicatesAndCaps() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    for i in 0..<12 {
+      appState.saveRecentSearch("query-\(i)")
+    }
+
+    XCTAssertEqual(appState.recentSearches.count, 10)
+    XCTAssertEqual(appState.recentSearches.first, "query-11")
+
+    // Saving a duplicate moves it to front
+    appState.saveRecentSearch("query-5")
+    XCTAssertEqual(appState.recentSearches.first, "query-5")
+    XCTAssertEqual(appState.recentSearches.count, 10)
+  }
+
+  @MainActor
+  func testClearRecentSearchesRemovesAll() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.saveRecentSearch("test")
+    XCTAssertFalse(appState.recentSearches.isEmpty)
+
+    appState.clearRecentSearches()
+
+    XCTAssertTrue(appState.recentSearches.isEmpty)
+  }
+
+  // MARK: - Library Section Tests
+
+  @MainActor
+  func testRebuildLibrarySectionsGroupsByTimeBucket() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.libraryItems = [
+      makePhotoItem(id: "a", timeBucketKey: "2026-03-01"),
+      makePhotoItem(id: "b", timeBucketKey: "2026-03-01"),
+      makePhotoItem(id: "c", timeBucketKey: "2026-02-01"),
+    ]
+
+    appState.rebuildLibrarySections()
+
+    XCTAssertEqual(appState.librarySections.count, 2)
+    XCTAssertEqual(appState.librarySections.first?.id, "2026-03-01")
+    XCTAssertEqual(appState.librarySections.first?.items.count, 2)
+    XCTAssertEqual(appState.librarySections.last?.id, "2026-02-01")
+    XCTAssertEqual(appState.librarySections.last?.items.count, 1)
+  }
+
+  // MARK: - Filtered Items Tests
+
+  @MainActor
+  func testFilteredItemsForFavorites() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.libraryItems = [
+      makePhotoItem(id: "fav", isFavorite: true),
+      makePhotoItem(id: "nope", isFavorite: false),
+    ]
+    appState.sidebarSelection = .favorites
+
+    XCTAssertEqual(appState.filteredItems.count, 1)
+    XCTAssertEqual(appState.filteredItems.first?.id, "fav")
+  }
+
+  @MainActor
+  func testFilteredItemsForVideos() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.libraryItems = [
+      makePhotoItem(id: "vid", isVideo: true),
+      makePhotoItem(id: "photo"),
+    ]
+    appState.sidebarSelection = .videos
+
+    XCTAssertEqual(appState.filteredItems.count, 1)
+    XCTAssertEqual(appState.filteredItems.first?.id, "vid")
+  }
+
+  @MainActor
+  func testFilteredItemsForRecentlyDeleted() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.trashedItems = [makePhotoItem(id: "trashed")]
+    appState.libraryItems = [makePhotoItem(id: "normal")]
+    appState.sidebarSelection = .recentlyDeleted
+
+    XCTAssertEqual(appState.filteredItems.count, 1)
+    XCTAssertEqual(appState.filteredItems.first?.id, "trashed")
+  }
+
+  // MARK: - Version Announcement Tests
+
+  @MainActor
+  func testVersionAnnouncementHiddenForPatchOnlyUpdate() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setVersionCheckState(VersionCheckState(checkedAt: nil, releaseVersion: "v1.132.5"))
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.refreshVersionAnnouncement()
+
+    XCTAssertFalse(appState.showVersionAnnouncement)
+  }
+
+  @MainActor
+  func testDismissVersionAnnouncementHidesAndClears() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setVersionCheckState(VersionCheckState(checkedAt: nil, releaseVersion: "v1.133.0"))
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    await appState.refreshVersionAnnouncement()
+    XCTAssertTrue(appState.showVersionAnnouncement)
+
+    appState.dismissVersionAnnouncement()
+
+    XCTAssertFalse(appState.showVersionAnnouncement)
+    XCTAssertNil(appState.availableReleaseVersion)
+  }
+
+  // MARK: - Pinning Tests
+
+  @MainActor
+  func testTogglePinAlbumAddsAndRemoves() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+
+    appState.togglePinAlbum("album-1")
+    XCTAssertTrue(appState.pinnedAlbumIDs.contains("album-1"))
+
+    appState.togglePinAlbum("album-1")
+    XCTAssertFalse(appState.pinnedAlbumIDs.contains("album-1"))
+  }
+
+  @MainActor
+  func testPinnedAlbumsFiltersCorrectly() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    await appState.createAlbum(name: "Pinned Album")
+    await appState.createAlbum(name: "Not Pinned")
+    let pinnedID = appState.albums.first(where: { $0.albumName == "Pinned Album" })!.id
+
+    appState.togglePinAlbum(pinnedID)
+
+    XCTAssertEqual(appState.pinnedAlbums.count, 1)
+    XCTAssertEqual(appState.pinnedAlbums.first?.albumName, "Pinned Album")
+  }
+
+  // MARK: - PhotoItem Computed Property Tests
+
+  func testPhotoItemIsPanoramaWithEquirectangularProjection() {
+    let item = AppState.PhotoItem(
+      id: "pano-1", source: .remoteAsset(id: "pano-1"), title: "Panorama",
+      date: Date(), isFavorite: false, isVideo: false, isImported: false,
+      livePhotoVideoID: nil, latitude: nil, longitude: nil, durationText: nil,
+      city: nil, country: nil, stackCount: nil, timeBucketKey: "2026-03-01",
+      projectionType: "EQUIRECTANGULAR", aspectRatio: 1.5
+    )
+    XCTAssertTrue(item.isPanorama)
+  }
+
+  func testPhotoItemIsPanoramaWithWideAspectRatio() {
+    let item = AppState.PhotoItem(
+      id: "wide-1", source: .remoteAsset(id: "wide-1"), title: "Wide",
+      date: Date(), isFavorite: false, isVideo: false, isImported: false,
+      livePhotoVideoID: nil, latitude: nil, longitude: nil, durationText: nil,
+      city: nil, country: nil, stackCount: nil, timeBucketKey: "2026-03-01",
+      projectionType: nil, aspectRatio: 2.5
+    )
+    XCTAssertTrue(item.isPanorama)
+  }
+
+  func testPhotoItemIsNotPanoramaForWideVideo() {
+    let item = AppState.PhotoItem(
+      id: "vid-wide", source: .remoteAsset(id: "vid-wide"), title: "Wide Video",
+      date: Date(), isFavorite: false, isVideo: true, isImported: false,
+      livePhotoVideoID: nil, latitude: nil, longitude: nil, durationText: "0:30",
+      city: nil, country: nil, stackCount: nil, timeBucketKey: "2026-03-01",
+      projectionType: nil, aspectRatio: 2.5
+    )
+    XCTAssertFalse(item.isPanorama)
+  }
+
+  func testPhotoItemTimeLabelReturnsVideoDuration() {
+    let video = makePhotoItem(id: "vid-1", isVideo: true)
+    XCTAssertEqual(video.timeLabel, "0:03")
+
+    let photo = makePhotoItem(id: "photo-1")
+    XCTAssertEqual(photo.timeLabel, "")
+  }
+
+  func testPhotoItemGridAspectRatioFallbackForNaN() {
+    let item = AppState.PhotoItem(
+      id: "bad", source: .remoteAsset(id: "bad"), title: "Bad",
+      date: Date(), isFavorite: false, isVideo: false, isImported: false,
+      livePhotoVideoID: nil, latitude: nil, longitude: nil, durationText: nil,
+      city: nil, country: nil, stackCount: nil, timeBucketKey: "2026-03-01",
+      projectionType: nil, aspectRatio: .nan
+    )
+    XCTAssertEqual(item.gridAspectRatio, 1)
+  }
+
+  func testPhotoItemIsLivePhotoWhenVideoIDPresent() {
+    let live = makePhotoItem(id: "live", livePhotoVideoID: "vid")
+    XCTAssertTrue(live.isLivePhoto)
+
+    let normal = makePhotoItem(id: "normal")
+    XCTAssertFalse(normal.isLivePhoto)
+  }
+
+  // MARK: - Empty / Status Text Tests
+
+  @MainActor
+  func testEmptyStateTitleForSearchWithNoResults() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.searchText = "missing"
+    appState.sidebarSelection = .library
+
+    XCTAssertEqual(appState.emptyStateTitle, "No Results")
+  }
+
+  @MainActor
+  func testEmptyStateTitleForEmptyTrash() {
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.sidebarSelection = .recentlyDeleted
+
+    XCTAssertEqual(appState.emptyStateTitle, "Trash is empty")
+  }
+
+  // MARK: - Helpers
+
   @MainActor
   private func makeSignedInState(apiClient: MockImmichAPIClient) async throws -> AppState {
     let appState = AppState(apiClient: apiClient)
@@ -343,7 +888,8 @@ final class AppStateTests: XCTestCase {
     id: String,
     isFavorite: Bool = false,
     isVideo: Bool = false,
-    livePhotoVideoID: String? = nil
+    livePhotoVideoID: String? = nil,
+    timeBucketKey: String = "2026-03-01"
   ) -> AppState.PhotoItem {
     AppState.PhotoItem(
       id: id,
@@ -360,7 +906,7 @@ final class AppStateTests: XCTestCase {
       city: nil,
       country: nil,
       stackCount: nil,
-      timeBucketKey: "2026-03-01",
+      timeBucketKey: timeBucketKey,
       projectionType: nil,
       aspectRatio: 1.5
     )
@@ -492,6 +1038,17 @@ private actor MockImmichAPIClient: ImmichAPIClient {
       userEmail: "tester@example.com",
       userID: "user-1",
       userName: "API Tester"
+    )
+  }
+
+  func resumeSession(server: ImmichServer, accessToken: String) async throws -> UserSession {
+    UserSession(
+      accessToken: accessToken,
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "tester@example.com",
+      userID: "user-1",
+      userName: "Resumed User"
     )
   }
 

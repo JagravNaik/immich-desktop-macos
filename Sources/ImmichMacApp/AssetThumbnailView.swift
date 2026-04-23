@@ -641,7 +641,7 @@ struct AssetThumbnailView: View {
       if cached != nil || loaded == nil {
         imageOpacity = 1
       } else {
-        withAnimation(.easeIn(duration: 0.2)) {
+        withAnimation(ImmichMotion.Curves.structuralShort) {
           imageOpacity = 1
         }
       }

@@ -58,6 +58,15 @@ private final class OAuthSessionCoordinator: @unchecked Sendable {
 
 @MainActor
 final class AppState: ObservableObject {
+  private enum StoredCredential {
+    static let accessTokenAccount = "immich.accessToken"
+    static let passwordAccount = "immich.password"
+    static let apiKeyAccount = "immich.apiKey"
+    static let authMethodKey = "immich.authMethod"
+    static let serverURLKey = "immich.serverURL"
+    static let emailKey = "immich.email"
+    static let oauthSessionKey = "immich.oauthSession"
+  }
 
   // MARK: - App Phase
 
@@ -147,10 +156,10 @@ final class AppState: ObservableObject {
   // Phase & Auth
   @Published var appPhase: AppPhase = AppState.initialAppPhase()
   @Published var authMethod: AuthMethod = AppState.initialAuthMethod()
-  @Published var serverURLText = UserDefaults.standard.string(forKey: "immich.serverURL") ?? ""
-  @Published var emailText = UserDefaults.standard.string(forKey: "immich.email") ?? ""
-  @Published var passwordText = (try? KeychainHelper.load(account: "immich.password")) ?? ""
-  @Published var apiKeyText = (try? KeychainHelper.load(account: "immich.apiKey")) ?? ""
+  @Published var serverURLText = UserDefaults.standard.string(forKey: StoredCredential.serverURLKey) ?? ""
+  @Published var emailText = UserDefaults.standard.string(forKey: StoredCredential.emailKey) ?? ""
+  @Published var passwordText = ""
+  @Published var apiKeyText = (try? KeychainHelper.load(account: StoredCredential.apiKeyAccount)) ?? ""
   @Published var statusText = "Enter your Immich server URL to continue."
   @Published var isConnecting = false
   @Published var isSigningIn = false
@@ -164,7 +173,7 @@ final class AppState: ObservableObject {
   @Published var availableReleaseServerVersion: String?
   @Published var showVersionAnnouncement = false
   @Published var currentSession: UserSession?
-  @Published var isOAuthSession = false
+  @Published var isOAuthSession = UserDefaults.standard.bool(forKey: StoredCredential.oauthSessionKey)
 
   // Navigation
   @Published var sidebarSelection: SidebarDestination? = .library
@@ -518,7 +527,7 @@ final class AppState: ObservableObject {
   }
 
   func dismissUploadNotification() {
-    withAnimation(.easeOut(duration: 0.25)) {
+    withAnimation(ImmichMotion.Curves.structuralMedium) {
       uploadNotification = nil
     }
   }
@@ -590,11 +599,11 @@ final class AppState: ObservableObject {
   // MARK: - Init
 
   private static func initialAuthMethod() -> AuthMethod {
-    if let rawValue = UserDefaults.standard.string(forKey: "immich.authMethod"),
+    if let rawValue = UserDefaults.standard.string(forKey: StoredCredential.authMethodKey),
        let method = AuthMethod(rawValue: rawValue) {
       return method
     }
-    if let savedKey = try? KeychainHelper.load(account: "immich.apiKey"), !savedKey.isEmpty {
+    if let savedKey = try? KeychainHelper.load(account: StoredCredential.apiKeyAccount), !savedKey.isEmpty {
       return .apiKey
     }
     return .password
@@ -608,16 +617,84 @@ final class AppState: ObservableObject {
   }
 
   private static func initialAppPhase() -> AppPhase {
-    let hasSavedServer = UserDefaults.standard.string(forKey: "immich.serverURL") != nil
-    let hasSavedPasswordLogin =
-      UserDefaults.standard.string(forKey: "immich.email") != nil &&
-      ((try? KeychainHelper.load(account: "immich.password"))?.isEmpty == false)
-    let hasSavedAPIKey = (try? KeychainHelper.load(account: "immich.apiKey"))?.isEmpty == false
+    let hasSavedServer = UserDefaults.standard.string(forKey: StoredCredential.serverURLKey) != nil
+    let hasSavedAccessToken = (try? KeychainHelper.load(account: StoredCredential.accessTokenAccount))?.isEmpty == false
+    let hasSavedAPIKey = (try? KeychainHelper.load(account: StoredCredential.apiKeyAccount))?.isEmpty == false
 
-    if hasSavedServer && (hasSavedPasswordLogin || hasSavedAPIKey) {
+    if hasSavedServer && (hasSavedAccessToken || hasSavedAPIKey) {
       return .launching
     }
     return .serverSetup
+  }
+
+  private func loadStoredCredential(account: String) -> String? {
+    guard let value = try? KeychainHelper.load(account: account), !value.isEmpty else {
+      return nil
+    }
+    return value
+  }
+
+  private func clearStoredCredentials() {
+    for account in [
+      StoredCredential.accessTokenAccount,
+      StoredCredential.passwordAccount,
+      StoredCredential.apiKeyAccount,
+    ] {
+      do {
+        try KeychainHelper.delete(account: account)
+      } catch {
+        immichLog("[Auth] Failed to delete \(account) from keychain: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  private func persistPasswordSession(_ session: UserSession, email: String, isOAuth: Bool) {
+    authMethod = .password
+    isOAuthSession = isOAuth
+    UserDefaults.standard.set(AuthMethod.password.rawValue, forKey: StoredCredential.authMethodKey)
+    UserDefaults.standard.set(email, forKey: StoredCredential.emailKey)
+    UserDefaults.standard.set(isOAuth, forKey: StoredCredential.oauthSessionKey)
+
+    do {
+      try KeychainHelper.save(account: StoredCredential.accessTokenAccount, password: session.accessToken)
+      try? KeychainHelper.delete(account: StoredCredential.passwordAccount)
+      try? KeychainHelper.delete(account: StoredCredential.apiKeyAccount)
+    } catch {
+      immichLog("[Auth] Failed to save access token to keychain: \(error.localizedDescription)")
+    }
+  }
+
+  private func persistAPIKeySession(apiKey: String, userEmail: String?) {
+    authMethod = .apiKey
+    isOAuthSession = false
+    UserDefaults.standard.set(AuthMethod.apiKey.rawValue, forKey: StoredCredential.authMethodKey)
+    UserDefaults.standard.set(false, forKey: StoredCredential.oauthSessionKey)
+
+    do {
+      try KeychainHelper.save(account: StoredCredential.apiKeyAccount, password: apiKey)
+      try? KeychainHelper.delete(account: StoredCredential.accessTokenAccount)
+      try? KeychainHelper.delete(account: StoredCredential.passwordAccount)
+    } catch {
+      immichLog("[Auth] Failed to save API key to keychain: \(error.localizedDescription)")
+    }
+
+    if let userEmail, !userEmail.isEmpty {
+      UserDefaults.standard.set(userEmail, forKey: StoredCredential.emailKey)
+      emailText = userEmail
+    }
+  }
+
+  private func restorePasswordSession(server: ImmichServer, accessToken: String) async throws {
+    let session = try await apiClient.resumeSession(server: server, accessToken: accessToken)
+    currentSession = session
+    emailText = session.userEmail
+    authMethod = .password
+    isOAuthSession = UserDefaults.standard.bool(forKey: StoredCredential.oauthSessionKey)
+    resetLibraryState()
+    hasAdminAccess = session.isAdmin
+    appPhase = .library
+    statusText = "Signed in as \(session.userName)"
+    await loadInitialData()
   }
 
   init(apiClient: any ImmichAPIClient = URLSessionImmichAPIClient()) {
@@ -649,7 +726,7 @@ final class AppState: ObservableObject {
       passwordLoginEnabled = config.passwordLoginEnabled
       oauthEnabled = config.oauthEnabled
       oauthButtonText = config.oauthButtonText.isEmpty ? "OAuth" : config.oauthButtonText
-      UserDefaults.standard.set(trimmed, forKey: "immich.serverURL")
+      UserDefaults.standard.set(trimmed, forKey: StoredCredential.serverURLKey)
       appPhase = .login
       statusText = "Connected • Immich \(info.version)"
     } catch {
@@ -669,15 +746,7 @@ final class AppState: ObservableObject {
     do {
       let session = try await apiClient.login(server: connectedServer, email: trimmedEmail, password: passwordText)
       emailText = trimmedEmail
-      authMethod = .password
-      isOAuthSession = false
-      UserDefaults.standard.set(AuthMethod.password.rawValue, forKey: "immich.authMethod")
-      UserDefaults.standard.set(trimmedEmail, forKey: "immich.email")
-      do {
-        try KeychainHelper.save(account: "immich.password", password: passwordText)
-      } catch {
-        immichLog("[Auth] Failed to save password to keychain: \(error.localizedDescription)")
-      }
+      persistPasswordSession(session, email: trimmedEmail, isOAuth: false)
       currentSession = session
       resetLibraryState()
       hasAdminAccess = session.isAdmin
@@ -702,18 +771,10 @@ final class AppState: ObservableObject {
 
     do {
       let session = try await apiClient.loginWithAPIKey(server: connectedServer, apiKey: trimmedKey)
-      authMethod = .apiKey
-      isOAuthSession = false
-      UserDefaults.standard.set(AuthMethod.apiKey.rawValue, forKey: "immich.authMethod")
-      do {
-        try KeychainHelper.save(account: "immich.apiKey", password: trimmedKey)
-      } catch {
-        immichLog("[Auth] Failed to save API key to keychain: \(error.localizedDescription)")
-      }
-      if session.userEmail != "API key session" {
-        UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
-        emailText = session.userEmail
-      }
+      persistAPIKeySession(
+        apiKey: trimmedKey,
+        userEmail: session.userEmail != "API key session" ? session.userEmail : nil
+      )
       currentSession = session
       resetLibraryState()
       hasAdminAccess = session.isAdmin
@@ -734,11 +795,18 @@ final class AppState: ObservableObject {
         return
       }
 
-      if authMethod == .apiKey, apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+      if authMethod == .apiKey, let storedAPIKey = loadStoredCredential(account: StoredCredential.apiKeyAccount) {
+        apiKeyText = storedAPIKey
         await signInWithAPIKey()
-      } else if emailText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
-                passwordText.isEmpty == false {
-        await signIn()
+      } else if let accessToken = loadStoredCredential(account: StoredCredential.accessTokenAccount),
+                let connectedServer {
+        do {
+          try await restorePasswordSession(server: connectedServer, accessToken: accessToken)
+        } catch {
+          statusText = "Saved session expired. Please sign in again."
+          clearStoredCredentials()
+          appPhase = .login
+        }
       } else {
         appPhase = .login
       }
@@ -769,10 +837,9 @@ final class AppState: ObservableObject {
         let callbackURL = try await oauthSessionCoordinator.authenticate(url: url, callbackScheme: callbackScheme)
 
         let session = try await apiClient.finishOAuth(server: connectedServer, oauthCallbackUrl: callbackURL.absoluteString)
-        isOAuthSession = true
+        persistPasswordSession(session, email: session.userEmail, isOAuth: true)
         currentSession = session
         emailText = session.userEmail
-        UserDefaults.standard.set(session.userEmail, forKey: "immich.email")
         resetLibraryState()
         appPhase = .library
         statusText = "Signed in as \(session.userName)"
@@ -790,6 +857,9 @@ final class AppState: ObservableObject {
 
   func signOut() {
     webSocketService.disconnect()
+    clearStoredCredentials()
+    UserDefaults.standard.removeObject(forKey: StoredCredential.authMethodKey)
+    UserDefaults.standard.set(false, forKey: StoredCredential.oauthSessionKey)
     currentSession = nil
     isOAuthSession = false
     showVersionAnnouncement = false
@@ -804,6 +874,11 @@ final class AppState: ObservableObject {
 
   func changeServer() {
     webSocketService.disconnect()
+    clearStoredCredentials()
+    UserDefaults.standard.removeObject(forKey: StoredCredential.serverURLKey)
+    UserDefaults.standard.removeObject(forKey: StoredCredential.emailKey)
+    UserDefaults.standard.removeObject(forKey: StoredCredential.authMethodKey)
+    UserDefaults.standard.set(false, forKey: StoredCredential.oauthSessionKey)
     isWebSocketConnected = false
     uploadNotification = nil
     showVersionAnnouncement = false
@@ -815,6 +890,7 @@ final class AppState: ObservableObject {
     loginPageMessage = nil
     oauthEnabled = false
     passwordLoginEnabled = true
+    serverURLText = ""
     emailText = ""
     passwordText = ""
     apiKeyText = ""
@@ -1258,6 +1334,11 @@ final class AppState: ObservableObject {
     guard appPhase == .library, sidebarSelection == .library, searchText.isEmpty,
           canLoadMoreTimeline, !isLoadingTimeline, loadedTimelineBucketKeys.last == sectionID else { return }
     Task { await loadNextTimelinePage() }
+  }
+
+  func presentInfo(for itemID: String) {
+    selectedItemID = itemID
+    showInfoPopover = true
   }
 
   // MARK: - Item Actions
@@ -1782,13 +1863,13 @@ final class AppState: ObservableObject {
   }
 
   func zoomOutPhotoGrid() {
-    withAnimation(.easeInOut(duration: 0.22)) {
+    withAnimation(ImmichMotion.Curves.heroCollapse) {
       setPhotoGridScaleIndex(photoGridScaleIndex - 1)
     }
   }
 
   func zoomInPhotoGrid() {
-    withAnimation(.easeInOut(duration: 0.22)) {
+    withAnimation(ImmichMotion.Curves.heroCollapse) {
       setPhotoGridScaleIndex(photoGridScaleIndex + 1)
     }
   }
@@ -2087,7 +2168,7 @@ final class AppState: ObservableObject {
       if !isViewingLivePhoto && !forceTouchConsumed {
         forceTouchConsumed = true
         if isViewingPhoto {
-          withAnimation(.easeInOut(duration: 0.15)) {
+          withAnimation(ImmichMotion.Curves.interactiveFast) {
             isViewingLivePhoto = true
             isPeeking = false
           }
@@ -2095,7 +2176,7 @@ final class AppState: ObservableObject {
                   let item = libraryItems.first(where: { $0.id == hoveredID }),
                   item.livePhotoVideoID != nil {
           selectedItemID = hoveredID
-          withAnimation(.easeInOut(duration: 0.15)) {
+          withAnimation(ImmichMotion.Curves.interactiveFast) {
             isViewingLivePhoto = true
             isViewingPhoto = true
             isPeeking = true
@@ -2105,7 +2186,7 @@ final class AppState: ObservableObject {
     } else if pressure < 0.15 {
       forceTouchConsumed = false
       if isViewingLivePhoto {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(ImmichMotion.Curves.structuralShort) {
           isViewingLivePhoto = false
           if isPeeking {
             isViewingPhoto = false
@@ -2239,7 +2320,7 @@ final class AppState: ObservableObject {
         rebuildLibrarySections()
       }
 
-      withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+      withAnimation(ImmichMotion.Curves.uploadBannerSpring) {
         uploadNotification = UploadNotification(
           filename: item.fileURL.lastPathComponent,
           reason: error.localizedDescription,

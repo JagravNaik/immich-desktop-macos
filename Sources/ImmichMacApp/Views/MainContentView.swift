@@ -24,6 +24,7 @@ struct MainContentView: View {
   @StateObject var appState: AppState
   @StateObject private var thumbnailStore = ThumbnailStore()
   @StateObject private var editingPipeline = PhotoEditingPipeline()
+  @StateObject private var assetInfoPanelController = AssetInfoPanelController()
   @State private var spacebarMonitor: Any?
   @State private var heroTransition: HeroTransitionState?
   @State private var heroItemFrames: [String: CGRect] = [:]
@@ -101,7 +102,7 @@ struct MainContentView: View {
       heroItemFrames = [:]
       dismissViewer()
     }
-    .animation(.easeInOut(duration: 0.2), value: appState.sidebarSelection)
+    .animation(ImmichMotion.Curves.structuralShort, value: appState.sidebarSelection)
     .sheet(isPresented: $appState.showCreateAlbumSheet) {
       CreateAlbumSheet(appState: appState)
     }
@@ -157,13 +158,15 @@ struct MainContentView: View {
   @ViewBuilder
   private var detailArea: some View {
     ZStack {
-      detailBackgroundLayer
+      if shouldRenderBackgroundLayer {
+        detailBackgroundLayer
+      }
       detailOverlayLayer
       searchSuggestionsLayer
     }
     .background {
       Button("") {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+        withAnimation(ImmichMotion.Curves.searchSpring) {
           isSearchPresented = true
         }
       }
@@ -214,10 +217,17 @@ struct MainContentView: View {
     }
     .onChange(of: appState.selectedItemID) { _, newID in
       if newID != nil && isSearchPresented {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+        withAnimation(ImmichMotion.Curves.searchSpring) {
           isSearchPresented = false
         }
       }
+      syncAssetInfoPanel()
+    }
+    .onChange(of: appState.showInfoPopover) { _, _ in
+      syncAssetInfoPanel()
+    }
+    .onDisappear {
+      assetInfoPanelController.close()
     }
   }
 
@@ -248,7 +258,7 @@ struct MainContentView: View {
 
   @ViewBuilder
   private var detailOverlayLayer: some View {
-    if shouldPresentViewer, let item = appState.selectedItem {
+    if shouldRenderViewerContent, let item = appState.selectedItem {
       PhotoDetailView(
         appState: appState,
         thumbnailStore: thumbnailStore,
@@ -303,6 +313,17 @@ struct MainContentView: View {
 
   private var shouldPresentViewer: Bool {
     appState.isViewingPhoto || heroTransition != nil
+  }
+
+  private var shouldRenderBackgroundLayer: Bool {
+    if heroTransition != nil {
+      return true
+    }
+    return !appState.isViewingPhoto || interactiveDismissPresentation.isInteractive
+  }
+
+  private var shouldRenderViewerContent: Bool {
+    appState.isViewingPhoto && heroTransition == nil
   }
 
   private var browserOpacity: Double {
@@ -615,7 +636,7 @@ struct MainContentView: View {
 
         if !item.isVideo {
           Button {
-            withAnimation(.easeInOut(duration: 0.25)) {
+            withAnimation(ImmichMotion.Curves.structuralMedium) {
               appState.isEditing.toggle()
             }
           } label: {
@@ -631,9 +652,6 @@ struct MainContentView: View {
           Image(systemName: "info.circle")
         }
         .accessibilityLabel("Show Info")
-        .popover(isPresented: $appState.showInfoPopover, arrowEdge: .bottom) {
-          AssetInfoInspector(appState: appState, item: item)
-        }
 
         Button {
           Task {
@@ -672,10 +690,18 @@ struct MainContentView: View {
   private func dismissSearchFieldFocus() {
     NSApp.keyWindow?.makeFirstResponder(nil)
     if isSearchPresented && appState.searchText.isEmpty {
-      withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+      withAnimation(ImmichMotion.Curves.searchSpring) {
         isSearchPresented = false
       }
     }
+  }
+
+  private func syncAssetInfoPanel() {
+    guard appState.showInfoPopover, let item = appState.selectedItem else {
+      assetInfoPanelController.close()
+      return
+    }
+    assetInfoPanelController.present(appState: appState, item: item)
   }
 
   private func importFromFinder() {
@@ -696,7 +722,7 @@ struct MainContentView: View {
     interactiveDismissPresentation = .identity
 
     guard let sourceImage, sourceFrame != .zero else {
-      withAnimation(.spring(response: 0.35, dampingFraction: 0.88)) {
+      withAnimation(ImmichMotion.Curves.heroFallbackOpen) {
         appState.isViewingPhoto = true
       }
       return
@@ -712,18 +738,18 @@ struct MainContentView: View {
     )
     isHeroExpanded = false
 
-    withAnimation(.easeOut(duration: 0.12)) {
+    withAnimation(ImmichMotion.Curves.heroReveal) {
       appState.isViewingPhoto = true
     }
 
     DispatchQueue.main.async {
       guard heroTransition?.itemID == item.id else { return }
-      withAnimation(.easeInOut(duration: 0.24)) {
+      withAnimation(ImmichMotion.Curves.heroExpand) {
         isHeroExpanded = true
       }
     }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + ImmichMotion.Timing.heroOpenCleanupDelay) {
       guard heroTransition?.itemID == item.id else { return }
       heroTransition = nil
       isHeroExpanded = false
@@ -741,7 +767,7 @@ struct MainContentView: View {
           destinationFrame != .zero,
           let heroImage = bestAvailableHeroImage(for: item)
     else {
-      withAnimation(.easeOut(duration: 0.18)) {
+      withAnimation(ImmichMotion.Curves.heroFallbackClose) {
         appState.isViewingPhoto = false
       }
       interactiveDismissPresentation = .identity
@@ -764,13 +790,13 @@ struct MainContentView: View {
 
     DispatchQueue.main.async {
       guard heroTransition?.itemID == item.id else { return }
-      withAnimation(.easeInOut(duration: 0.22)) {
+      withAnimation(ImmichMotion.Curves.heroCollapse) {
         appState.isViewingPhoto = false
         isHeroExpanded = false
       }
     }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + ImmichMotion.Timing.heroCloseCleanupDelay) {
       guard heroTransition?.itemID == item.id else { return }
       heroTransition = nil
       isHeroExpanded = false
@@ -786,8 +812,8 @@ struct MainContentView: View {
   private func bestAvailableHeroImage(for item: AppState.PhotoItem) -> NSImage? {
     // Prefer smaller decoded images for hero transitions to keep open/close animations
     // responsive even when full-resolution assets are loaded in the detail view.
-    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
-      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
+    thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .thumbnail)
+      ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .preview)
       ?? heroTransition?.image
       ?? thumbnailStore.cachedImage(for: item, context: appState.thumbnailContext, size: .original)
   }
@@ -1041,6 +1067,7 @@ struct RecentlyDeletedView: View {
                 thumbnailStore: thumbnailStore,
                 onSelect: { appState.selectedItemID = item.id },
                 onOpen: { _, sourceFrame, sourceImage in onOpenAsset(item, sourceFrame, sourceImage) },
+                onGetInfo: { appState.presentInfo(for: item.id) },
                 onFavoriteToggle: {},
                 onMultiSelectToggle: {}
               )

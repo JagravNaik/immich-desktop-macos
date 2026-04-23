@@ -8,6 +8,7 @@ import ImmichCore
 struct AssetInfoInspector: View {
   @ObservedObject var appState: AppState
   let item: AppState.PhotoItem
+  var onClose: (() -> Void)? = nil
   @State private var detail: AssetDetail?
   @State private var isLoading = false
   @State private var showsTags = false
@@ -50,9 +51,31 @@ struct AssetInfoInspector: View {
 
   private var headerSection: some View {
     VStack(alignment: .leading, spacing: 6) {
-      Text(detail?.originalFileName ?? item.title)
-        .font(.headline)
-        .lineLimit(2)
+      HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Info")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+
+          Text(detail?.originalFileName ?? item.title)
+            .font(.headline)
+            .lineLimit(2)
+        }
+
+        Spacer()
+
+        if let onClose {
+          Button {
+            onClose()
+          } label: {
+            Image(systemName: "xmark.circle.fill")
+              .font(.title3)
+              .foregroundStyle(.tertiary)
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Close Info")
+        }
+      }
 
       HStack(spacing: 4) {
         Text(item.date, style: .date)
@@ -153,7 +176,7 @@ struct AssetInfoInspector: View {
         .buttonStyle(.plain)
 
         Button(showsTags ? "Hide" : "Show") {
-          withAnimation(.easeInOut(duration: 0.18)) {
+          withAnimation(ImmichMotion.Curves.structuralQuick) {
             showsTags.toggle()
           }
         }

@@ -109,7 +109,7 @@ struct LibraryGridView: View {
     },
       clearSelection: { appState.selectedItemID = nil }
     )
-    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+    .animation(ImmichMotion.Curves.heroCollapse, value: appState.photoGridScaleIndex)
   }
 
   // MARK: - Months Mosaic
@@ -155,7 +155,7 @@ struct LibraryGridView: View {
     },
       clearSelection: { appState.selectedItemID = nil }
     )
-    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+    .animation(ImmichMotion.Curves.heroCollapse, value: appState.photoGridScaleIndex)
   }
 
   @ViewBuilder
@@ -265,7 +265,7 @@ struct LibraryGridView: View {
           flatGrid(scrollProxy: proxy)
         }
       }
-      .animation(.easeInOut(duration: 0.25), value: appState.timelineViewMode)
+      .animation(ImmichMotion.Curves.structuralMedium, value: appState.timelineViewMode)
       .onChange(of: appState.isMultiSelectMode) { _, isEnabled in
         if !isEnabled {
           dragSelectionState = nil
@@ -279,9 +279,15 @@ struct LibraryGridView: View {
           isKeyboardFocused = true
         }
       }
+      .onChange(of: appState.selectedItemID) { _, newID in
+        guard newID != nil, !appState.isViewingPhoto else { return }
+        DispatchQueue.main.async {
+          isKeyboardFocused = true
+        }
+      }
       .onChange(of: keyboardScrollTargetID) { _, targetID in
         guard let targetID else { return }
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(ImmichMotion.Curves.structuralQuick) {
           proxy.scrollTo(targetID, anchor: .center)
         }
         DispatchQueue.main.async {
@@ -499,7 +505,7 @@ struct LibraryGridView: View {
     guard var dragSelectionState else { return }
     guard dragSelectionState.visitedItemIDs.insert(itemID).inserted else { return }
 
-    withAnimation(.easeOut(duration: 0.08)) {
+    withAnimation(ImmichMotion.Curves.interactiveQuick) {
       appState.setItemSelection(itemID, isSelected: dragSelectionState.mode == .select)
     }
     appState.selectedItemID = itemID
@@ -618,6 +624,7 @@ struct LibraryGridView: View {
               appState.selectedItemID = item.id
               onOpenAsset(item, heroItemFrames[item.id] ?? sourceFrame, sourceImage)
             },
+            onGetInfo: { appState.presentInfo(for: item.id) },
             onFavoriteToggle: { appState.toggleFavorite(for: item.id) },
             onMultiSelectToggle: { appState.toggleItemSelection(item.id) },
             onDownload: { appState.downloadAsset(item.id) },
@@ -642,11 +649,11 @@ struct LibraryGridView: View {
     },
       clearSelection: { appState.selectedItemID = nil }
     )
-    .animation(.easeInOut(duration: 0.22), value: appState.photoGridScaleIndex)
+    .animation(ImmichMotion.Curves.heroCollapse, value: appState.photoGridScaleIndex)
   }
 
   private func scrollToMostRecent(using proxy: ScrollViewProxy) {
-    withAnimation(.easeInOut(duration: 0.22)) {
+    withAnimation(ImmichMotion.Curves.heroCollapse) {
       proxy.scrollTo(libraryTopAnchorID, anchor: .top)
     }
     pendingTimelineScrollToTop = false
@@ -714,6 +721,7 @@ struct PhotoGridCell: View {
   let thumbnailStore: ThumbnailStore
   let onSelect: () -> Void
   let onOpen: (AppState.PhotoItem, CGRect, NSImage?) -> Void
+  let onGetInfo: () -> Void
   let onFavoriteToggle: () -> Void
   let onMultiSelectToggle: () -> Void
   var onDownload: (() -> Void)?
@@ -732,7 +740,7 @@ struct PhotoGridCell: View {
       y: isHovered && !isSelected ? 4 : 0
     )
     .scaleEffect(isHovered && !isSelected && !isMultiSelectMode ? 1.02 : 1.0)
-    .animation(.easeOut(duration: 0.2), value: isHovered)
+    .animation(ImmichMotion.Curves.interactive, value: isHovered)
     .background {
       GeometryReader { proxy in
         Color.clear.preference(
@@ -749,8 +757,8 @@ struct PhotoGridCell: View {
       RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         .strokeBorder(Color.accentColor, lineWidth: isMultiSelectMode && isMultiSelected ? 3 : 2)
         .opacity(isSelected || (isMultiSelectMode && isMultiSelected) ? 1 : 0)
-        .animation(.easeOut(duration: 0.15), value: isSelected)
-        .animation(.easeOut(duration: 0.15), value: isMultiSelected)
+        .animation(ImmichMotion.Curves.interactiveFast, value: isSelected)
+        .animation(ImmichMotion.Curves.interactiveFast, value: isMultiSelected)
     }
     .overlay(alignment: .topLeading) {
       // Multi-select checkbox
@@ -783,33 +791,55 @@ struct PhotoGridCell: View {
       }
     }
     .onHover { hovering in
-      withAnimation(.easeOut(duration: 0.15)) {
+      withAnimation(ImmichMotion.Curves.interactiveFast) {
         isHovered = hovering
       }
     }
     .contextMenu {
-      Button("Open") {
+      Button {
         onOpen(
           item,
           .zero,
           thumbnailStore.cachedImage(for: item, context: context, size: .thumbnail)
         )
+      } label: {
+        Label("Open", systemImage: "arrow.up.left.and.arrow.down.right")
       }
-      Button(item.isFavorite ? "Unfavorite" : "Favorite") { onFavoriteToggle() }
+      Button {
+        onFavoriteToggle()
+      } label: {
+        Label(item.isFavorite ? "Unfavorite" : "Favorite", systemImage: item.isFavorite ? "heart.slash" : "heart")
+      }
       Divider()
       if let onDownload = onDownload {
-        Button("Download Original") { onDownload() }
+        Button {
+          onDownload()
+        } label: {
+          Label("Download Original", systemImage: "arrow.down.circle")
+        }
       }
       if let onAddToAlbum = onAddToAlbum {
-        Button("Add to Album…") { onAddToAlbum() }
+        Button {
+          onAddToAlbum()
+        } label: {
+          Label("Add to Album…", systemImage: "rectangle.stack.badge.plus")
+        }
       }
       if let onEditTags = onEditTags {
-        Button("Edit Tags…") { onEditTags() }
+        Button {
+          onEditTags()
+        } label: {
+          Label("Edit Tags…", systemImage: "tag")
+        }
       }
       if onDownload != nil || onAddToAlbum != nil || onEditTags != nil {
         Divider()
       }
-      Button("Get Info") { onSelect() }
+      Button {
+        onGetInfo()
+      } label: {
+        Label("Get Info", systemImage: "info.circle")
+      }
     }
   }
 

@@ -313,7 +313,7 @@ struct SidebarView: View {
     }
     .contentShape(Rectangle())
     .onTapGesture {
-      withAnimation(.easeInOut(duration: 0.2)) {
+      withAnimation(ImmichMotion.Curves.structuralShort) {
         isExpanded.wrappedValue.toggle()
       }
     }

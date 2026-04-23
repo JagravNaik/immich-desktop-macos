@@ -69,7 +69,7 @@ struct ToolbarSearchField: View {
         .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .trailing)))
       }
     }
-    .animation(.spring(response: 0.3, dampingFraction: 0.82), value: isPresented)
+    .animation(ImmichMotion.Curves.searchSpring, value: isPresented)
   }
 
   private func expand() {

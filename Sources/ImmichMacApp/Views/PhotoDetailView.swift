@@ -249,7 +249,7 @@ struct PhotoDetailView: View {
           showControls: false,
           isPlaying: appState.isViewingLivePhoto,
           onPlaybackEnded: {
-            withAnimation(.easeOut(duration: 0.4)) {
+            withAnimation(ImmichMotion.Curves.livePhotoFade) {
               appState.isViewingLivePhoto = false
               appState.isPeeking = false
             }
@@ -324,7 +324,7 @@ struct PhotoDetailView: View {
 
   private var liveBadge: some View {
     Button {
-      withAnimation(.easeInOut(duration: 0.2)) {
+      withAnimation(ImmichMotion.Curves.structuralShort) {
         appState.isViewingLivePhoto.toggle()
         appState.isPeeking = false
       }
@@ -416,11 +416,11 @@ struct PhotoDetailView: View {
   }
 
   private var pageSwipeAnimation: Animation {
-    .spring(response: 0.28, dampingFraction: 0.9)
+    ImmichMotion.Curves.viewerPaging
   }
 
   private var pageSwipeAnimationDuration: Duration {
-    .milliseconds(280)
+    ImmichMotion.Timing.pageSwipeDuration
   }
 
   private var shouldRenderPreviousItem: Bool {
@@ -561,7 +561,7 @@ struct PhotoDetailView: View {
       return
     }
 
-    withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+    withAnimation(ImmichMotion.Curves.pinchRebound) {
       pinchDismissScale = 1
     }
     onDismissPresentationChanged(.identity)

@@ -31,8 +31,8 @@ struct PremiumButtonStyle: ButtonStyle {
           .stroke(.white.opacity(0.2), lineWidth: 1)
       )
       .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-      .animation(.easeOut(duration: 0.2), value: configuration.isPressed)
-      .animation(.easeOut(duration: 0.2), value: isHovered)
+      .animation(ImmichMotion.Curves.interactive, value: configuration.isPressed)
+      .animation(ImmichMotion.Curves.interactive, value: isHovered)
       .onHover { hovering in
         isHovered = hovering
       }
@@ -58,8 +58,8 @@ struct SecondaryButtonStyle: ButtonStyle {
           .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
       )
       .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
-      .animation(.easeOut(duration: 0.2), value: configuration.isPressed)
-      .animation(.easeOut(duration: 0.2), value: isHovered)
+      .animation(ImmichMotion.Curves.interactive, value: configuration.isPressed)
+      .animation(ImmichMotion.Curves.interactive, value: isHovered)
       .onHover { hovering in
         isHovered = hovering
       }
@@ -145,7 +145,7 @@ struct AuthShell<Content: View>: View {
       }
       .ignoresSafeArea()
       .onAppear {
-        withAnimation(.easeInOut(duration: 8.0).repeatForever(autoreverses: true)) {
+        withAnimation(ImmichMotion.Curves.authAmbient) {
           isAnimating = true
         }
       }
@@ -260,7 +260,7 @@ struct ServerSetupCard: View {
             .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
         )
         .transition(.opacity.combined(with: .move(edge: .top)))
-        .animation(.easeOut, value: appState.statusText)
+        .animation(ImmichMotion.Curves.statusFade, value: appState.statusText)
     }
   }
 }
@@ -324,7 +324,7 @@ struct LoginCard: View {
       statusLabel
     }
     .glassCard()
-    .animation(.easeInOut(duration: 0.3), value: appState.authMethod)
+    .animation(ImmichMotion.Curves.structuralLong, value: appState.authMethod)
   }
 
   private var passwordFields: some View {
@@ -451,7 +451,7 @@ struct LoginCard: View {
             .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
         )
         .transition(.opacity.combined(with: .move(edge: .top)))
-        .animation(.easeOut, value: appState.statusText)
+        .animation(ImmichMotion.Curves.statusFade, value: appState.statusText)
     }
   }
 }
