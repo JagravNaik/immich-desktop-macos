@@ -4,6 +4,14 @@ import ImmichAPI
 import ImmichCore
 import MapKit
 
+@MainActor
+private final class NoOpWebSocketService: ImmichWebSocketServicing {
+  weak var delegate: (any ImmichWebSocketDelegate)?
+
+  func connect(server: ImmichServer, userSession: UserSession) {}
+  func disconnect() {}
+}
+
 final class AppStateTests: XCTestCase {
   private static let defaultsKeys = [
     "immich.serverURL",
@@ -376,7 +384,10 @@ final class AppStateTests: XCTestCase {
 
   @MainActor
   func testSignInWithEmptyEmailSetsStatusText() async {
-    let appState = AppState(apiClient: MockImmichAPIClient())
+    let appState = AppState(
+      apiClient: MockImmichAPIClient(),
+      webSocketService: NoOpWebSocketService()
+    )
     appState.serverURLText = "https://demo.example"
     await appState.connect()
 
@@ -390,7 +401,10 @@ final class AppStateTests: XCTestCase {
 
   @MainActor
   func testSignInWithEmptyPasswordSetsStatusText() async {
-    let appState = AppState(apiClient: MockImmichAPIClient())
+    let appState = AppState(
+      apiClient: MockImmichAPIClient(),
+      webSocketService: NoOpWebSocketService()
+    )
     appState.serverURLText = "https://demo.example"
     await appState.connect()
 
@@ -404,7 +418,10 @@ final class AppStateTests: XCTestCase {
 
   @MainActor
   func testSignInWithEmptyAPIKeySetsStatusText() async {
-    let appState = AppState(apiClient: MockImmichAPIClient())
+    let appState = AppState(
+      apiClient: MockImmichAPIClient(),
+      webSocketService: NoOpWebSocketService()
+    )
     appState.serverURLText = "https://demo.example"
     await appState.connect()
 
@@ -417,7 +434,10 @@ final class AppStateTests: XCTestCase {
 
   @MainActor
   func testPasswordSignInSucceeds() async {
-    let appState = AppState(apiClient: MockImmichAPIClient())
+    let appState = AppState(
+      apiClient: MockImmichAPIClient(),
+      webSocketService: NoOpWebSocketService()
+    )
     appState.serverURLText = "https://demo.example"
     await appState.connect()
 
@@ -644,6 +664,34 @@ final class AppStateTests: XCTestCase {
     XCTAssertNil(appState.searchError)
     XCTAssertNil(appState.searchNextPage)
   }
+  @MainActor
+  func testLoadMoreSearchResultsRequestsNextPageAndAppendsVisibleAssetsOnly() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setSearchResult(
+      SearchResult(
+        assets: [
+          makeRemoteAsset(id: "page-2-visible", timeBucketKey: "2026-03-02"),
+          makeRemoteAsset(id: "page-2-trashed", timeBucketKey: "2026-03-02", isTrashed: true),
+        ],
+        totalCount: 4,
+        nextPage: nil
+      )
+    )
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    appState.searchType = .smart
+    appState.searchText = "mountain"
+    appState.searchResults = [makePhotoItem(id: "page-1-visible")]
+    appState.searchTotalCount = 3
+    appState.searchNextPage = "2"
+
+    await appState.loadMoreSearchResults()
+
+    XCTAssertEqual(appState.searchResults.map(\.id), ["page-1-visible", "page-2-visible"])
+    XCTAssertEqual(appState.searchTotalCount, 4)
+    XCTAssertNil(appState.searchNextPage)
+    let calls = await apiClient.recordedSearchCalls()
+    XCTAssertEqual(calls, [SearchCall(kind: "smart", query: "mountain", page: "2")])
+  }
 
   @MainActor
   func testSaveRecentSearchDeduplicatesAndCaps() {
@@ -718,6 +766,51 @@ final class AppStateTests: XCTestCase {
 
     XCTAssertEqual(appState.filteredItems.count, 1)
     XCTAssertEqual(appState.filteredItems.first?.id, "vid")
+  }
+
+  @MainActor
+  func testMediaTypeSectionsLoadRemainingTimelineBuckets() async throws {
+    let apiClient = MockImmichAPIClient()
+    let bucketKeys = [
+      "2026-07-01",
+      "2026-06-01",
+      "2026-05-01",
+      "2026-04-01",
+      "2026-03-01",
+      "2026-02-01",
+      "2026-01-01",
+    ]
+    let timelineBuckets = bucketKeys.map { TimelineBucketSummary(timeBucket: $0, count: $0 == "2026-01-01" ? 3 : 1) }
+    var assetsByBucket: [String: [RemoteTimelineAsset]] = [:]
+
+    for bucketKey in bucketKeys.dropLast() {
+      assetsByBucket[bucketKey] = [makeRemoteAsset(id: "photo-\(bucketKey)", timeBucketKey: bucketKey, isImage: true)]
+    }
+
+    assetsByBucket["2026-01-01"] = [
+      makeRemoteAsset(id: "video-1", timeBucketKey: "2026-01-01", isImage: false, duration: "0:05"),
+      makeRemoteAsset(id: "live-1", timeBucketKey: "2026-01-01", isImage: true, livePhotoVideoID: "motion-1"),
+      makeRemoteAsset(id: "pano-1", timeBucketKey: "2026-01-01", isImage: true, ratio: 2.8),
+    ]
+
+    await apiClient.setTimelineData(buckets: timelineBuckets, assetsByBucket: assetsByBucket)
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    XCTAssertEqual(appState.libraryItems.count, 6)
+
+    appState.sidebarSelection = .videos
+    XCTAssertTrue(appState.filteredItems.isEmpty)
+
+    await appState.loadCompleteTimelineIfNeeded()
+
+    appState.sidebarSelection = .videos
+    XCTAssertEqual(appState.filteredItems.map(\.id), ["video-1"])
+
+    appState.sidebarSelection = .livePhotos
+    XCTAssertEqual(appState.filteredItems.map(\.id), ["live-1"])
+
+    appState.sidebarSelection = .panoramas
+    XCTAssertEqual(appState.filteredItems.map(\.id), ["pano-1"])
   }
 
   @MainActor
@@ -871,7 +964,7 @@ final class AppStateTests: XCTestCase {
 
   @MainActor
   private func makeSignedInState(apiClient: MockImmichAPIClient) async throws -> AppState {
-    let appState = AppState(apiClient: apiClient)
+    let appState = AppState(apiClient: apiClient, webSocketService: NoOpWebSocketService())
     appState.serverURLText = "https://demo.example"
 
     await appState.connect()
@@ -912,22 +1005,34 @@ final class AppStateTests: XCTestCase {
     )
   }
 
-  private func makeRemoteAsset(id: String, isTrashed: Bool) -> RemoteTimelineAsset {
-    RemoteTimelineAsset(
+  private func makeRemoteAsset(
+    id: String,
+    timeBucketKey: String = "2026-03-01",
+    isTrashed: Bool = false,
+    isImage: Bool = true,
+    livePhotoVideoID: String? = nil,
+    projectionType: String? = nil,
+    ratio: Double = 1.3,
+    duration: String? = nil
+  ) -> RemoteTimelineAsset {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    let createdAt = formatter.date(from: "\(timeBucketKey)T12:00:00Z") ?? Date(timeIntervalSince1970: 1_700_000_000)
+    return RemoteTimelineAsset(
       id: id,
       city: nil,
       country: nil,
-      createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-      duration: nil,
+      createdAt: createdAt,
+      duration: duration,
       isFavorite: false,
-      isImage: true,
+      isImage: isImage,
       isTrashed: isTrashed,
       latitude: nil,
       longitude: nil,
-      livePhotoVideoID: nil,
+      livePhotoVideoID: livePhotoVideoID,
       ownerID: "user-1",
-      projectionType: nil,
-      ratio: 1.3,
+      projectionType: projectionType,
+      ratio: ratio,
       stackChildrenCount: nil,
       thumbhash: nil,
       visibility: "timeline"
@@ -972,13 +1077,27 @@ private struct FavoriteUpdate: Equatable {
   let assetID: String
   let isFavorite: Bool
 }
+private struct SearchCall: Equatable, Sendable {
+  let kind: String
+  let query: String
+  let page: String?
+}
 
 private actor MockImmichAPIClient: ImmichAPIClient {
+  private var timelineBucketsResponse: [TimelineBucketSummary] = []
+  private var timelineAssetsByBucket: [String: [RemoteTimelineAsset]] = [:]
   private var mapMarkersResponse: [MapMarker] = []
   private var assetDetailsByID: [String: AssetDetail] = [:]
   private var favoriteUpdates: [FavoriteUpdate] = []
   private var favoriteError: Error?
   private var versionCheckState = VersionCheckState(checkedAt: nil, releaseVersion: nil)
+  private var searchResult = SearchResult(assets: [], totalCount: 0)
+  private var searchCalls: [SearchCall] = []
+
+  func setTimelineData(buckets: [TimelineBucketSummary], assetsByBucket: [String: [RemoteTimelineAsset]]) {
+    timelineBucketsResponse = buckets
+    timelineAssetsByBucket = assetsByBucket
+  }
 
   func setMapMarkersResult(_ markers: [MapMarker]) {
     mapMarkersResponse = markers
@@ -998,6 +1117,13 @@ private actor MockImmichAPIClient: ImmichAPIClient {
 
   func recordedFavoriteUpdates() -> [FavoriteUpdate] {
     favoriteUpdates
+  }
+  func setSearchResult(_ result: SearchResult) {
+    searchResult = result
+  }
+
+  func recordedSearchCalls() -> [SearchCall] {
+    searchCalls
   }
 
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo {
@@ -1052,8 +1178,13 @@ private actor MockImmichAPIClient: ImmichAPIClient {
     )
   }
 
-  func fetchTimelineBuckets(server: ImmichServer, session: UserSession) async throws -> [TimelineBucketSummary] { [] }
-  func fetchTimelineBucket(server: ImmichServer, session: UserSession, timeBucket: String) async throws -> [RemoteTimelineAsset] { [] }
+  func fetchTimelineBuckets(server: ImmichServer, session: UserSession) async throws -> [TimelineBucketSummary] {
+    timelineBucketsResponse
+  }
+
+  func fetchTimelineBucket(server: ImmichServer, session: UserSession, timeBucket: String) async throws -> [RemoteTimelineAsset] {
+    timelineAssetsByBucket[timeBucket] ?? []
+  }
   func fetchAlbums(server: ImmichServer, session: UserSession) async throws -> [Album] { [] }
   func fetchAlbumAssets(server: ImmichServer, session: UserSession, albumId: String) async throws -> (Album, [RemoteTimelineAsset]) {
     (
@@ -1110,22 +1241,25 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { [] }
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
-  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    SearchResult(assets: [], totalCount: 0)
+  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    searchCalls.append(SearchCall(kind: "smart", query: query, page: page))
+    return searchResult
   }
 
-  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    SearchResult(assets: [], totalCount: 0)
+  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    searchCalls.append(SearchCall(kind: "filename", query: query, page: page))
+    return searchResult
   }
 
-  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    SearchResult(assets: [], totalCount: 0)
+  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    searchCalls.append(SearchCall(kind: "description", query: query, page: page))
+    return searchResult
   }
 
-  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    SearchResult(assets: [], totalCount: 0)
+  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    searchCalls.append(SearchCall(kind: "ocr", query: query, page: page))
+    return searchResult
   }
-
   func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String] {
     []
   }

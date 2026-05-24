@@ -15,7 +15,14 @@ protocol ImmichWebSocketDelegate: AnyObject {
   func webSocketDidReceiveReleaseNotification(releaseVersion: String, serverVersion: String?)
 }
 
-final class ImmichWebSocketService: NSObject, @unchecked Sendable {
+@MainActor
+protocol ImmichWebSocketServicing: AnyObject {
+  var delegate: (any ImmichWebSocketDelegate)? { get set }
+
+  func connect(server: ImmichServer, userSession: UserSession)
+  func disconnect()
+}
+final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @unchecked Sendable {
   private var webSocketTask: URLSessionWebSocketTask?
   private var session: URLSession?
   private var connectionRequest: URLRequest?
@@ -211,7 +218,9 @@ final class ImmichWebSocketService: NSObject, @unchecked Sendable {
   private func startPingTimer() {
     stopPingTimer()
     pingTimer = Timer.scheduledTimer(withTimeInterval: pingInterval, repeats: true) { [weak self] _ in
-      self?.sendRaw("2")
+      Task { @MainActor [weak self] in
+        self?.sendRaw("2")
+      }
     }
   }
 

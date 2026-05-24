@@ -106,10 +106,23 @@ private func copyFileContents(from fileURL: URL, to handle: FileHandle) throws {
   }
 }
 
-private func uploadTimestampString(for date: Date) -> String {
-  let formatter = ISO8601DateFormatter()
-  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-  return formatter.string(from: date)
+private enum ISO8601FractionalSecondsFormatter {
+  private nonisolated(unsafe) static let formatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+  private static let lock = NSLock()
+
+  static func string(from date: Date) -> String {
+    lock.lock()
+    defer { lock.unlock() }
+    return formatter.string(from: date)
+  }
+}
+
+private func iso8601FractionalSecondsString(for date: Date) -> String {
+  ISO8601FractionalSecondsFormatter.string(from: date)
 }
 
 public protocol ImmichAPIClient: Sendable {
@@ -118,6 +131,7 @@ public protocol ImmichAPIClient: Sendable {
   func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration
   func login(server: ImmichServer, email: String, password: String) async throws -> UserSession
   func loginWithAPIKey(server: ImmichServer, apiKey: String) async throws -> UserSession
+  func resumeSession(server: ImmichServer, accessToken: String) async throws -> UserSession
   func fetchTimelineBuckets(server: ImmichServer, session: UserSession) async throws -> [TimelineBucketSummary]
   func fetchTimelineBucket(server: ImmichServer, session: UserSession, timeBucket: String) async throws -> [RemoteTimelineAsset]
   func fetchAlbums(server: ImmichServer, session: UserSession) async throws -> [Album]
@@ -129,10 +143,10 @@ public protocol ImmichAPIClient: Sendable {
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
-  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
-  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
-  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
-  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult
+  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
+  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
+  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
+  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
   func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String]
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
   func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
@@ -171,6 +185,23 @@ public protocol ImmichAPIClient: Sendable {
   func restoreAdminUser(server: ImmichServer, session: UserSession, id: String) async throws -> AdminUser
   func startOAuth(server: ImmichServer, redirectUri: String) async throws -> String
   func finishOAuth(server: ImmichServer, oauthCallbackUrl: String) async throws -> UserSession
+}
+public extension ImmichAPIClient {
+  func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    try await searchAssets(server: server, session: session, query: query, filters: filters, page: nil)
+  }
+
+  func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    try await searchMetadataText(server: server, session: session, query: query, filters: filters, page: nil)
+  }
+
+  func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    try await searchMetadataDescription(server: server, session: session, query: query, filters: filters, page: nil)
+  }
+
+  func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+    try await searchMetadataOCR(server: server, session: session, query: query, filters: filters, page: nil)
+  }
 }
 
 public enum ImmichAPIError: Error, LocalizedError, Sendable {
@@ -266,6 +297,21 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       userEmail: currentUser?.email ?? "API key session",
       userID: currentUser?.id ?? "api-key-\(apiKeyRecord.id)",
       userName: currentUser?.name ?? apiKeyRecord.name
+    )
+  }
+
+  public func resumeSession(server: ImmichServer, accessToken: String) async throws -> UserSession {
+    let auth = SessionAuthentication.accessToken(accessToken)
+    let currentUser = try await fetchCurrentUser(server: server, authentication: auth)
+    let isAdmin = (try? await determineAdminAccess(server: server, authentication: auth)) ?? false
+
+    return UserSession(
+      accessToken: accessToken,
+      isAdmin: isAdmin,
+      shouldChangePassword: false,
+      userEmail: currentUser.email,
+      userID: currentUser.id,
+      userName: currentUser.name
     )
   }
 
@@ -413,44 +459,69 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   // MARK: - Search
 
-  public func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
+  public func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    let response = try await performSmartSearch(
+      server: server,
+      session: session,
+      request: SmartSearchRequest(query: query, filters: filters, page: try searchPageNumber(from: page))
+    )
+    return Self.searchResult(from: response)
+  }
+
+  public func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    let response = try await performMetadataSearch(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(originalFileName: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+    )
+    return Self.searchResult(from: response)
+  }
+
+  public func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    let response = try await performMetadataSearch(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(description: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+    )
+    return Self.searchResult(from: response)
+  }
+
+  public func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
+    let response = try await performMetadataSearch(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(ocr: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+    )
+    return Self.searchResult(from: response)
+  }
+
+  private func performSmartSearch(server: ImmichServer, session: UserSession, request searchRequest: SmartSearchRequest) async throws -> SearchAssetsResponse {
     var request = authorizedRequest(url: server.baseURL.appending(path: "search/smart"), session: session)
     request.httpMethod = "POST"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(SmartSearchRequest(query: query, filters: filters))
-    let response: SearchAssetsResponse = try await perform(request)
+    request.httpBody = try JSONEncoder().encode(searchRequest)
+    return try await perform(request)
+  }
+
+  private func performMetadataSearch(server: ImmichServer, session: UserSession, request searchRequest: MetadataSearchRequest) async throws -> SearchAssetsResponse {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(searchRequest)
+    return try await perform(request)
+  }
+
+  private static func searchResult(from response: SearchAssetsResponse) -> SearchResult {
     let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
     return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
   }
 
-  public func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: query, filters: filters))
-    let response: SearchAssetsResponse = try await perform(request)
-    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
-    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
-  }
-
-  public func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(description: query, filters: filters))
-    let response: SearchAssetsResponse = try await perform(request)
-    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
-    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
-  }
-
-  public func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters) async throws -> SearchResult {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(ocr: query, filters: filters))
-    let response: SearchAssetsResponse = try await perform(request)
-    let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
-    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+  private func searchPageNumber(from page: String?, defaultPage: Int? = nil) throws -> Int? {
+    guard let page else { return defaultPage }
+    guard let pageNumber = Int(page) else {
+      throw ImmichAPIError.invalidResponse(url: "search page \(page)")
+    }
+    return pageNumber
   }
 
   public func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String] {
@@ -477,14 +548,41 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
   public func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
     var filters = SearchFilters()
     filters.mediaType = .image
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(originalFileName: "Screenshot", filters: filters))
-    let response: SearchAssetsResponse = try await perform(request)
-    return response.assets.items.compactMap { $0.toTimelineAsset() }
+    let directRequests = [
+      MetadataSearchRequest(originalPath: "screenshots", filters: filters),
+      MetadataSearchRequest(originalFileName: "screenshot", filters: filters),
+      MetadataSearchRequest(originalFileName: "screen shot", filters: filters),
+      MetadataSearchRequest(originalFileName: "screen_shot", filters: filters),
+      MetadataSearchRequest(originalFileName: "screen-shot", filters: filters),
+    ]
+    let appleMobileCandidateRequest = MetadataSearchRequest(
+      originalFileName: ".png",
+      filters: filters,
+      withExif: true
+    )
+
+    async let directMatchesTask = fetchMetadataAssets(
+      server: server,
+      session: session,
+      requests: directRequests
+    )
+    async let appleMobileCandidatesTask = fetchMetadataItems(
+      server: server,
+      session: session,
+      request: appleMobileCandidateRequest
+    )
+
+    let directMatches = try await directMatchesTask
+    let appleMobileCandidates = try await appleMobileCandidatesTask
+    let inferredMatches = appleMobileCandidates
+      .filter(Self.isLikelyAppleMobileScreenshot)
+      .compactMap { $0.toTimelineAsset() }
+
+    let combined = directMatches + inferredMatches
+    let deduped = Dictionary(combined.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
+    return deduped.values.sorted { $0.createdAt > $1.createdAt }
   }
 
   // MARK: - Map
@@ -576,8 +674,8 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       fields: [
         MultipartFormField(name: "deviceAssetId", value: deviceAssetId),
         MultipartFormField(name: "deviceId", value: "macos-desktop"),
-        MultipartFormField(name: "fileCreatedAt", value: uploadTimestampString(for: createdDate)),
-        MultipartFormField(name: "fileModifiedAt", value: uploadTimestampString(for: Date())),
+        MultipartFormField(name: "fileCreatedAt", value: iso8601FractionalSecondsString(for: createdDate)),
+        MultipartFormField(name: "fileModifiedAt", value: iso8601FractionalSecondsString(for: Date())),
         MultipartFormField(name: "isFavorite", value: "false"),
       ],
       fileFieldName: "assetData",
@@ -722,10 +820,8 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     }
     appendField("deviceAssetId", "\(filename)-edited-\(Int(Date().timeIntervalSince1970 * 1000))")
     appendField("deviceId", "macos-desktop")
-    let isoFormatter = ISO8601DateFormatter()
-    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    appendField("fileCreatedAt", isoFormatter.string(from: Date()))
-    appendField("fileModifiedAt", isoFormatter.string(from: Date()))
+    appendField("fileCreatedAt", iso8601FractionalSecondsString(for: Date()))
+    appendField("fileModifiedAt", iso8601FractionalSecondsString(for: Date()))
 
     body.append("--\(boundary)\r\n".data(using: .utf8)!)
     body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
@@ -940,6 +1036,90 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     let _: [AdminUserResponse] = try await perform(request)
     return true
   }
+
+  private static func isLikelyAppleMobileScreenshot(_ asset: AssetDetailResponse) -> Bool {
+    let originalFileName = asset.originalFileName?.lowercased() ?? ""
+    guard originalFileName.hasPrefix("img_"), originalFileName.hasSuffix(".png") else {
+      return false
+    }
+
+    guard let width = asset.exifInfo?.exifImageWidth, let height = asset.exifInfo?.exifImageHeight else {
+      return true
+    }
+
+    let shortEdge = Double(min(width, height))
+    let longEdge = Double(max(width, height))
+    guard shortEdge >= 640, longEdge >= 960 else {
+      return false
+    }
+
+    let ratio = shortEdge / longEdge
+    let supportedRatios = [0.462, 0.562, 0.657, 0.699, 0.750]
+    return supportedRatios.contains { abs($0 - ratio) <= 0.02 }
+  }
+
+  private func fetchMetadataItems(
+    server: ImmichServer,
+    session: UserSession,
+    request metadataRequest: MetadataSearchRequest
+  ) async throws -> [AssetDetailResponse] {
+    var items: [AssetDetailResponse] = []
+    var page = metadataRequest.page ?? 1
+
+    while true {
+      var pagedRequest = metadataRequest
+      pagedRequest.page = page
+
+      let response = try await performMetadataSearch(
+        server: server,
+        session: session,
+        request: pagedRequest
+      )
+      items.append(contentsOf: response.assets.items)
+
+      guard response.assets.nextPage?.isEmpty == false else {
+        break
+      }
+
+      page += 1
+    }
+
+    return items
+  }
+
+  private func fetchMetadataAssets(
+    server: ImmichServer,
+    session: UserSession,
+    request metadataRequest: MetadataSearchRequest
+  ) async throws -> [RemoteTimelineAsset] {
+    let items = try await fetchMetadataItems(server: server, session: session, request: metadataRequest)
+    return items.compactMap { $0.toTimelineAsset() }
+  }
+
+  private func fetchMetadataAssets(
+    server: ImmichServer,
+    session: UserSession,
+    requests metadataRequests: [MetadataSearchRequest]
+  ) async throws -> [RemoteTimelineAsset] {
+    try await withThrowingTaskGroup(of: [RemoteTimelineAsset].self) { group in
+      for metadataRequest in metadataRequests {
+        group.addTask {
+          try await self.fetchMetadataAssets(
+            server: server,
+            session: session,
+            request: metadataRequest
+          )
+        }
+      }
+
+      var combined: [RemoteTimelineAsset] = []
+      for try await assets in group {
+        combined.append(contentsOf: assets)
+      }
+      return combined
+    }
+  }
+
 
   private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
     let requestURL = request.url?.absoluteString ?? "unknown"
@@ -1560,11 +1740,12 @@ private struct SmartSearchRequest: Encodable {
   let withStacked: Bool?
   let withPeople: Bool?
   let withExif: Bool?
+  let page: Int?
 
-  init(query: String, filters: SearchFilters) {
+  init(query: String, filters: SearchFilters, page: Int? = nil) {
     self.query = query.isEmpty ? nil : query
-    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
-    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
+    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
     self.make = filters.cameraMake
     self.model = filters.cameraModel
     self.city = filters.city
@@ -1574,18 +1755,14 @@ private struct SmartSearchRequest: Encodable {
     self.withStacked = true
     self.withPeople = nil
     self.withExif = nil
-  }
-
-  private static func encodeDate(_ date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: date)
+    self.page = page
   }
 }
 
 private struct MetadataSearchRequest: Encodable {
   var personIds: [String]?
   var originalFileName: String?
+  var originalPath: String?
   var description: String?
   var ocr: String?
   var type: String?
@@ -1601,12 +1778,21 @@ private struct MetadataSearchRequest: Encodable {
   var withStacked: Bool?
   var withExif: Bool?
 
-  init(originalFileName: String? = nil, description: String? = nil, ocr: String? = nil, filters: SearchFilters) {
+  init(
+    originalFileName: String? = nil,
+    originalPath: String? = nil,
+    description: String? = nil,
+    ocr: String? = nil,
+    filters: SearchFilters,
+    withExif: Bool = false,
+    page: Int? = 1
+  ) {
     self.originalFileName = originalFileName
+    self.originalPath = originalPath
     self.description = description
     self.ocr = ocr
-    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
-    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
+    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
     self.make = filters.cameraMake
     self.model = filters.cameraModel
     self.city = filters.city
@@ -1614,18 +1800,19 @@ private struct MetadataSearchRequest: Encodable {
     self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
     self.isFavorite = filters.isFavorite
     self.withStacked = true
-    self.withExif = false
-    self.page = 1
+    self.withExif = withExif
+    self.page = page
     self.size = 1000
   }
 
   init(personIds: [String], filters: SearchFilters) {
     self.personIds = personIds
     self.originalFileName = nil
+    self.originalPath = nil
     self.description = nil
     self.ocr = nil
-    self.takenAfter = filters.takenAfter.map(Self.encodeDate)
-    self.takenBefore = filters.takenBefore.map(Self.encodeDate)
+    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
+    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
     self.make = filters.cameraMake
     self.model = filters.cameraModel
     self.city = filters.city
@@ -1636,12 +1823,6 @@ private struct MetadataSearchRequest: Encodable {
     self.withExif = false
     self.page = 1
     self.size = 1000
-  }
-
-  private static func encodeDate(_ date: Date) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: date)
   }
 }
 

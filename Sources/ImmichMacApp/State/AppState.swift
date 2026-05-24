@@ -311,7 +311,7 @@ final class AppState: ObservableObject {
 
   private let apiClient: any ImmichAPIClient
   private let uploadQueue = UploadQueue()
-  private let webSocketService = ImmichWebSocketService()
+  private let webSocketService: any ImmichWebSocketServicing
   private var connectedServer: ImmichServer?
   private var timelineBuckets: [TimelineBucketSummary] = []
   private var loadedTimelineBucketKeys: [String] = []
@@ -697,8 +697,12 @@ final class AppState: ObservableObject {
     await loadInitialData()
   }
 
-  init(apiClient: any ImmichAPIClient = URLSessionImmichAPIClient()) {
+  init(
+    apiClient: any ImmichAPIClient = URLSessionImmichAPIClient(),
+    webSocketService: any ImmichWebSocketServicing = ImmichWebSocketService()
+  ) {
     self.apiClient = apiClient
+    self.webSocketService = webSocketService
     loadRecentSearches()
   }
 
@@ -1202,7 +1206,7 @@ final class AppState: ObservableObject {
   }
 
   func loadMoreSearchResults() async {
-    guard !searchNextPage!.isEmpty else { return }
+    guard let page = searchNextPage, !page.isEmpty else { return }
     guard let connectedServer, let currentSession else { return }
     guard !isSearching else { return }
 
@@ -1214,25 +1218,26 @@ final class AppState: ObservableObject {
       switch searchType {
       case .smart:
         result = try await apiClient.searchAssets(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
         )
       case .filename:
         result = try await apiClient.searchMetadataText(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
         )
       case .description:
         result = try await apiClient.searchMetadataDescription(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
         )
       case .ocr:
         result = try await apiClient.searchMetadataOCR(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters
+          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
         )
       }
       let newItems = result.assets.filter { !$0.isTrashed }.map {
         Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
       }
       searchResults.append(contentsOf: newItems)
+      searchTotalCount = result.totalCount
       searchNextPage = result.nextPage
     } catch {
       immichLog("[Search] Pagination failed: \(error)")
@@ -1334,6 +1339,27 @@ final class AppState: ObservableObject {
     guard appPhase == .library, sidebarSelection == .library, searchText.isEmpty,
           canLoadMoreTimeline, !isLoadingTimeline, loadedTimelineBucketKeys.last == sectionID else { return }
     Task { await loadNextTimelinePage() }
+  }
+
+  func loadCompleteTimelineIfNeeded() async {
+    guard connectedServer != nil, currentSession != nil else { return }
+
+    if timelineBuckets.isEmpty {
+      await loadRemoteTimeline(reset: true)
+    }
+
+    var previousLoadedBucketCount = -1
+    while canLoadMoreTimeline {
+      let currentLoadedBucketCount = loadedTimelineBucketKeys.count
+      guard currentLoadedBucketCount != previousLoadedBucketCount else { break }
+      previousLoadedBucketCount = currentLoadedBucketCount
+
+      await loadNextTimelinePage()
+
+      if timelineErrorMessage != nil {
+        break
+      }
+    }
   }
 
   func presentInfo(for itemID: String) {

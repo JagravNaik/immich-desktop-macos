@@ -204,6 +204,241 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertTrue(buckets.isEmpty)
   }
 
+  func testSearchAssetsEncodesDateFiltersWithFractionalSeconds() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/smart")
+      XCTAssertEqual(request.httpMethod, "POST")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(SmartSearchRequestPayload.self, from: body)
+      XCTAssertEqual(payload.query, "mountain")
+      XCTAssertEqual(payload.takenAfter, "2026-05-24T12:34:56.789Z")
+      XCTAssertEqual(payload.takenBefore, "2026-05-25T01:02:03.012Z")
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+    var filters = SearchFilters()
+    filters.takenAfter = try XCTUnwrap(DateComponents(
+      calendar: calendar,
+      timeZone: calendar.timeZone,
+      year: 2026,
+      month: 5,
+      day: 24,
+      hour: 12,
+      minute: 34,
+      second: 56,
+      nanosecond: 789_000_000
+    ).date)
+    filters.takenBefore = try XCTUnwrap(DateComponents(
+      calendar: calendar,
+      timeZone: calendar.timeZone,
+      year: 2026,
+      month: 5,
+      day: 25,
+      hour: 1,
+      minute: 2,
+      second: 3,
+      nanosecond: 12_000_000
+    ).date)
+
+    let result = try await client.searchAssets(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session,
+      query: "mountain",
+      filters: filters
+    )
+
+    XCTAssertTrue(result.assets.isEmpty)
+  }
+
+  func testSearchMetadataTextEncodesDateFiltersWithFractionalSeconds() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/metadata")
+      XCTAssertEqual(request.httpMethod, "POST")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(MetadataSearchRequestPayload.self, from: body)
+      XCTAssertEqual(payload.originalFileName, "mountain")
+      XCTAssertEqual(payload.takenAfter, "2026-05-24T12:34:56.789Z")
+      XCTAssertEqual(payload.takenBefore, "2026-05-25T01:02:03.012Z")
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+    var filters = SearchFilters()
+    filters.takenAfter = try XCTUnwrap(DateComponents(
+      calendar: calendar,
+      timeZone: calendar.timeZone,
+      year: 2026,
+      month: 5,
+      day: 24,
+      hour: 12,
+      minute: 34,
+      second: 56,
+      nanosecond: 789_000_000
+    ).date)
+    filters.takenBefore = try XCTUnwrap(DateComponents(
+      calendar: calendar,
+      timeZone: calendar.timeZone,
+      year: 2026,
+      month: 5,
+      day: 25,
+      hour: 1,
+      minute: 2,
+      second: 3,
+      nanosecond: 12_000_000
+    ).date)
+
+    let result = try await client.searchMetadataText(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session,
+      query: "mountain",
+      filters: filters
+    )
+
+    XCTAssertTrue(result.assets.isEmpty)
+  }
+  func testSearchAssetsEncodesRequestedPage() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/smart")
+      XCTAssertEqual(request.httpMethod, "POST")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(SmartSearchRequestPayload.self, from: body)
+      XCTAssertEqual(payload.query, "mountain")
+      XCTAssertEqual(payload.page, 3)
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+
+    let result = try await client.searchAssets(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session,
+      query: "mountain",
+      filters: SearchFilters(),
+      page: "3"
+    )
+
+    XCTAssertTrue(result.assets.isEmpty)
+  }
+
+  func testSearchMetadataTextEncodesRequestedPage() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/metadata")
+      XCTAssertEqual(request.httpMethod, "POST")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(MetadataSearchRequestPayload.self, from: body)
+      XCTAssertEqual(payload.originalFileName, "mountain")
+      XCTAssertEqual(payload.page, 4)
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+
+    let result = try await client.searchMetadataText(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session,
+      query: "mountain",
+      filters: SearchFilters(),
+      page: "4"
+    )
+
+    XCTAssertTrue(result.assets.isEmpty)
+  }
+
+  func testFetchScreenshotsIncludesIOSStylePNGScreenshotsAcrossPages() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/metadata")
+      XCTAssertEqual(request.httpMethod, "POST")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(MetadataSearchRequestPayload.self, from: body)
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+
+      switch (payload.originalFileName, payload.originalPath, payload.page) {
+      case (".png", nil, 1):
+        XCTAssertEqual(payload.type, "IMAGE")
+        XCTAssertEqual(payload.withExif, true)
+        let data = #"""
+        {"assets":{"items":[{"id":"poster-1","type":"IMAGE","originalFileName":"poster.png","fileCreatedAt":"2026-05-05T10:00:00.000Z","exifInfo":{"exifImageWidth":1200,"exifImageHeight":1800}}],"total":2,"nextPage":"2"}}
+        """#.data(using: .utf8)!
+        return (response, data)
+      case (".png", nil, 2):
+        let data = #"""
+        {"assets":{"items":[{"id":"screenshot-1","type":"IMAGE","originalFileName":"IMG_0189.PNG","fileCreatedAt":"2026-05-06T10:00:00.000Z","exifInfo":{"exifImageWidth":1179,"exifImageHeight":2556}}],"total":2,"nextPage":null}}
+        """#.data(using: .utf8)!
+        return (response, data)
+      case ("screenshot", nil, 1), ("screen shot", nil, 1), ("screen_shot", nil, 1), ("screen-shot", nil, 1), (nil, "screenshots", 1):
+        let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+        return (response, data)
+      default:
+        XCTFail("Unexpected metadata search payload: \(payload)")
+        return (response, #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!)
+      }
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+
+    let screenshots = try await client.fetchScreenshots(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session
+    )
+
+    XCTAssertEqual(screenshots.map(\.id), ["screenshot-1"])
+  }
+
   func testUploadAssetUsesMultipartBodyStreamAndReturnsID() async throws {
     let fileURL = try makeTempFile(named: "sample.jpg", contents: "image-data")
     defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -472,6 +707,27 @@ private final class StubURLProtocol: URLProtocol {
 private struct LoginRequestPayload: Decodable {
   let email: String
   let password: String
+}
+
+private struct SmartSearchRequestPayload: Decodable {
+  let query: String?
+  let takenAfter: String?
+  let takenBefore: String?
+  let page: Int?
+}
+
+private struct MetadataSearchRequestPayload: Decodable, CustomStringConvertible {
+  let originalFileName: String?
+  let originalPath: String?
+  let page: Int?
+  let type: String?
+  let withExif: Bool?
+  let takenAfter: String?
+  let takenBefore: String?
+
+  var description: String {
+    "MetadataSearchRequestPayload(originalFileName: \(originalFileName ?? "nil"), originalPath: \(originalPath ?? "nil"), page: \(page.map(String.init) ?? "nil"), type: \(type ?? "nil"), withExif: \(withExif.map(String.init) ?? "nil"))"
+  }
 }
 
 private final class ProgressRecorder: @unchecked Sendable {
