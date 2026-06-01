@@ -89,14 +89,14 @@ final class ThumbnailStore: ObservableObject {
 
   private final class InFlightRegistry: @unchecked Sendable {
     private struct InFlightLoad {
-      let task: Task<NSImage?, Never>
+      let task: Task<ImageLoadResult, Never>
       var waiterIDs: Set<UUID>
     }
 
     private let lock = NSLock()
     private var loads: [String: InFlightLoad] = [:]
 
-    func existingTask(cacheKey: String, waiterID: UUID) -> Task<NSImage?, Never>? {
+    func existingTask(cacheKey: String, waiterID: UUID) -> Task<ImageLoadResult, Never>? {
       lock.lock()
       defer { lock.unlock() }
 
@@ -109,7 +109,7 @@ final class ThumbnailStore: ObservableObject {
       return load.task
     }
 
-    func insert(task: Task<NSImage?, Never>, cacheKey: String, waiterID: UUID) {
+    func insert(task: Task<ImageLoadResult, Never>, cacheKey: String, waiterID: UUID) {
       lock.lock()
       loads[cacheKey] = InFlightLoad(task: task, waiterIDs: [waiterID])
       lock.unlock()
@@ -167,6 +167,12 @@ final class ThumbnailStore: ObservableObject {
     let cgImage: CGImage?
   }
 
+  private struct ImageLoadResult: @unchecked Sendable {
+    let image: NSImage?
+
+    static let empty = ImageLoadResult(image: nil)
+  }
+
   init() {
     cacheDelegateProxy.owner = self
     cache.delegate = cacheDelegateProxy
@@ -211,21 +217,19 @@ final class ThumbnailStore: ObservableObject {
       telemetry.inFlightStarts += 1
       let limiter = loadClass == .interactive ? interactiveLoadLimiter : backgroundLoadLimiter
       let taskPriority: TaskPriority = loadClass == .interactive ? .userInitiated : .utility
-      let task = Task<NSImage?, Never>(priority: taskPriority) { [item, context, size, localThumbnailLoader, limiter] in
+      let task = Task<ImageLoadResult, Never>(priority: taskPriority) { [item, context, size, localThumbnailLoader, limiter] in
         await limiter.withPermit {
-          guard !Task.isCancelled else { return nil }
+          guard !Task.isCancelled else { return .empty }
 
           switch item.source {
           case .localFile(let fileURL):
-            if size == .original {
-              return await Self.loadFullResolutionImage(from: fileURL)
-            }
-            return await localThumbnailLoader.loadThumbnail(
-              for: fileURL,
-              maxPixelSize: size.maxPixelSize
+            return await Self.loadLocalImage(
+              from: fileURL,
+              size: size,
+              loader: localThumbnailLoader
             )
           case .remoteAsset(let assetID):
-            guard let context else { return nil }
+            guard let context else { return .empty }
             return await Self.loadRemoteImage(
               assetID: assetID,
               context: context,
@@ -241,7 +245,7 @@ final class ThumbnailStore: ObservableObject {
 
     return await withTaskCancellationHandler(
       operation: {
-        let image = await task.value
+        let image = await task.value.image
         guard !Task.isCancelled else {
           inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
           return nil
@@ -284,7 +288,7 @@ final class ThumbnailStore: ObservableObject {
     }
     let task = existingTask ?? {
       telemetry.inFlightStarts += 1
-      let task = Task<NSImage?, Never>(priority: .utility) { [context, backgroundLoadLimiter] in
+      let task = Task<ImageLoadResult, Never>(priority: .utility) { [context, backgroundLoadLimiter] in
         await backgroundLoadLimiter.withPermit {
           await Self.loadPersonRemoteImage(personID: personID, context: context)
         }
@@ -296,7 +300,7 @@ final class ThumbnailStore: ObservableObject {
 
     return await withTaskCancellationHandler(
       operation: {
-        let image = await task.value
+        let image = await task.value.image
         guard !Task.isCancelled else {
           inFlightRegistry.releaseWaiter(cacheKey: cacheKey, waiterID: waiterID, cancelTask: true)
           return nil
@@ -442,18 +446,35 @@ final class ThumbnailStore: ObservableObject {
     )
   }
 
+  @MainActor
+  private static func loadLocalImage(
+    from fileURL: URL,
+    size: ThumbnailSize,
+    loader: ThumbnailLoader
+  ) async -> ImageLoadResult {
+    if size == .original {
+      return await loadFullResolutionImage(from: fileURL)
+    }
+
+    let image = await loader.loadThumbnail(
+      for: fileURL,
+      maxPixelSize: size.maxPixelSize
+    )
+    return ImageLoadResult(image: image)
+  }
+
   private static func loadRemoteImage(
     assetID: String,
     context: AppState.ThumbnailContext,
     size: ThumbnailSize
-  ) async -> NSImage? {
+  ) async -> ImageLoadResult {
     let url: URL?
     if size == .original {
       url = originalURL(baseURL: context.baseURL, assetID: assetID)
     } else {
       url = thumbnailURL(baseURL: context.baseURL, assetID: assetID, size: size)
     }
-    guard let url else { return nil }
+    guard let url else { return .empty }
 
     var request = URLRequest(url: url)
     context.apply(to: &request)
@@ -464,19 +485,19 @@ final class ThumbnailStore: ObservableObject {
         let httpResponse = response as? HTTPURLResponse,
         (200...299).contains(httpResponse.statusCode)
       else {
-        return nil
+        return .empty
       }
 
       return await decodeImage(from: data, size: size)
     } catch {
-      return nil
+      return .empty
     }
   }
 
   private static func loadPersonRemoteImage(
     personID: String,
     context: AppState.ThumbnailContext
-  ) async -> NSImage? {
+  ) async -> ImageLoadResult {
     let url = context.baseURL.appending(path: "people").appending(path: personID).appending(path: "thumbnail")
 
     var request = URLRequest(url: url)
@@ -488,16 +509,17 @@ final class ThumbnailStore: ObservableObject {
         let httpResponse = response as? HTTPURLResponse,
         (200...299).contains(httpResponse.statusCode)
       else {
-        return nil
+        return .empty
       }
 
       return await decodeImage(from: data, size: .thumbnail)
     } catch {
-      return nil
+      return .empty
     }
   }
 
-  private static func loadFullResolutionImage(from fileURL: URL) async -> NSImage? {
+  @MainActor
+  private static func loadFullResolutionImage(from fileURL: URL) async -> ImageLoadResult {
     let result = await Task.detached(priority: .utility) { () -> DecodedImageResult in
       guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
         return DecodedImageResult(cgImage: nil)
@@ -506,13 +528,13 @@ final class ThumbnailStore: ObservableObject {
       return makeDecodedImageResult(from: source, maxPixelSize: maxPixelSize(for: source, size: .original))
     }.value
 
-    guard let cgImage = result.cgImage else { return nil }
-    return await MainActor.run {
-      NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    }
+    guard let cgImage = result.cgImage else { return .empty }
+    let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    return ImageLoadResult(image: image)
   }
 
-  private static func decodeImage(from data: Data, size: ThumbnailSize) async -> NSImage? {
+  @MainActor
+  private static func decodeImage(from data: Data, size: ThumbnailSize) async -> ImageLoadResult {
     let result = await Task.detached(priority: .utility) { () -> DecodedImageResult in
       guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
         return DecodedImageResult(cgImage: nil)
@@ -521,10 +543,9 @@ final class ThumbnailStore: ObservableObject {
       return makeDecodedImageResult(from: source, maxPixelSize: maxPixelSize(for: source, size: size))
     }.value
 
-    guard let cgImage = result.cgImage else { return nil }
-    return await MainActor.run {
-      NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    }
+    guard let cgImage = result.cgImage else { return .empty }
+    let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    return ImageLoadResult(image: image)
   }
 
   private nonisolated static func makeDecodedImageResult(from source: CGImageSource, maxPixelSize: Int) -> DecodedImageResult {

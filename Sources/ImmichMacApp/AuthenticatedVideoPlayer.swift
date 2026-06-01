@@ -1,4 +1,5 @@
 #if canImport(SwiftUI)
+import Combine
 @preconcurrency import Foundation
 import SwiftUI
 
@@ -52,12 +53,16 @@ struct AuthenticatedVideoPlayer: View {
       let newPlayer = AVPlayer(playerItem: playerItem)
       newPlayer.actionAtItemEnd = .pause
       self.player = newPlayer
-
-      // Observe end of playback
-      let center = NotificationCenter.default
-      for await _ in center.notifications(named: .AVPlayerItemDidPlayToEndTime, object: playerItem) {
-        onPlaybackEnded?()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+      guard
+        let endedItem = notification.object as? AVPlayerItem,
+        endedItem === player?.currentItem
+      else {
+        return
       }
+
+      onPlaybackEnded?()
     }
   }
 }
