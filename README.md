@@ -80,7 +80,7 @@ The bundle is created at `.build/app/ImmichMacApp.app` unless `--output` is prov
 CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh
 ```
 
-Packaging note: the current bundle script still depends on the Immich logo asset from the original monorepo layout. If you are working only from this standalone split, `swift run` and `swift test` are the reliable local workflows; add the logo asset or adjust `ICON_SOURCE` in `scripts/build-app.sh` before using the bundle script.
+Packaging note: the bundle script uses the Immich logo asset when it is available in either the standalone repo or original monorepo layout. If the logo is not present, it still produces a signed app bundle with the default macOS app icon.
 
 ## Repository Layout
 

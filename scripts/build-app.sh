@@ -65,7 +65,13 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-REPO_DIR="$(cd "${PROJECT_DIR}/.." && pwd)"
+WORKSPACE_DIR="$(cd "${PROJECT_DIR}/.." && pwd)"
+
+if [[ -d "${PROJECT_DIR}/.git" ]]; then
+  REPO_DIR="$PROJECT_DIR"
+else
+  REPO_DIR="$WORKSPACE_DIR"
+fi
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
   OUTPUT_ROOT="${PROJECT_DIR}/.build/app"
@@ -76,13 +82,34 @@ CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 ICONSET_DIR="${OUTPUT_ROOT}/${APP_NAME}.iconset"
-ICON_SOURCE="${REPO_DIR}/design/immich-logo.png"
+ICON_SOURCE="${ICON_SOURCE:-}"
 
-for tool in swift sips iconutil plutil codesign; do
+for tool in swift plutil codesign; do
   require_tool "$tool"
 done
 
-require_file "$ICON_SOURCE"
+if [[ -z "$ICON_SOURCE" ]]; then
+  for candidate in \
+    "${PROJECT_DIR}/design/immich-logo.png" \
+    "${REPO_DIR}/design/immich-logo.png" \
+    "${WORKSPACE_DIR}/design/immich-logo.png"
+  do
+    if [[ -f "$candidate" ]]; then
+      ICON_SOURCE="$candidate"
+      break
+    fi
+  done
+fi
+
+HAS_ICON=0
+if [[ -n "$ICON_SOURCE" && -f "$ICON_SOURCE" ]]; then
+  HAS_ICON=1
+  for tool in sips iconutil; do
+    require_tool "$tool"
+  done
+else
+  echo "Icon source not found; building app bundle without a custom icon." >&2
+fi
 
 kill_running_app() {
   local bundle_id="$1"
@@ -195,7 +222,7 @@ if [[ ! -x "$EXECUTABLE_PATH" ]]; then
 fi
 
 rm -rf "$APP_BUNDLE" "$ICONSET_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$EXECUTABLE_PATH" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
@@ -206,18 +233,25 @@ create_icon() {
   sips -s format png -z "$size" "$size" "$ICON_SOURCE" --out "${ICONSET_DIR}/${filename}" >/dev/null
 }
 
-create_icon 16 "icon_16x16.png"
-create_icon 32 "icon_16x16@2x.png"
-create_icon 32 "icon_32x32.png"
-create_icon 64 "icon_32x32@2x.png"
-create_icon 128 "icon_128x128.png"
-create_icon 256 "icon_128x128@2x.png"
-create_icon 256 "icon_256x256.png"
-create_icon 512 "icon_256x256@2x.png"
-create_icon 512 "icon_512x512.png"
-create_icon 1024 "icon_512x512@2x.png"
+ICON_PLIST_ENTRY=""
+if ((HAS_ICON)); then
+  mkdir -p "$ICONSET_DIR"
 
-iconutil -c icns "$ICONSET_DIR" -o "${RESOURCES_DIR}/${APP_NAME}.icns"
+  create_icon 16 "icon_16x16.png"
+  create_icon 32 "icon_16x16@2x.png"
+  create_icon 32 "icon_32x32.png"
+  create_icon 64 "icon_32x32@2x.png"
+  create_icon 128 "icon_128x128.png"
+  create_icon 256 "icon_128x128@2x.png"
+  create_icon 256 "icon_256x256.png"
+  create_icon 512 "icon_256x256@2x.png"
+  create_icon 512 "icon_512x512.png"
+  create_icon 1024 "icon_512x512@2x.png"
+
+  iconutil -c icns "$ICONSET_DIR" -o "${RESOURCES_DIR}/${APP_NAME}.icns"
+  ICON_PLIST_ENTRY="  <key>CFBundleIconFile</key>
+  <string>${APP_NAME}</string>"
+fi
 
 cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -230,8 +264,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
   <string>${BUNDLE_NAME}</string>
   <key>CFBundleExecutable</key>
   <string>${APP_NAME}</string>
-  <key>CFBundleIconFile</key>
-  <string>${APP_NAME}</string>
+${ICON_PLIST_ENTRY}
   <key>CFBundleIdentifier</key>
   <string>${BUNDLE_ID}</string>
   <key>CFBundleInfoDictionaryVersion</key>
