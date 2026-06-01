@@ -391,6 +391,41 @@ final class URLSessionImmichAPIClientTests: XCTestCase {
     XCTAssertTrue(result.assets.isEmpty)
   }
 
+  func testSearchMetadataTextOmitsEmptyQueryWhenFiltersAreUsed() async throws {
+    let client = URLSessionImmichAPIClient(session: makeSession { request in
+      XCTAssertEqual(request.url?.path, "/api/search/metadata")
+      XCTAssertEqual(request.httpMethod, "POST")
+
+      let body = try XCTUnwrap(self.requestBody(for: request))
+      let payload = try JSONDecoder().decode(MetadataSearchRequestPayload.self, from: body)
+      XCTAssertNil(payload.originalFileName)
+      XCTAssertEqual(payload.isFavorite, true)
+
+      let response = HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil)!
+      let data = #"{"assets":{"items":[],"total":0,"nextPage":null}}"#.data(using: .utf8)!
+      return (response, data)
+    })
+    let session = UserSession(
+      accessToken: "token",
+      isAdmin: false,
+      shouldChangePassword: false,
+      userEmail: "demo@immich.app",
+      userID: "user-1",
+      userName: "Demo User"
+    )
+    var filters = SearchFilters()
+    filters.isFavorite = true
+
+    let result = try await client.searchMetadataText(
+      server: ImmichServer(baseURL: try XCTUnwrap(URL(string: "https://demo.immich.app/api"))),
+      session: session,
+      query: "",
+      filters: filters
+    )
+
+    XCTAssertTrue(result.assets.isEmpty)
+  }
+
   func testFetchScreenshotsIncludesIOSStylePNGScreenshotsAcrossPages() async throws {
     let client = URLSessionImmichAPIClient(session: makeSession { request in
       XCTAssertEqual(request.url?.path, "/api/search/metadata")
@@ -724,6 +759,7 @@ private struct MetadataSearchRequestPayload: Decodable, CustomStringConvertible 
   let withExif: Bool?
   let takenAfter: String?
   let takenBefore: String?
+  let isFavorite: Bool?
 
   var description: String {
     "MetadataSearchRequestPayload(originalFileName: \(originalFileName ?? "nil"), originalPath: \(originalPath ?? "nil"), page: \(page.map(String.init) ?? "nil"), type: \(type ?? "nil"), withExif: \(withExif.map(String.init) ?? "nil"))"

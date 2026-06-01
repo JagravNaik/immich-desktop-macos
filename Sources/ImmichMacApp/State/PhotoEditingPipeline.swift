@@ -45,6 +45,7 @@ final class PhotoEditingPipeline: ObservableObject {
 
   private var sourceNSImage: NSImage?
   private var sourceImageData: Data?
+  private var sourceAspectRatio: Double = 1
   private var filterPreviewCache: [FilterPreset: NSImage] = [:]
   private var renderTask: Task<Void, Never>?
   private var sourceLoadTask: Task<Void, Never>?
@@ -99,7 +100,8 @@ final class PhotoEditingPipeline: ObservableObject {
     warmth != 0 || sharpness != 0 ||
     selectedFilter != .original ||
     rotation != 0 || rotationSteps != 0 ||
-    flipHorizontal || flipVertical
+    flipHorizontal || flipVertical ||
+    cropAspectRatio != .free || cropRect != CGRect(x: 0, y: 0, width: 1, height: 1)
   }
 
   // MARK: - Filter Presets
@@ -118,7 +120,7 @@ final class PhotoEditingPipeline: ObservableObject {
     var id: String { rawValue }
   }
 
-  enum CropAspect: String, CaseIterable, Identifiable {
+  enum CropAspect: String, CaseIterable, Identifiable, Sendable {
     case free = "Free"
     case square = "1:1"
     case fourThree = "4:3"
@@ -164,6 +166,7 @@ final class PhotoEditingPipeline: ObservableObject {
       $rotationSteps.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $flipHorizontal.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $flipVertical.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+      $cropAspectRatio.dropFirst().map { _ in () }.eraseToAnyPublisher(),
       $cropRect.dropFirst().map { _ in () }.eraseToAnyPublisher(),
     ]
 
@@ -180,11 +183,13 @@ final class PhotoEditingPipeline: ObservableObject {
     let generation = sourceLoadGeneration
 
     sourceNSImage = nsImage
+    sourceAspectRatio = nsImage.size.height > 0 ? Double(nsImage.size.width / nsImage.size.height) : 1
     sourceImageData = nil
     editedImage = nil
     filterPreviewCache.removeAll()
     filterPreviewCacheVersion &+= 1
     isProcessing = false
+    cropAspectRatio = .free
     cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     sourceLoadTask = Task { [weak self] in
@@ -484,6 +489,45 @@ final class PhotoEditingPipeline: ObservableObject {
     sharpness = 0.3
   }
 
+  func setCropAspectRatio(_ aspect: CropAspect) {
+    cropAspectRatio = aspect
+    updateCropRectForCurrentAspect()
+  }
+
+  private func updateCropRectForCurrentAspect() {
+    cropRect = Self.centeredCropRect(
+      for: cropAspectRatio,
+      sourceAspectRatio: effectiveCropAspectRatio
+    )
+  }
+
+  private var effectiveCropAspectRatio: Double {
+    guard sourceAspectRatio.isFinite, sourceAspectRatio > 0 else { return 1 }
+    return abs(rotationSteps) % 2 == 1 ? 1 / sourceAspectRatio : sourceAspectRatio
+  }
+
+  func resetCrop() {
+    cropAspectRatio = .free
+    cropRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+  }
+
+  private nonisolated static func centeredCropRect(for aspect: CropAspect, sourceAspectRatio: Double) -> CGRect {
+    guard let targetRatio = aspect.ratio,
+          sourceAspectRatio.isFinite,
+          sourceAspectRatio > 0,
+          targetRatio > 0 else {
+      return CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+
+    if sourceAspectRatio > targetRatio {
+      let normalizedWidth = targetRatio / sourceAspectRatio
+      return CGRect(x: (1 - normalizedWidth) / 2, y: 0, width: normalizedWidth, height: 1)
+    } else {
+      let normalizedHeight = sourceAspectRatio / targetRatio
+      return CGRect(x: 0, y: (1 - normalizedHeight) / 2, width: 1, height: normalizedHeight)
+    }
+  }
+
   func resetAll() {
     exposure = 0; brightness = 0; contrast = 0
     highlights = 0; shadows = 0; saturation = 0
@@ -497,10 +541,16 @@ final class PhotoEditingPipeline: ObservableObject {
 
   func rotateLeft() {
     rotationSteps = (rotationSteps - 1 + 4) % 4
+    if cropAspectRatio != .free {
+      updateCropRectForCurrentAspect()
+    }
   }
 
   func rotateRight() {
     rotationSteps = (rotationSteps + 1) % 4
+    if cropAspectRatio != .free {
+      updateCropRectForCurrentAspect()
+    }
   }
 
   // MARK: - Export

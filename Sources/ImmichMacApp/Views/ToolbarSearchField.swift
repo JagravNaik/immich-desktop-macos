@@ -34,18 +34,16 @@ struct ToolbarSearchField: View {
           )
           .frame(height: 24)
 
-          if !searchFilters.isEmpty {
-            Button {
-              onFilterToggle?()
-            } label: {
-              Image(systemName: "line.3.horizontal.circle.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(.blue)
-                .frame(width: 20, height: 24)
-            }
-            .buttonStyle(.plain)
-            .help("Active filters")
+          Button {
+            onFilterToggle?()
+          } label: {
+            Image(systemName: searchFilters.isEmpty ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+              .font(.system(size: 11))
+              .foregroundStyle(searchFilters.isEmpty ? Color.secondary : Color.accentColor)
+              .frame(width: 20, height: 24)
           }
+          .buttonStyle(.plain)
+          .help(searchFilters.isEmpty ? "Search filters" : "Active search filters")
         }
         .frame(width: expandedWidth, height: 24)
         .overlay(
@@ -258,6 +256,140 @@ struct SearchSuggestionsOverlay: View {
     .frame(width: 260)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
     .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+  }
+}
+
+// MARK: - Search Filter Popover
+
+struct SearchFilterPopover: View {
+  @Binding var filters: SearchFilters
+  let onClear: () -> Void
+
+  private var mediaType: Binding<SearchFilters.MediaType> {
+    Binding(
+      get: { filters.mediaType ?? .all },
+      set: { filters.mediaType = $0 == .all ? nil : $0 }
+    )
+  }
+
+  private var favoritesOnly: Binding<Bool> {
+    Binding(
+      get: { filters.isFavorite == true },
+      set: { filters.isFavorite = $0 ? true : nil }
+    )
+  }
+
+  private func textBinding(_ keyPath: WritableKeyPath<SearchFilters, String?>) -> Binding<String> {
+    Binding(
+      get: { filters[keyPath: keyPath] ?? "" },
+      set: { value in
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        filters[keyPath: keyPath] = trimmed.isEmpty ? nil : trimmed
+      }
+    )
+  }
+
+  private enum DateBoundary {
+    case startOfDay
+    case endOfDay
+  }
+
+  private func dateToggle(
+    _ keyPath: WritableKeyPath<SearchFilters, Date?>,
+    defaultOffsetDays: Int,
+    boundary: DateBoundary
+  ) -> Binding<Bool> {
+    Binding(
+      get: { filters[keyPath: keyPath] != nil },
+      set: { isEnabled in
+        if isEnabled {
+          let defaultDate = Calendar.current.date(byAdding: .day, value: defaultOffsetDays, to: Date()) ?? Date()
+          filters[keyPath: keyPath] = filters[keyPath: keyPath] ?? normalizedDate(defaultDate, boundary: boundary)
+        } else {
+          filters[keyPath: keyPath] = nil
+        }
+      }
+    )
+  }
+
+  private func dateBinding(_ keyPath: WritableKeyPath<SearchFilters, Date?>, boundary: DateBoundary) -> Binding<Date> {
+    Binding(
+      get: { filters[keyPath: keyPath] ?? normalizedDate(Date(), boundary: boundary) },
+      set: { filters[keyPath: keyPath] = normalizedDate($0, boundary: boundary) }
+    )
+  }
+
+  private func normalizedDate(_ date: Date, boundary: DateBoundary) -> Date {
+    let calendar = Calendar.current
+    let start = calendar.startOfDay(for: date)
+    switch boundary {
+    case .startOfDay:
+      return start
+    case .endOfDay:
+      let nextDay = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(24 * 60 * 60)
+      return nextDay.addingTimeInterval(-0.001)
+    }
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      HStack {
+        Text("Search Filters")
+          .font(.headline)
+        Spacer()
+        Button("Clear") {
+          onClear()
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(filters.isEmpty ? .tertiary : .secondary)
+        .disabled(filters.isEmpty)
+      }
+
+      Picker("Media", selection: mediaType) {
+        ForEach(SearchFilters.MediaType.allCases) { type in
+          Text(type.rawValue).tag(type)
+        }
+      }
+      .pickerStyle(.segmented)
+
+      Toggle("Favorites only", isOn: favoritesOnly)
+
+      Divider()
+
+      GroupBox("Place") {
+        VStack(alignment: .leading, spacing: 8) {
+          TextField("City", text: textBinding(\.city))
+          TextField("Country", text: textBinding(\.country))
+        }
+        .textFieldStyle(.roundedBorder)
+      }
+
+      GroupBox("Camera") {
+        VStack(alignment: .leading, spacing: 8) {
+          TextField("Make", text: textBinding(\.cameraMake))
+          TextField("Model", text: textBinding(\.cameraModel))
+        }
+        .textFieldStyle(.roundedBorder)
+      }
+
+      GroupBox("Date Taken") {
+        VStack(alignment: .leading, spacing: 8) {
+          Toggle("After", isOn: dateToggle(\.takenAfter, defaultOffsetDays: -30, boundary: .startOfDay))
+          if filters.takenAfter != nil {
+            DatePicker("", selection: dateBinding(\.takenAfter, boundary: .startOfDay), displayedComponents: .date)
+              .labelsHidden()
+          }
+
+          Toggle("Before", isOn: dateToggle(\.takenBefore, defaultOffsetDays: 0, boundary: .endOfDay))
+          if filters.takenBefore != nil {
+            DatePicker("", selection: dateBinding(\.takenBefore, boundary: .endOfDay), displayedComponents: .date)
+              .labelsHidden()
+          }
+        }
+      }
+    }
+    .padding(16)
+    .frame(width: 280)
   }
 }
 #endif

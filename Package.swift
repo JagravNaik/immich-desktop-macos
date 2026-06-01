@@ -15,14 +15,10 @@ let package = Package(
     .library(name: "ImmichSync", targets: ["ImmichSync"]),
   ],
   targets: [
-    .target(
-      name: "ImmichCore",
-      exclude: ["AGENTS.md"]
-    ),
+    .target(name: "ImmichCore"),
     .target(
       name: "ImmichAPI",
-      dependencies: ["ImmichCore"],
-      exclude: ["AGENTS.md"]
+      dependencies: ["ImmichCore"]
     ),
     .target(
       name: "ImmichPersistence",
@@ -38,8 +34,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "ImmichMacApp",
-      dependencies: ["ImmichCore", "ImmichAPI", "ImmichPersistence", "ImmichMedia", "ImmichSync"],
-      exclude: ["AGENTS.md", "State/AGENTS.md", "Views/AGENTS.md"]
+      dependencies: ["ImmichCore", "ImmichAPI", "ImmichPersistence", "ImmichMedia", "ImmichSync"]
     ),
     .testTarget(
       name: "ImmichAPITests",

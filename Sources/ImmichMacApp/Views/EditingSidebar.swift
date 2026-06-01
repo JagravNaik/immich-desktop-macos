@@ -182,13 +182,44 @@ struct EditingSidebar: View {
 
       Divider()
 
-      Text("Aspect Ratio")
-        .font(.caption.weight(.medium))
-        .foregroundStyle(.secondary)
+      HStack {
+        Text("Aspect Ratio")
+          .font(.caption.weight(.medium))
+          .foregroundStyle(.secondary)
+        Spacer()
+        Button("Reset") {
+          withAnimation(ImmichMotion.Curves.structuralShort) {
+            pipeline.resetCrop()
+          }
+        }
+        .buttonStyle(.plain)
+        .font(.caption)
+        .disabled(pipeline.cropAspectRatio == .free && pipeline.cropRect == CGRect(x: 0, y: 0, width: 1, height: 1))
+      }
 
-      Text("Coming soon")
-        .font(.caption2)
-        .foregroundStyle(.tertiary)
+      LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 8)], spacing: 8) {
+        ForEach(PhotoEditingPipeline.CropAspect.allCases) { aspect in
+          Button {
+            withAnimation(ImmichMotion.Curves.interactiveFast) {
+              pipeline.setCropAspectRatio(aspect)
+            }
+          } label: {
+            Text(aspect.rawValue)
+              .font(.caption.weight(.medium))
+              .frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.bordered)
+          .tint(pipeline.cropAspectRatio == aspect ? .accentColor : .secondary)
+          .help(aspect == .free ? "Use the full image" : "Crop to \(aspect.rawValue)")
+        }
+      }
+
+      if pipeline.cropAspectRatio != .free {
+        Text("The first crop pass uses a centered \(pipeline.cropAspectRatio.rawValue) crop. Drag handles can be added on top of this pipeline later.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
 
       Divider()
 

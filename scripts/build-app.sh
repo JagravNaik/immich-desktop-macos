@@ -7,9 +7,11 @@ BUNDLE_NAME="Immich"
 BUNDLE_ID="app.immich.desktop.macos"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
 OPEN_AFTER_BUILD=0
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-"-"}"
 
 usage() {
   echo "Usage: $0 [--debug|--release] [--open] [--output <directory>]" >&2
+  echo "Environment: CODESIGN_IDENTITY=\"Apple Development: Your Name (TEAMID)\"" >&2
 }
 
 require_tool() {
@@ -81,6 +83,29 @@ for tool in swift sips iconutil plutil codesign; do
 done
 
 require_file "$ICON_SOURCE"
+
+kill_running_app() {
+  local bundle_id="$1"
+  local executable_name="$2"
+  local display_name="$3"
+
+  if ! pgrep -x "$executable_name" >/dev/null 2>&1; then
+    return
+  fi
+
+  osascript -e "tell application id \"${bundle_id}\" to quit" >/dev/null 2>&1 \
+    || osascript -e "tell application \"${display_name}\" to quit" >/dev/null 2>&1 \
+    || true
+
+  for _ in {1..30}; do
+    if ! pgrep -x "$executable_name" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.1
+  done
+
+  pkill -x "$executable_name" >/dev/null 2>&1 || true
+}
 
 resolve_version() {
   if [[ -n "${VERSION:-}" ]]; then
@@ -234,12 +259,20 @@ PLIST
 printf 'APPL????' > "${CONTENTS_DIR}/PkgInfo"
 
 plutil -lint "${CONTENTS_DIR}/Info.plist" >/dev/null
-codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null
+
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  echo "Signing app with ad hoc identity. Set CODESIGN_IDENTITY to use a stable development certificate." >&2
+else
+  echo "Signing app with identity: ${CODESIGN_IDENTITY}" >&2
+fi
+
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 
 rm -rf "$ICONSET_DIR"
 
 echo "Built app bundle: ${APP_BUNDLE}"
 
 if ((OPEN_AFTER_BUILD)); then
+  kill_running_app "$BUNDLE_ID" "$APP_NAME" "$BUNDLE_NAME"
   open "$APP_BUNDLE"
 fi

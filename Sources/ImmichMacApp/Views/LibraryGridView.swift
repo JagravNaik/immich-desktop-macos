@@ -75,7 +75,7 @@ struct LibraryGridView: View {
     return interactiveGridChrome(
       ScrollView {
       LazyVGrid(columns: yearsGridColumns, spacing: 8) {
-        ForEach(appState.libraryYearSections) { section in
+        ForEach(appState.visibleLibraryYearSections) { section in
           if let item = section.representativeItem ?? section.items.first {
             Button {
               // Switch to months view
@@ -116,7 +116,7 @@ struct LibraryGridView: View {
 
   private func monthsMosaic(scrollProxy: ScrollViewProxy) -> some View {
     let context = appState.thumbnailContext
-    let sections = appState.librarySections
+    let sections = appState.visibleLibrarySections
     return interactiveGridChrome(
       ScrollView {
       LazyVStack(alignment: .leading, spacing: 16) {
@@ -132,6 +132,15 @@ struct LibraryGridView: View {
           .onAppear {
             appState.loadMoreTimelineIfNeeded(after: section.id)
           }
+        }
+
+        if appState.canLoadMoreTimeline {
+          Color.clear
+            .frame(height: 1)
+            .onAppear {
+              guard !appState.isLoadingTimeline else { return }
+              Task { await appState.loadNextTimelinePage() }
+            }
         }
 
         // Footer
@@ -252,8 +261,9 @@ struct LibraryGridView: View {
     ScrollViewReader { proxy in
       Group {
         if appState.filteredItems.isEmpty {
-          if appState.isLoadingTimeline || appState.isSearching {
+          if appState.isLoadingTimeline || appState.isSearching || shouldLoadMoreForEmptyFilteredLibrary {
             loadingView
+              .onAppear(perform: loadMoreForEmptyFilteredLibraryIfNeeded)
           } else {
             emptyView
           }
@@ -302,11 +312,11 @@ struct LibraryGridView: View {
   /// Flat ordered list of all visible items matching the current grid order.
   private var orderedItems: [AppState.PhotoItem] {
     let isLibrary = appState.sidebarSelection == .library || appState.sidebarSelection == nil
-    if isLibrary && appState.searchText.isEmpty {
+    if isLibrary && !appState.hasActiveSearchQueryOrFilters {
       if appState.timelineViewMode == .months {
-        return appState.librarySections.flatMap(\.items)
+        return appState.visibleLibrarySections.flatMap(\.items)
       } else if appState.timelineViewMode == .years {
-        return appState.libraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
+        return appState.visibleLibraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
       }
     }
     return appState.filteredItems
@@ -498,7 +508,19 @@ struct LibraryGridView: View {
 
   private var isLibraryTimeline: Bool {
     (appState.sidebarSelection == .library || appState.sidebarSelection == nil)
-    && appState.searchText.isEmpty
+    && !appState.hasActiveSearchQueryOrFilters
+  }
+
+  private var shouldLoadMoreForEmptyFilteredLibrary: Bool {
+    isLibraryTimeline
+    && (appState.libraryMediaFilter != .all || appState.hideScreenshotsInLibrary)
+    && appState.canLoadMoreTimeline
+    && !appState.isLoadingTimeline
+  }
+
+  private func loadMoreForEmptyFilteredLibraryIfNeeded() {
+    guard shouldLoadMoreForEmptyFilteredLibrary else { return }
+    Task { await appState.loadNextTimelinePage() }
   }
 
   private func applyScrubSelection(to itemID: String) {
@@ -640,7 +662,10 @@ struct LibraryGridView: View {
         }
       }
       .padding(.horizontal, appState.photoGridPadding)
-      .padding(.vertical, appState.photoGridPadding)
+      .padding(.top, appState.photoGridPadding)
+
+      searchPaginationFooter
+        .padding(.bottom, appState.photoGridPadding)
     }
     .onAppear {
       isKeyboardFocused = true
@@ -697,10 +722,37 @@ struct LibraryGridView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
+  @ViewBuilder
+  private var searchPaginationFooter: some View {
+    if appState.hasActiveSearchQueryOrFilters, appState.searchNextPage != nil {
+      HStack(spacing: 8) {
+        Spacer()
+        if appState.isSearching {
+          ProgressView()
+            .controlSize(.small)
+          Text("Loading more results…")
+            .foregroundStyle(.secondary)
+        } else {
+          Button("Load More Results") {
+            Task { await appState.loadMoreSearchResults() }
+          }
+          .buttonStyle(.bordered)
+        }
+        Spacer()
+      }
+      .padding(.vertical, 16)
+      .onAppear {
+        guard !appState.isSearching else { return }
+        Task { await appState.loadMoreSearchResults() }
+      }
+    }
+  }
+
   private func importFromFinder() {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = false
     panel.canChooseFiles = true
+    panel.allowedContentTypes = AppState.supportedImportContentTypes
     panel.allowsMultipleSelection = true
     panel.begin { response in
       guard response == .OK else { return }

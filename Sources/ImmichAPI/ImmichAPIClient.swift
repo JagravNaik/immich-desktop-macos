@@ -438,12 +438,24 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
   public func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(TrashedSearchRequest())
-    let response: SearchAssetsResponse = try await perform(request)
-    return response.assets.items.compactMap { $0.toTimelineAsset() }
+    var items: [AssetDetailResponse] = []
+    var page = 1
+
+    while true {
+      var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
+      request.httpMethod = "POST"
+      request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.httpBody = try JSONEncoder().encode(TrashedSearchRequest(page: page))
+      let response: SearchAssetsResponse = try await perform(request)
+      items.append(contentsOf: response.assets.items)
+
+      guard response.assets.nextPage?.isEmpty == false else {
+        break
+      }
+      page += 1
+    }
+
+    return items.compactMap { $0.toTimelineAsset() }
   }
 
   public func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {
@@ -472,7 +484,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(originalFileName: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(originalFileName: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
     )
     return Self.searchResult(from: response)
   }
@@ -481,7 +493,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(description: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(description: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
     )
     return Self.searchResult(from: response)
   }
@@ -490,7 +502,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(ocr: query, filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(ocr: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
     )
     return Self.searchResult(from: response)
   }
@@ -516,6 +528,11 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
   }
 
+  private static func nonEmptySearchText(_ query: String) -> String? {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
   private func searchPageNumber(from page: String?, defaultPage: Int? = nil) throws -> Int? {
     guard let page else { return defaultPage }
     guard let pageNumber = Int(page) else {
@@ -539,12 +556,11 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
   public func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] {
-    var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-    request.httpMethod = "POST"
-    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONEncoder().encode(MetadataSearchRequest(personIds: [personId], filters: SearchFilters()))
-    let response: SearchAssetsResponse = try await perform(request)
-    return response.assets.items.compactMap { $0.toTimelineAsset() }
+    try await fetchMetadataAssets(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(personIds: [personId], filters: SearchFilters())
+    )
   }
 
   public func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
@@ -1342,6 +1358,7 @@ private struct TimelineBucketResponse: Decodable {
   let country: [String?]
   let duration: [String?]
   let fileCreatedAt: [String]
+  let createdAt: [String]?
   let id: [String]
   let isFavorite: [Bool]
   let isImage: [Bool]
@@ -1401,7 +1418,8 @@ private enum TimelineBucketMapper {
         ratio: ratio,
         stackChildrenCount: stackChildrenCount,
         thumbhash: response.thumbhash[safe: index] ?? nil,
-        visibility: visibility
+        visibility: visibility,
+        addedAt: response.createdAt?[safe: index].flatMap { $0 }.flatMap(parseDate)
       )
     }
   }
@@ -1548,6 +1566,7 @@ private struct AlbumDetailResponse: Decodable {
 private struct AlbumAssetResponse: Decodable {
   let id: String
   let type: String?
+  let createdAt: String?
   let fileCreatedAt: String?
   let duration: String?
   let isFavorite: Bool?
@@ -1582,7 +1601,8 @@ private struct AlbumAssetResponse: Decodable {
       ratio: 1.0,
       stackChildrenCount: stack?.assetCount,
       thumbhash: thumbhash,
-      visibility: "timeline"
+      visibility: "timeline",
+      addedAt: self.createdAt.flatMap { TimelineBucketMapper.parseDate($0) }
     )
   }
 }
@@ -1634,6 +1654,7 @@ private struct AssetDetailResponse: Decodable {
   let id: String
   let type: String?
   let originalFileName: String?
+  let createdAt: String?
   let localDateTime: String?
   let fileCreatedAt: String?
   let exifInfo: ExifInfoResponse?
@@ -1712,7 +1733,8 @@ private struct AssetDetailResponse: Decodable {
       ratio: Double(exifInfo?.exifImageWidth ?? 1) / Double(exifInfo?.exifImageHeight ?? 1),
       stackChildrenCount: nil,
       thumbhash: nil,
-      visibility: "timeline"
+      visibility: "timeline",
+      addedAt: self.createdAt.flatMap { TimelineBucketMapper.parseDate($0) }
     )
   }
 }
@@ -1845,6 +1867,8 @@ private struct TrashRequest: Encodable {
 private struct TrashedSearchRequest: Encodable {
   let withDeleted = true
   let trashedAfter = "1970-01-01T00:00:00.000Z"
+  let page: Int
+  let size = 1000
 }
 
 // MARK: - Map DTOs

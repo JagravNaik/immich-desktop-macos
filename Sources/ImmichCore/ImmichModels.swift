@@ -318,6 +318,7 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
   public let city: String?
   public let country: String?
   public let createdAt: Date
+  public let addedAt: Date?
   public let duration: String?
   public let isFavorite: Bool
   public let isImage: Bool
@@ -349,12 +350,14 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
     ratio: Double,
     stackChildrenCount: Int?,
     thumbhash: String?,
-    visibility: String
+    visibility: String,
+    addedAt: Date? = nil
   ) {
     self.id = id
     self.city = city
     self.country = country
     self.createdAt = createdAt
+    self.addedAt = addedAt
     self.duration = duration
     self.isFavorite = isFavorite
     self.isImage = isImage
@@ -448,7 +451,7 @@ public enum SearchType: String, CaseIterable, Identifiable, Sendable {
   public var id: String { rawValue }
 }
 
-public struct SearchFilters: Sendable {
+public struct SearchFilters: Sendable, Equatable {
   public var cameraMake: String?
   public var cameraModel: String?
   public var city: String?

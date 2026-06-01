@@ -648,6 +648,31 @@ final class AppStateTests: XCTestCase {
   }
 
   @MainActor
+  func testFilterOnlySmartSearchUsesMetadataEndpoint() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setSearchResult(
+      SearchResult(
+        assets: [makeRemoteAsset(id: "favorite-filter-result")],
+        totalCount: 1
+      )
+    )
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    var filters = SearchFilters()
+    filters.isFavorite = true
+    appState.searchType = .smart
+    appState.searchFilters = filters
+
+    appState.performSearch(query: "")
+
+    try await eventually(timeout: .seconds(2)) {
+      let calls = await apiClient.recordedSearchCalls()
+      return calls == [SearchCall(kind: "filename", query: "", page: nil)]
+    }
+    XCTAssertEqual(appState.searchResults.map(\.id), ["favorite-filter-result"])
+    XCTAssertNil(appState.searchError)
+  }
+
+  @MainActor
   func testResetSearchStateClearsAll() {
     let appState = AppState(apiClient: MockImmichAPIClient())
     appState.searchResults = [makePhotoItem(id: "r")]
@@ -811,6 +836,49 @@ final class AppStateTests: XCTestCase {
 
     appState.sidebarSelection = .panoramas
     XCTAssertEqual(appState.filteredItems.map(\.id), ["pano-1"])
+
+    appState.sidebarSelection = .videos
+    await appState.refreshTimelineForCurrentSidebar()
+    XCTAssertEqual(appState.libraryItems.count, 9)
+    XCTAssertEqual(appState.filteredItems.map(\.id), ["video-1"])
+  }
+
+  @MainActor
+  func testDateAddedSortLoadsRemainingTimelineBuckets() async throws {
+    let apiClient = MockImmichAPIClient()
+    let bucketKeys = [
+      "2026-07-01",
+      "2026-06-01",
+      "2026-05-01",
+      "2026-04-01",
+      "2026-03-01",
+      "2026-02-01",
+      "2026-01-01",
+    ]
+    let timelineBuckets = bucketKeys.map { TimelineBucketSummary(timeBucket: $0, count: $0 == "2026-01-01" ? 3 : 1) }
+    var assetsByBucket: [String: [RemoteTimelineAsset]] = [:]
+
+    for bucketKey in bucketKeys.dropLast() {
+      assetsByBucket[bucketKey] = [makeRemoteAsset(id: "photo-\(bucketKey)", timeBucketKey: bucketKey, isImage: true)]
+    }
+
+    assetsByBucket["2026-01-01"] = [
+      makeRemoteAsset(id: "older-added-1", timeBucketKey: "2026-01-01", isImage: true),
+      makeRemoteAsset(id: "older-added-2", timeBucketKey: "2026-01-01", isImage: true),
+      makeRemoteAsset(id: "older-added-3", timeBucketKey: "2026-01-01", isImage: true),
+    ]
+
+    await apiClient.setTimelineData(buckets: timelineBuckets, assetsByBucket: assetsByBucket)
+    let appState = try await makeSignedInState(apiClient: apiClient)
+
+    XCTAssertEqual(appState.libraryItems.count, 6)
+
+    appState.sidebarSelection = .library
+    appState.setLibrarySortMode(.dateAdded)
+
+    try await eventually {
+      appState.libraryItems.count == 9
+    }
   }
 
   @MainActor

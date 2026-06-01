@@ -96,6 +96,7 @@ final class AppState: ObservableObject {
     let source: Source
     var title: String
     var date: Date
+    var dateAdded: Date = .distantPast
     var isFavorite: Bool
     let isVideo: Bool
     let isImported: Bool
@@ -144,6 +145,21 @@ final class AppState: ObservableObject {
     var id: String { rawValue }
   }
 
+  enum LibraryMediaFilter: String, CaseIterable, Identifiable {
+    case all = "All Items"
+    case photosOnly = "Photos Only"
+    case videosOnly = "Videos Only"
+
+    var id: String { rawValue }
+  }
+
+  enum LibrarySortMode: String, CaseIterable, Identifiable {
+    case dateCaptured = "Date Captured"
+    case dateAdded = "Date Added"
+
+    var id: String { rawValue }
+  }
+
   struct UploadRow: Identifiable {
     let id: UUID
     let filename: String
@@ -180,6 +196,9 @@ final class AppState: ObservableObject {
 
   // Library
   @Published var timelineViewMode: TimelineViewMode = .allPhotos
+  @Published var libraryMediaFilter: LibraryMediaFilter = .all
+  @Published var hideScreenshotsInLibrary = false
+  @Published var librarySortMode: LibrarySortMode = .dateCaptured
   @Published var libraryItems: [PhotoItem] = []
   @Published var isLoadingTimeline = false
   @Published var searchText = ""
@@ -333,6 +352,9 @@ final class AppState: ObservableObject {
   }
 
   private static let timelinePageSize = 6
+  static let supportedImportContentTypes: [UTType] = [.image, .movie]
+  private static let fallbackImageExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "gif", "webp", "bmp"]
+  private static let fallbackVideoExtensions: Set<String> = ["mov", "mp4", "m4v", "avi", "mkv", "webm", "3gp"]
   private static let photoGridScaleKey = "immich.photoGridScaleIndex"
   private static let dismissedReleaseVersionsKey = "immich.dismissedReleaseVersionsByServer"
   private static let photoGridThumbnailWidths: [CGFloat] = [110, 130, 150, 170, 190, 220, 250]
@@ -406,45 +428,143 @@ final class AppState: ObservableObject {
   }
 
   var filteredItems: [PhotoItem] {
-    let sectionFiltered: [PhotoItem] = {
-      switch sidebarSelection {
-      case .library, .none:
-        return libraryItems
-      case .favorites:
-        return libraryItems.filter(\.isFavorite)
-      case .videos:
-        return libraryItems.filter(\.isVideo)
-      case .livePhotos:
-        return libraryItems.filter(\.isLivePhoto)
-      case .panoramas:
-        return libraryItems.filter(\.isPanorama)
-      case .screenshots:
-        return screenshotItems
-      case .imports:
-        return libraryItems.filter(\.isImported)
-      case .album, .pinnedAlbum:
-        return activeAlbumItems
-      case .person:
-        return activePersonItems
-      case .map:
-        return mapSelectionItems
-      case .memory:
-        return activeMemoryItems
-      case .allPeople, .allMemories:
-        return []
-      case .recentlyDeleted:
-        return trashedItems
-      case .allAlbums, .collections:
-        return [] // Handled by dedicated views, not LibraryGridView
-      }
-    }()
+    let sectionFiltered = itemsForCurrentSidebar()
 
-    guard !searchText.isEmpty else { return sectionFiltered }
-    if !searchResults.isEmpty || isSearching || searchError != nil {
-      return searchResults
+    guard hasActiveSearchQueryOrFilters else {
+      return applyVisibleViewOptions(to: sectionFiltered)
     }
-    return sectionFiltered.filter {
-      $0.title.localizedCaseInsensitiveContains(searchText)
+
+    if !searchResults.isEmpty || isSearching || searchError != nil || !searchFilters.isEmpty {
+      let scopedResults = searchResults.filter { searchResultBelongsToCurrentSidebar($0) }
+      return applyVisibleViewOptions(to: scopedResults)
+    }
+
+    return applyVisibleViewOptions(
+      to: sectionFiltered.filter {
+        $0.title.localizedCaseInsensitiveContains(searchText)
+      }
+    )
+  }
+
+  var hasActiveSearchQueryOrFilters: Bool {
+    !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilters.isEmpty
+  }
+
+  private func itemsForCurrentSidebar() -> [PhotoItem] {
+    switch sidebarSelection {
+    case .library, .none:
+      return libraryItems
+    case .favorites:
+      return libraryItems.filter(\.isFavorite)
+    case .videos:
+      return libraryItems.filter(\.isVideo)
+    case .livePhotos:
+      return libraryItems.filter(\.isLivePhoto)
+    case .panoramas:
+      return libraryItems.filter(\.isPanorama)
+    case .screenshots:
+      return screenshotItems
+    case .imports:
+      return libraryItems.filter(\.isImported)
+    case .album, .pinnedAlbum:
+      return activeAlbumItems
+    case .person:
+      return activePersonItems
+    case .map:
+      return mapSelectionItems
+    case .memory:
+      return activeMemoryItems
+    case .allPeople, .allMemories:
+      return []
+    case .recentlyDeleted:
+      return trashedItems
+    case .allAlbums, .collections:
+      return [] // Handled by dedicated views, not LibraryGridView
+    }
+  }
+
+  private func searchResultBelongsToCurrentSidebar(_ item: PhotoItem) -> Bool {
+    switch sidebarSelection {
+    case .library, .none:
+      return true
+    case .favorites:
+      return item.isFavorite
+    case .videos:
+      return item.isVideo
+    case .livePhotos:
+      return item.isLivePhoto
+    case .panoramas:
+      return item.isPanorama
+    case .screenshots:
+      return screenshotItems.contains { $0.id == item.id }
+    case .imports:
+      return item.isImported
+    case .album, .pinnedAlbum:
+      return activeAlbumItems.contains { $0.id == item.id }
+    case .person:
+      return activePersonItems.contains { $0.id == item.id }
+    case .map:
+      return mapSelectionItems.contains { $0.id == item.id }
+    case .memory:
+      return activeMemoryItems.contains { $0.id == item.id }
+    case .recentlyDeleted:
+      return trashedItems.contains { $0.id == item.id }
+    case .allAlbums, .collections, .allPeople, .allMemories:
+      return false
+    }
+  }
+
+  private func applyVisibleViewOptions(to items: [PhotoItem]) -> [PhotoItem] {
+    guard viewOptionsApplyToCurrentSidebar else {
+      return sortItems(items)
+    }
+
+    var visibleItems = items
+    switch libraryMediaFilter {
+    case .all:
+      break
+    case .photosOnly:
+      visibleItems = visibleItems.filter { !$0.isVideo }
+    case .videosOnly:
+      visibleItems = visibleItems.filter(\.isVideo)
+    }
+
+    if hideScreenshotsInLibrary {
+      let screenshotIDs = Set(screenshotItems.map(\.id))
+      visibleItems = visibleItems.filter { !screenshotIDs.contains($0.id) }
+    }
+
+    return sortItems(visibleItems)
+  }
+
+  private var viewOptionsApplyToCurrentSidebar: Bool {
+    switch sidebarSelection {
+    case .library, .none, .favorites, .imports, .album, .pinnedAlbum, .person, .map, .memory:
+      return true
+    case .videos, .livePhotos, .panoramas, .screenshots, .recentlyDeleted,
+         .allAlbums, .collections, .allPeople, .allMemories:
+      return false
+    }
+  }
+
+  private func sortDate(for item: PhotoItem) -> Date {
+    switch librarySortMode {
+    case .dateCaptured:
+      return item.date
+    case .dateAdded:
+      return item.dateAdded
+    }
+  }
+
+  private func sortItems(_ items: [PhotoItem]) -> [PhotoItem] {
+    items.sorted { lhs, rhs in
+      switch librarySortMode {
+      case .dateCaptured:
+        if lhs.date != rhs.date { return lhs.date > rhs.date }
+      case .dateAdded:
+        if lhs.dateAdded != rhs.dateAdded { return lhs.dateAdded > rhs.dateAdded }
+      }
+      return lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
     }
   }
 
@@ -467,9 +587,16 @@ final class AppState: ObservableObject {
   @Published private(set) var librarySections: [LibrarySection] = []
   @Published private(set) var libraryYearSections: [LibrarySection] = []
 
+  var visibleLibrarySections: [LibrarySection] {
+    makeMonthSections(from: applyVisibleViewOptions(to: libraryItems))
+  }
+
+  var visibleLibraryYearSections: [LibrarySection] {
+    makeYearSections(from: applyVisibleViewOptions(to: libraryItems))
+  }
+
   func rebuildLibrarySections() {
-    let items = libraryItems
-    let groupedItems = Dictionary(grouping: items, by: \.timeBucketKey)
+    let groupedItems = Dictionary(grouping: libraryItems, by: \.timeBucketKey)
     librarySections = groupedItems.keys.sorted(by: >).compactMap { bucketKey in
       guard let items = groupedItems[bucketKey]?.sorted(by: { $0.date > $1.date }) else { return nil }
       return LibrarySection(
@@ -490,6 +617,39 @@ final class AppState: ObservableObject {
     }
     libraryYearSections = groupedByYear.keys.sorted(by: >).compactMap { year in
       guard let items = groupedByYear[year]?.sorted(by: { $0.date > $1.date }) else { return nil }
+      return LibrarySection(
+        id: "\(year)",
+        title: "\(year)",
+        itemCount: items.count,
+        items: items,
+        representativeItem: items.first
+      )
+    }
+  }
+
+  private func makeMonthSections(from items: [PhotoItem]) -> [LibrarySection] {
+    let groupedItems = Dictionary(grouping: items) { item in
+      Self.timelineBucketKey(for: sortDate(for: item))
+    }
+    return groupedItems.keys.sorted(by: >).compactMap { bucketKey in
+      guard let items = groupedItems[bucketKey].map(sortItems) else { return nil }
+      return LibrarySection(
+        id: bucketKey,
+        title: Self.date(forTimelineBucket: bucketKey).map(Self.timelineSectionFormatter.string(from:)) ?? bucketKey,
+        itemCount: items.count,
+        items: items,
+        representativeItem: items.first
+      )
+    }
+  }
+
+  private func makeYearSections(from items: [PhotoItem]) -> [LibrarySection] {
+    let calendar = Calendar(identifier: .gregorian)
+    let groupedByYear = Dictionary(grouping: items) { item -> Int in
+      calendar.component(.year, from: sortDate(for: item))
+    }
+    return groupedByYear.keys.sorted(by: >).compactMap { year in
+      guard let items = groupedByYear[year].map(sortItems) else { return nil }
       return LibrarySection(
         id: "\(year)",
         title: "\(year)",
@@ -560,7 +720,7 @@ final class AppState: ObservableObject {
   }
 
   var emptyStateTitle: String {
-    if !searchText.isEmpty && !isSearching {
+    if hasActiveSearchQueryOrFilters && !isSearching {
       return "No Results"
     }
     return switch sidebarSelection {
@@ -578,8 +738,10 @@ final class AppState: ObservableObject {
   }
 
   var emptyStateMessage: String {
-    if !searchText.isEmpty && !isSearching {
-      return searchError ?? "No results found for \"\(searchText)\""
+    if hasActiveSearchQueryOrFilters && !isSearching {
+      if let searchError { return searchError }
+      let trimmedSearch = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmedSearch.isEmpty ? "No items match the active filters." : "No results found for \"\(trimmedSearch)\""
     }
     switch sidebarSelection {
     case .library:
@@ -914,6 +1076,9 @@ final class AppState: ObservableObject {
     searchNextPage = nil
     searchType = .smart
     searchFilters = SearchFilters()
+    libraryMediaFilter = .all
+    hideScreenshotsInLibrary = false
+    librarySortMode = .dateCaptured
     recentSearches = []
     selectedItemID = nil
     isMultiSelectMode = false
@@ -1147,7 +1312,7 @@ final class AppState: ObservableObject {
     searchTask?.cancel()
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    guard !trimmed.isEmpty else {
+    guard !trimmed.isEmpty || !searchFilters.isEmpty else {
       searchResults = []
       isSearching = false
       searchTotalCount = 0
@@ -1165,26 +1330,12 @@ final class AppState: ObservableObject {
         return
       }
 
-      let result: SearchResult
       do {
-        switch searchType {
-        case .smart:
-          result = try await apiClient.searchAssets(
-            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
-          )
-        case .filename:
-          result = try await apiClient.searchMetadataText(
-            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
-          )
-        case .description:
-          result = try await apiClient.searchMetadataDescription(
-            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
-          )
-        case .ocr:
-          result = try await apiClient.searchMetadataOCR(
-            server: connectedServer, session: currentSession, query: trimmed, filters: searchFilters
-          )
-        }
+        let result = try await performSearchRequest(
+          server: connectedServer,
+          session: currentSession,
+          query: trimmed
+        )
         guard !Task.isCancelled else { return }
         searchResults = result.assets.filter { !$0.isTrashed }.map {
           Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
@@ -1214,25 +1365,12 @@ final class AppState: ObservableObject {
     defer { isSearching = false }
 
     do {
-      let result: SearchResult
-      switch searchType {
-      case .smart:
-        result = try await apiClient.searchAssets(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
-        )
-      case .filename:
-        result = try await apiClient.searchMetadataText(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
-        )
-      case .description:
-        result = try await apiClient.searchMetadataDescription(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
-        )
-      case .ocr:
-        result = try await apiClient.searchMetadataOCR(
-          server: connectedServer, session: currentSession, query: searchText, filters: searchFilters, page: page
-        )
-      }
+      let result = try await performSearchRequest(
+        server: connectedServer,
+        session: currentSession,
+        query: searchText.trimmingCharacters(in: .whitespacesAndNewlines),
+        page: page
+      )
       let newItems = result.assets.filter { !$0.isTrashed }.map {
         Self.makePhotoItem(from: $0, timeBucket: Self.timelineBucketKey(for: $0.createdAt))
       }
@@ -1241,6 +1379,36 @@ final class AppState: ObservableObject {
       searchNextPage = result.nextPage
     } catch {
       immichLog("[Search] Pagination failed: \(error)")
+    }
+  }
+
+  private func performSearchRequest(
+    server: ImmichServer,
+    session: UserSession,
+    query: String,
+    page: String? = nil
+  ) async throws -> SearchResult {
+    switch searchType {
+    case .smart where query.isEmpty:
+      return try await apiClient.searchMetadataText(
+        server: server, session: session, query: query, filters: searchFilters, page: page
+      )
+    case .smart:
+      return try await apiClient.searchAssets(
+        server: server, session: session, query: query, filters: searchFilters, page: page
+      )
+    case .filename:
+      return try await apiClient.searchMetadataText(
+        server: server, session: session, query: query, filters: searchFilters, page: page
+      )
+    case .description:
+      return try await apiClient.searchMetadataDescription(
+        server: server, session: session, query: query, filters: searchFilters, page: page
+      )
+    case .ocr:
+      return try await apiClient.searchMetadataOCR(
+        server: server, session: session, query: query, filters: searchFilters, page: page
+      )
     }
   }
 
@@ -1294,6 +1462,18 @@ final class AppState: ObservableObject {
     await loadNextTimelinePage()
   }
 
+  func refreshTimelineForCurrentSidebar() async {
+    await loadRemoteTimeline(reset: true)
+    guard timelineErrorMessage == nil else { return }
+
+    switch sidebarSelection {
+    case .videos, .livePhotos, .panoramas:
+      await loadCompleteTimelineIfNeeded()
+    default:
+      break
+    }
+  }
+
   func loadNextTimelinePage() async {
     guard let connectedServer, let currentSession else { return }
     guard !isLoadingTimeline || loadedTimelineBucketKeys.isEmpty else { return }
@@ -1336,7 +1516,7 @@ final class AppState: ObservableObject {
   }
 
   func loadMoreTimelineIfNeeded(after sectionID: String) {
-    guard appPhase == .library, sidebarSelection == .library, searchText.isEmpty,
+    guard appPhase == .library, sidebarSelection == .library, !hasActiveSearchQueryOrFilters,
           canLoadMoreTimeline, !isLoadingTimeline, loadedTimelineBucketKeys.last == sectionID else { return }
     Task { await loadNextTimelinePage() }
   }
@@ -1508,6 +1688,68 @@ final class AppState: ObservableObject {
     } catch {
       immichLog("[Screenshots] Failed to load screenshots: \(error)")
     }
+  }
+
+  func setLibraryMediaFilter(_ filter: LibraryMediaFilter) {
+    libraryMediaFilter = filter
+    reconcileSelectionWithVisibleItems()
+  }
+
+  func toggleHideScreenshotsInLibrary() {
+    hideScreenshotsInLibrary.toggle()
+    reconcileSelectionWithVisibleItems()
+    if hideScreenshotsInLibrary, screenshotItems.isEmpty {
+      Task { await loadScreenshots() }
+    }
+  }
+
+  func setLibrarySortMode(_ mode: LibrarySortMode) {
+    librarySortMode = mode
+    reconcileSelectionWithVisibleItems()
+
+    if mode == .dateAdded, canLoadMoreTimeline, timelineBackedSidebarUsesLibraryItems {
+      Task {
+        await loadCompleteTimelineIfNeeded()
+        reconcileSelectionWithVisibleItems()
+      }
+    }
+  }
+
+  private var timelineBackedSidebarUsesLibraryItems: Bool {
+    switch sidebarSelection {
+    case .library, .none, .favorites, .imports:
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func reconcileSelectionWithVisibleItems() {
+    let visibleIDs = Set(itemsRenderedInCurrentGridMode().map(\.id))
+    selectedItemIDs = selectedItemIDs.intersection(visibleIDs)
+    if let selectedItemID, !visibleIDs.contains(selectedItemID) {
+      self.selectedItemID = itemsRenderedInCurrentGridMode().first?.id
+    }
+  }
+
+  private func itemsRenderedInCurrentGridMode() -> [PhotoItem] {
+    guard (sidebarSelection == .library || sidebarSelection == nil), !hasActiveSearchQueryOrFilters else {
+      return filteredItems
+    }
+
+    switch timelineViewMode {
+    case .years:
+      return visibleLibraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
+    case .months:
+      return visibleLibrarySections.flatMap(\.items)
+    case .allPhotos:
+      return filteredItems
+    }
+  }
+
+  func refreshSearchForCurrentFilters() {
+    guard hasActiveSearchQueryOrFilters else { return }
+    performSearch(query: searchText)
   }
 
   // MARK: - Memory Loading
@@ -1768,13 +2010,23 @@ final class AppState: ObservableObject {
     guard let connectedServer, let currentSession else { return }
     Task {
       do {
-        let (data, filename) = try await apiClient.downloadOriginalAsset(
-          server: connectedServer, session: currentSession, assetId: assetID
+        let payloads = try await downloadPayloads(
+          for: assetID,
+          server: connectedServer,
+          session: currentSession
         )
-        // Write to temp file for sharing
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try data.write(to: tempURL)
-        let picker = NSSharingServicePicker(items: [tempURL])
+        guard !payloads.isEmpty else { return }
+
+        let shareFolder = FileManager.default.temporaryDirectory
+          .appendingPathComponent("ImmichShare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: shareFolder, withIntermediateDirectories: true)
+        let itemURLs = try payloads.map { payload in
+          let fileURL = shareFolder.appendingPathComponent(payload.filename)
+          try payload.data.write(to: fileURL)
+          return fileURL
+        }
+
+        let picker = NSSharingServicePicker(items: itemURLs)
         picker.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
       } catch {
         immichLog("[Share] Failed: \(error)")
@@ -2226,14 +2478,17 @@ final class AppState: ObservableObject {
   // MARK: - Import / Upload
 
   func importFiles(_ urls: [URL]) {
-    for url in urls {
+    for url in urls where Self.isSupportedImportURL(url) {
       let uploadItem = UploadItem(fileURL: url)
-      let isVideo = ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased())
+      let importDate = Self.localCreationDate(for: url) ?? .now
+      let addedDate = Date()
+      let isVideo = Self.isVideoImportURL(url)
       let item = PhotoItem(
         id: UUID().uuidString,
         source: .localFile(url),
         title: url.deletingPathExtension().lastPathComponent,
-        date: .now,
+        date: importDate,
+        dateAdded: addedDate,
         isFavorite: false,
         isVideo: isVideo,
         isImported: true,
@@ -2244,7 +2499,7 @@ final class AppState: ObservableObject {
         city: nil,
         country: nil,
         stackCount: nil,
-        timeBucketKey: Self.timelineBucketKey(for: .now),
+        timeBucketKey: Self.timelineBucketKey(for: importDate),
         projectionType: nil,
         aspectRatio: Self.localAspectRatio(for: url, isVideo: isVideo)
       )
@@ -2255,7 +2510,7 @@ final class AppState: ObservableObject {
 
       Task {
         await uploadQueue.enqueue(uploadItem)
-        await simulateUpload(uploadItem)
+        await uploadAsset(uploadItem)
       }
     }
   }
@@ -2293,7 +2548,7 @@ final class AppState: ObservableObject {
     UserDefaults.standard.set(clamped, forKey: Self.photoGridScaleKey)
   }
 
-  private func simulateUpload(_ item: UploadItem) async {
+  private func uploadAsset(_ item: UploadItem) async {
     guard let connectedServer, let currentSession else {
       updateUploadRow(id: item.id, progress: 0, state: .failed(reason: "Not connected"))
       return
@@ -2319,6 +2574,7 @@ final class AppState: ObservableObject {
           source: .remoteAsset(id: remoteID),
           title: old.title,
           date: old.date,
+          dateAdded: old.dateAdded,
           isFavorite: old.isFavorite,
           isVideo: old.isVideo,
           isImported: old.isImported,
@@ -2463,6 +2719,7 @@ final class AppState: ObservableObject {
         source: .remoteAsset(id: detail.id),
         title: detail.originalFileName,
         date: fallbackDate,
+        dateAdded: fallbackDate,
         isFavorite: detail.isFavorite,
         isVideo: isVideo,
         isImported: false,
@@ -2567,6 +2824,7 @@ final class AppState: ObservableObject {
       source: .remoteAsset(id: asset.id),
       title: title,
       date: asset.createdAt,
+      dateAdded: asset.addedAt ?? asset.createdAt,
       isFavorite: asset.isFavorite,
       isVideo: !asset.isImage,
       isImported: false,
@@ -2581,6 +2839,30 @@ final class AppState: ObservableObject {
       projectionType: asset.projectionType,
       aspectRatio: CGFloat(asset.ratio)
     )
+  }
+
+  static func isSupportedImportURL(_ url: URL) -> Bool {
+    isImageImportURL(url) || isVideoImportURL(url)
+  }
+
+  static func isImageImportURL(_ url: URL) -> Bool {
+    if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
+      return true
+    }
+    return fallbackImageExtensions.contains(url.pathExtension.lowercased())
+  }
+
+  static func isVideoImportURL(_ url: URL) -> Bool {
+    if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .movie) || type.conforms(to: .video) {
+      return true
+    }
+    return fallbackVideoExtensions.contains(url.pathExtension.lowercased())
+  }
+
+  private static func localCreationDate(for url: URL) -> Date? {
+    let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey]
+    guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+    return values.creationDate ?? values.contentModificationDate
   }
 
   private static func localAspectRatio(for url: URL, isVideo: Bool) -> CGFloat {
@@ -2681,6 +2963,7 @@ extension AppState: ImmichWebSocketDelegate {
 
     let dateString = json["localDateTime"] as? String ?? json["fileCreatedAt"] as? String
     let date = dateString.flatMap { Self.parseISO8601Date($0) } ?? .now
+    let addedDate = (json["createdAt"] as? String).flatMap { Self.parseISO8601Date($0) } ?? date
 
     let duration = json["duration"] as? String
     let livePhotoVideoId = json["livePhotoVideoId"] as? String
@@ -2702,6 +2985,7 @@ extension AppState: ImmichWebSocketDelegate {
       source: .remoteAsset(id: id),
       title: originalFileName,
       date: date,
+      dateAdded: addedDate,
       isFavorite: isFavorite,
       isVideo: isVideo,
       isImported: false,

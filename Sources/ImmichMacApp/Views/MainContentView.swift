@@ -32,6 +32,7 @@ struct MainContentView: View {
   @State private var interactiveDismissPresentation: InteractiveDismissPresentation = .identity
   @State private var isSearchPresented = false
   @State private var showSearchSuggestions = false
+  @State private var showSearchFilters = false
 
   struct HeroTransitionState: Equatable {
     enum Direction: Equatable {
@@ -205,6 +206,12 @@ struct MainContentView: View {
     .onChange(of: appState.searchText) { _, newValue in
       showSearchSuggestions = newValue.isEmpty && isSearchPresented
       appState.performSearch(query: newValue)
+    }
+    .onChange(of: appState.searchType) { _, _ in
+      appState.refreshSearchForCurrentFilters()
+    }
+    .onChange(of: appState.searchFilters) { _, _ in
+      appState.refreshSearchForCurrentFilters()
     }
     .onChange(of: isSearchPresented) { _, presented in
       if presented {
@@ -448,6 +455,15 @@ struct MainContentView: View {
         onHeroFramesChanged: { heroItemFrames = $0 }
       )
         .task { await appState.loadScreenshots() }
+    case .videos, .livePhotos, .panoramas:
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
+        .task { await appState.loadCompleteTimelineIfNeeded() }
     default:
       LibraryGridView(
         appState: appState,
@@ -494,8 +510,14 @@ struct MainContentView: View {
         text: $appState.searchText,
         isPresented: $isSearchPresented,
         searchType: $appState.searchType,
-        searchFilters: $appState.searchFilters
+        searchFilters: $appState.searchFilters,
+        onFilterToggle: { showSearchFilters.toggle() }
       )
+      .popover(isPresented: $showSearchFilters, arrowEdge: .top) {
+        SearchFilterPopover(filters: $appState.searchFilters) {
+          appState.searchFilters = SearchFilters()
+        }
+      }
     }
 
     // Right: Action buttons grouped in capsule pill
@@ -549,7 +571,7 @@ struct MainContentView: View {
 
       Button {
         thumbnailStore.logTelemetry(reason: "pre_refresh")
-        Task { await appState.loadRemoteTimeline(reset: true) }
+        Task { await appState.refreshTimelineForCurrentSidebar() }
       } label: {
         Image(systemName: "arrow.clockwise")
       }
@@ -567,29 +589,39 @@ struct MainContentView: View {
 
       // View options
       Menu {
-        Button("Hide Screenshots") {
-          // TODO: Implement screenshot filtering.
+        Button {
+          appState.toggleHideScreenshotsInLibrary()
+        } label: {
+          Label("Hide Screenshots", systemImage: appState.hideScreenshotsInLibrary ? "checkmark.circle.fill" : "photo.stack")
         }
-        .disabled(true)
-        Button("Show Only Photos") {
-          // TODO: Implement photos-only filtering.
-        }
-        .disabled(true)
-        Button("Show Only Videos") {
-          // TODO: Implement videos-only filtering.
-        }
-        .disabled(true)
+
         Divider()
-        Button("Sort by Date Captured") {
-          // TODO: Implement captured-date sorting.
+
+        Text("Show")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        ForEach(AppState.LibraryMediaFilter.allCases) { filter in
+          Button {
+            appState.setLibraryMediaFilter(filter)
+          } label: {
+            Label(filter.rawValue, systemImage: appState.libraryMediaFilter == filter ? "checkmark.circle.fill" : "circle")
+          }
         }
-        .disabled(true)
-        Button("Sort by Date Added") {
-          // TODO: Implement added-date sorting.
+
+        Divider()
+
+        Text("Sort")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        ForEach(AppState.LibrarySortMode.allCases) { mode in
+          Button {
+            appState.setLibrarySortMode(mode)
+          } label: {
+            Label(mode.rawValue, systemImage: appState.librarySortMode == mode ? "checkmark.circle.fill" : "circle")
+          }
         }
-        .disabled(true)
       } label: {
-        Image(systemName: "ellipsis.circle")
+        Image(systemName: appState.hideScreenshotsInLibrary || appState.libraryMediaFilter != .all || appState.librarySortMode != .dateCaptured ? "ellipsis.circle.fill" : "ellipsis.circle")
       }
       .help("More Options")
       .accessibilityLabel("More Options")
@@ -708,6 +740,7 @@ struct MainContentView: View {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = false
     panel.canChooseFiles = true
+    panel.allowedContentTypes = AppState.supportedImportContentTypes
     panel.allowsMultipleSelection = true
     panel.begin { response in
       guard response == .OK else { return }
