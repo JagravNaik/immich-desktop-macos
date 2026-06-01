@@ -10,7 +10,7 @@ public typealias ThumbnailPixelSize = Double
 #endif
 
 #if canImport(AppKit)
-import AppKit
+@preconcurrency import AppKit
 import ImageIO
 
 public typealias PlatformImage = NSImage

@@ -1,8 +1,8 @@
 #if canImport(AppKit) && canImport(CoreImage)
 import Foundation
-import AppKit
-import CoreImage
-import CoreImage.CIFilterBuiltins
+@preconcurrency import AppKit
+@preconcurrency import CoreImage
+@preconcurrency import CoreImage.CIFilterBuiltins
 import ImageIO
 import SwiftUI
 import Combine
@@ -52,7 +52,16 @@ final class PhotoEditingPipeline: ObservableObject {
   private var parameterCancellable: AnyCancellable?
   private var renderGeneration: UInt64 = 0
   private var sourceLoadGeneration: UInt64 = 0
-  private nonisolated static let backgroundRenderContext = CIContext(options: [.useSoftwareRenderer: false])
+
+  private final class BackgroundRenderContext: @unchecked Sendable {
+    private let context = CIContext(options: [.useSoftwareRenderer: false])
+
+    func createCGImage(_ image: CIImage, from rect: CGRect) -> CGImage? {
+      context.createCGImage(image, from: rect)
+    }
+  }
+
+  private nonisolated static let backgroundRenderContext = BackgroundRenderContext()
 
   private struct RenderSnapshot: Sendable {
     let sourceImageData: Data?

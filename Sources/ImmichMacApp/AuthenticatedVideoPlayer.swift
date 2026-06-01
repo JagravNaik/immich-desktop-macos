@@ -1,9 +1,10 @@
 #if canImport(SwiftUI)
+@preconcurrency import Foundation
 import SwiftUI
 
 #if canImport(AppKit)
-import AppKit
-import AVKit
+@preconcurrency import AppKit
+@preconcurrency import AVKit
 
 // AVFoundation does not expose a Swift symbol for this option on macOS, so we centralize the
 // framework-defined key here instead of scattering raw literals through the code.

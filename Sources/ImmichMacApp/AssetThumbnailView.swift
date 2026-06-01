@@ -5,7 +5,7 @@ import ImmichMedia
 import ImmichAPI
 
 #if canImport(AppKit)
-import AppKit
+@preconcurrency import AppKit
 import ImageIO
 
 @MainActor
