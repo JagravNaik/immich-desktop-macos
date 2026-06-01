@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -53,3 +53,20 @@ jobs:
           path: .build/artifacts/ImmichMacApp-${{ github.sha }}.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create GitHub release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: build-${{ github.run_number }}.${{ github.run_attempt }}
+          RELEASE_TITLE: Immich macOS build ${{ github.run_number }}.${{ github.run_attempt }}
+          RELEASE_ASSET: .build/artifacts/ImmichMacApp-${{ github.sha }}.zip
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$RELEASE_ASSET#ImmichMacApp-${{ github.run_number }}-${{ github.sha }}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TITLE" \
+            --notes "Automated macOS app build from commit $GITHUB_SHA." \
+            --prerelease \
+            --latest=false
