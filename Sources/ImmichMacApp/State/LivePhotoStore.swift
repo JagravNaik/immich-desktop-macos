@@ -41,8 +41,8 @@ final class LivePhotoStore: ObservableObject {
         async let still = Self.cachedFile(assetID: stillAssetID, directory: directory, download: download)
         async let video = Self.cachedFile(assetID: videoAssetID, directory: directory, download: download)
         let urls = try await [still, video]
-        let livePhoto = await Self.makeLivePhoto(urls: urls, placeholder: placeholder)
-        self?.finish(itemID: itemID, state: livePhoto.map(State.ready) ?? .unavailable)
+        let result = await Self.makeLivePhoto(urls: urls, placeholder: placeholder)
+        self?.finish(itemID: itemID, state: result.livePhoto.map(State.ready) ?? .unavailable)
       } catch {
         self?.finish(itemID: itemID, state: .unavailable)
       }
@@ -67,8 +67,13 @@ final class LivePhotoStore: ObservableObject {
     return url
   }
 
-  private nonisolated static func makeLivePhoto(urls: [URL], placeholder: NSImage?) async -> PHLivePhoto? {
-    await withCheckedContinuation { continuation in
+  /// `PHLivePhoto` is immutable once built but isn't marked Sendable; box it to cross isolation.
+  private struct LivePhotoResult: @unchecked Sendable {
+    let livePhoto: PHLivePhoto?
+  }
+
+  private nonisolated static func makeLivePhoto(urls: [URL], placeholder: NSImage?) async -> LivePhotoResult {
+    await withCheckedContinuation { (continuation: CheckedContinuation<LivePhotoResult, Never>) in
       var resumed = false
       PHLivePhoto.request(
         withResourceFileURLs: urls,
@@ -81,7 +86,7 @@ final class LivePhotoStore: ObservableObject {
         let failed = info[PHLivePhotoInfoErrorKey] != nil || (info[PHLivePhotoInfoCancelledKey] as? Bool) == true
         guard !resumed, failed || !isDegraded || livePhoto == nil else { return }
         resumed = true
-        continuation.resume(returning: failed ? nil : livePhoto)
+        continuation.resume(returning: LivePhotoResult(livePhoto: failed ? nil : livePhoto))
       }
     }
   }

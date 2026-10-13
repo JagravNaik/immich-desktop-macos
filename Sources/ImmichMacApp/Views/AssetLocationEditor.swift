@@ -154,15 +154,24 @@ struct AssetLocationEditor: View {
     errorMessage = nil
     defer { isSearchingPlaces = false }
 
-    let request = MKLocalSearch.Request()
-    request.naturalLanguageQuery = query
     do {
-      let response = try await MKLocalSearch(request: request).start()
-      placeResults = response.mapItems
+      placeResults = try await Self.searchPlaces(matching: query).mapItems
     } catch {
       placeResults = []
       errorMessage = "Place search failed: \(error.localizedDescription)"
     }
+  }
+
+  /// `MKLocalSearch.Response` isn't Sendable; run the search off the main actor and box the items.
+  private struct PlaceSearchResults: @unchecked Sendable {
+    let mapItems: [MKMapItem]
+  }
+
+  private nonisolated static func searchPlaces(matching query: String) async throws -> PlaceSearchResults {
+    let request = MKLocalSearch.Request()
+    request.naturalLanguageQuery = query
+    let response = try await MKLocalSearch(request: request).start()
+    return PlaceSearchResults(mapItems: response.mapItems)
   }
 
   private func selectPlace(_ place: MKMapItem) {

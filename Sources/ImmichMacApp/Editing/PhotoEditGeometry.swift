@@ -75,17 +75,18 @@ struct PhotoEditGeometry: Equatable, Sendable {
     let pixel = CGPoint(x: point.x * sourceSize.width, y: (1 - point.y) * sourceSize.height)
     let mapped = pixel.applying(sourceToOutput)
     let size = outputSize
-    return .init(x: mapped.x / max(size.width, 1), y: 1 - mapped.y / max(size.height, 1))
+    let width = Double(max(size.width, 1))
+    let height = Double(max(size.height, 1))
+    return .init(x: Double(mapped.x) / width, y: 1.0 - Double(mapped.y) / height)
   }
 
   func sourcePoint(fromOutput point: PhotoAdjustments.NormalizedPoint) -> PhotoAdjustments.NormalizedPoint {
     let size = outputSize
     let pixel = CGPoint(x: point.x * size.width, y: (1 - point.y) * size.height)
     let mapped = pixel.applying(sourceToOutput.inverted())
-    return .init(
-      x: mapped.x / max(sourceSize.width, 1),
-      y: 1 - mapped.y / max(sourceSize.height, 1)
-    )
+    let width = Double(max(sourceSize.width, 1))
+    let height = Double(max(sourceSize.height, 1))
+    return .init(x: Double(mapped.x) / width, y: 1.0 - Double(mapped.y) / height)
   }
 
   // MARK: - Crop helpers
