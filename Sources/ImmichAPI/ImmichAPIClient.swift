@@ -125,6 +125,12 @@ private func iso8601FractionalSecondsString(for date: Date) -> String {
   ISO8601FractionalSecondsFormatter.string(from: date)
 }
 
+// /timeline/bucket requires a UTC-midnight timestamp, even when a bucket ID is date-only.
+private func normalizedTimelineBucketValue(_ value: String) -> String {
+  guard let date = TimelineBucketMapper.parseDate(value) else { return value }
+  return iso8601FractionalSecondsString(for: date)
+}
+
 public protocol ImmichAPIClient: Sendable {
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo
   func fetchVersionCheckState(server: ImmichServer, session: UserSession) async throws -> VersionCheckState
@@ -140,9 +146,22 @@ public protocol ImmichAPIClient: Sendable {
   func fetchAssetDetail(server: ImmichServer, session: UserSession, assetId: String) async throws -> AssetDetail
   func fetchAssetStatistics(server: ImmichServer, session: UserSession) async throws -> AssetStatistics
   func setFavorite(server: ImmichServer, session: UserSession, assetId: String, isFavorite: Bool) async throws
+  func updateAssetLocation(server: ImmichServer, session: UserSession, assetId: String, latitude: Double, longitude: Double) async throws
+  func updateAssetsLocation(server: ImmichServer, session: UserSession, assetIds: [String], latitude: Double, longitude: Double) async throws
+  func reverseGeocode(server: ImmichServer, session: UserSession, latitude: Double, longitude: Double) async throws -> [ReverseGeocodePlace]
+  func updateAssets(server: ImmichServer, session: UserSession, assetIds: [String], update: AssetBulkUpdate) async throws
+  func fetchAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws -> [AssetEditAction]
+  func replaceAssetEdits(server: ImmichServer, session: UserSession, assetId: String, edits: [AssetEditAction]) async throws
+  func deleteAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws
+  func fetchHiddenAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
+  func fetchDuplicates(server: ImmichServer, session: UserSession) async throws -> [DuplicateGroup]
+  func resolveDuplicates(server: ImmichServer, session: UserSession, groups: [DuplicateGroup]) async throws
+  func updateAssetDescription(server: ImmichServer, session: UserSession, assetId: String, description: String) async throws
+  func updateAssetDateTime(server: ImmichServer, session: UserSession, assetId: String, date: Date) async throws
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws
+  func emptyTrash(server: ImmichServer, session: UserSession) async throws
   func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
   func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
   func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult
@@ -151,15 +170,15 @@ public protocol ImmichAPIClient: Sendable {
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset]
   func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset]
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker]
+  func fetchAlbumMapMarkers(server: ImmichServer, session: UserSession, albumId: String) async throws -> [MapMarker]
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory]
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String)
-  func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String
+  func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, fileCreatedAt: Date?, durationMilliseconds: Int?, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String
   func createAlbum(server: ImmichServer, session: UserSession, name: String, description: String, assetIds: [String]) async throws -> Album
   func renameAlbum(server: ImmichServer, session: UserSession, albumId: String, newName: String) async throws
   func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws
   func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
   func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws
-  func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws
   func fetchAPIKeys(server: ImmichServer, session: UserSession) async throws -> [ImmichAPIKey]
   func createAPIKey(server: ImmichServer, session: UserSession, name: String, permissions: [String]) async throws -> CreatedAPIKey
   func deleteAPIKey(server: ImmichServer, session: UserSession, id: String) async throws
@@ -253,17 +272,12 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
   public func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration {
-    async let features: ServerFeaturesResponse = perform(URLRequest(url: server.baseURL.appending(path: "server/features")))
-    async let config: ServerConfigResponse = perform(URLRequest(url: server.baseURL.appending(path: "server/config")))
-
-    let (featuresResponse, configResponse) = try await (features, config)
+    let response: PublicConfigResponse = try await perform(URLRequest(url: server.baseURL.appending(path: "public/config")))
     return ServerLoginConfiguration(
-      isInitialized: configResponse.isInitialized,
-      isOnboarded: configResponse.isOnboarded,
-      loginPageMessage: configResponse.loginPageMessage,
-      oauthButtonText: configResponse.oauthButtonText,
-      passwordLoginEnabled: featuresResponse.passwordLogin,
-      oauthEnabled: featuresResponse.oauth
+      loginPageMessage: response.server.loginPageMessage ?? "",
+      oauthButtonText: response.oauth.buttonText ?? "",
+      passwordLoginEnabled: response.passwordLogin.enabled,
+      oauthEnabled: response.oauth.enabled
     )
   }
 
@@ -336,7 +350,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     var components = URLComponents(url: server.baseURL.appending(path: "timeline/bucket"), resolvingAgainstBaseURL: false)
     components?.queryItems = [
       URLQueryItem(name: "order", value: "desc"),
-      URLQueryItem(name: "timeBucket", value: timeBucket),
+      URLQueryItem(name: "timeBucket", value: normalizedTimelineBucketValue(timeBucket)),
       URLQueryItem(name: "visibility", value: "timeline"),
       URLQueryItem(name: "withStacked", value: "true"),
     ]
@@ -361,36 +375,42 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       url: server.baseURL.appending(path: "albums").appending(path: albumId),
       session: session
     )
-    let response: AlbumDetailResponse = try await perform(request)
-    return (response.toAlbumModel(), response.toAssetModels())
+    let album: AlbumResponse = try await perform(request)
+    let assets = try await fetchMetadataAssets(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(filters: SearchFilters(), albumIds: [albumId])
+    )
+    return (album.toModel(), assets)
   }
 
-  // MARK: - People
-
   public func fetchPeople(server: ImmichServer, session: UserSession) async throws -> [Person] {
-    var allPeople: [Person] = []
-    var page = 1
     let pageSize = 1000
+    var page = 1
+    var people: [Person] = []
 
     while true {
       var components = URLComponents(url: server.baseURL.appending(path: "people"), resolvingAgainstBaseURL: false)
       components?.queryItems = [
-        URLQueryItem(name: "withHidden", value: "false"),
         URLQueryItem(name: "page", value: String(page)),
         URLQueryItem(name: "size", value: String(pageSize)),
+        URLQueryItem(name: "withHidden", value: "true"),
       ]
-
-      let request = authorizedRequest(url: components?.url ?? server.baseURL.appending(path: "people"), session: session)
+      let url = components?.url ?? server.baseURL.appending(path: "people")
+      var request = authorizedRequest(url: url, session: session)
+      request.httpMethod = "GET"
       let response: PeopleResponse = try await perform(request)
-      allPeople.append(contentsOf: response.people.map { $0.toModel() })
+      people.append(contentsOf: response.people.map { $0.toModel() })
 
-      guard response.hasNextPage == true else {
-        return allPeople
+      guard response.hasNextPage ?? (people.count < response.total) else {
+        break
       }
-
       page += 1
     }
+
+    return people
   }
+
 
   // MARK: - Asset Detail
 
@@ -411,16 +431,152 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return AssetStatistics(total: response.total, images: response.images, videos: response.videos)
   }
 
-  // MARK: - Favorites
+  // MARK: - Asset Updates
 
   public func setFavorite(server: ImmichServer, session: UserSession, assetId: String, isFavorite: Bool) async throws {
     var request = authorizedRequest(
       url: server.baseURL.appending(path: "assets").appending(path: assetId),
       session: session
     )
-    request.httpMethod = "PUT"
+    request.httpMethod = "PATCH"
     request.addValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder().encode(["isFavorite": isFavorite])
+    let _: AssetDetailResponse = try await perform(request)
+  }
+
+  public func updateAssetLocation(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    latitude: Double,
+    longitude: Double
+  ) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId),
+      session: session
+    )
+    request.httpMethod = "PATCH"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["latitude": latitude, "longitude": longitude])
+    let _: AssetDetailResponse = try await perform(request)
+  }
+
+  /// Bulk location assignment, matching Photos' "Assign Location to N Items". Immich v3 `PUT /assets`.
+  public func updateAssetsLocation(
+    server: ImmichServer,
+    session: UserSession,
+    assetIds: [String],
+    latitude: Double,
+    longitude: Double
+  ) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(BulkLocationUpdateRequest(ids: assetIds, latitude: latitude, longitude: longitude))
+    try await performWithoutResponse(request, errorMessage: "Failed to assign location")
+  }
+
+  public func updateAssets(server: ImmichServer, session: UserSession, assetIds: [String], update: AssetBulkUpdate) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "assets"), session: session)
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(AssetBulkUpdateRequest(ids: assetIds, update: update))
+    try await performWithoutResponse(request, errorMessage: "Failed to update assets")
+  }
+
+  // MARK: - Non-destructive edits (crop / rotate / mirror)
+
+  public func fetchAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws -> [AssetEditAction] {
+    let request = authorizedRequest(url: editsURL(server: server, assetId: assetId), session: session)
+    let response: AssetEditsResponse = try await perform(request)
+    return response.edits.compactMap(\.model)
+  }
+
+  /// Replaces every edit on the asset. An empty list removes them (Revert to Original).
+  public func replaceAssetEdits(server: ImmichServer, session: UserSession, assetId: String, edits: [AssetEditAction]) async throws {
+    guard !edits.isEmpty else {
+      try await deleteAssetEdits(server: server, session: session, assetId: assetId)
+      return
+    }
+    var request = authorizedRequest(url: editsURL(server: server, assetId: assetId), session: session)
+    request.httpMethod = "PUT"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(AssetEditsRequest(edits: edits.map(AssetEditItem.init)))
+    try await performWithoutResponse(request, errorMessage: "Failed to save edits")
+  }
+
+  public func deleteAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws {
+    var request = authorizedRequest(url: editsURL(server: server, assetId: assetId), session: session)
+    request.httpMethod = "DELETE"
+    try await performWithoutResponse(request, errorMessage: "Failed to revert edits")
+  }
+
+  private func editsURL(server: ImmichServer, assetId: String) -> URL {
+    server.baseURL.appending(path: "assets").appending(path: assetId).appending(path: "edits")
+  }
+
+  public func fetchHiddenAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
+    try await fetchMetadataAssets(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(visibility: "hidden")
+    )
+  }
+
+  public func fetchDuplicates(server: ImmichServer, session: UserSession) async throws -> [DuplicateGroup] {
+    let request = authorizedRequest(url: server.baseURL.appending(path: "duplicates"), session: session)
+    let responses: [DuplicateGroupResponse] = try await perform(request)
+    return responses.map {
+      DuplicateGroup(
+        id: $0.duplicateId,
+        assets: $0.assets.compactMap { $0.toTimelineAsset() },
+        suggestedKeepAssetIDs: $0.suggestedKeepAssetIds
+      )
+    }
+  }
+
+  public func resolveDuplicates(server: ImmichServer, session: UserSession, groups: [DuplicateGroup]) async throws {
+    guard !groups.isEmpty else { return }
+    var request = authorizedRequest(url: server.baseURL.appending(path: "duplicates/resolve"), session: session)
+    request.httpMethod = "POST"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(DuplicateResolveRequest(groups: groups.map {
+      DuplicateResolveGroupRequest(duplicateId: $0.id, keepAssetIds: $0.keepAssetIDs, trashAssetIds: $0.suggestedTrashAssetIDs)
+    }))
+    try await performWithoutResponse(request, errorMessage: "Failed to merge duplicates")
+  }
+
+  public func updateAssetDescription(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    description: String
+  ) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId),
+      session: session
+    )
+    request.httpMethod = "PATCH"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(["description": description])
+    let _: AssetDetailResponse = try await perform(request)
+  }
+
+  public func updateAssetDateTime(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    date: Date
+  ) async throws {
+    var request = authorizedRequest(
+      url: server.baseURL.appending(path: "assets").appending(path: assetId),
+      session: session
+    )
+    request.httpMethod = "PATCH"
+    request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode([
+      "dateTimeOriginal": ISO8601FractionalSecondsFormatter.string(from: date)
+    ])
     let _: AssetDetailResponse = try await perform(request)
   }
 
@@ -438,24 +594,11 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
   public func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] {
-    var items: [AssetDetailResponse] = []
-    var page = 1
-
-    while true {
-      var request = authorizedRequest(url: server.baseURL.appending(path: "search/metadata"), session: session)
-      request.httpMethod = "POST"
-      request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-      request.httpBody = try JSONEncoder().encode(TrashedSearchRequest(page: page))
-      let response: SearchAssetsResponse = try await perform(request)
-      items.append(contentsOf: response.assets.items)
-
-      guard response.assets.nextPage?.isEmpty == false else {
-        break
-      }
-      page += 1
-    }
-
-    return items.compactMap { $0.toTimelineAsset() }
+    try await fetchMetadataAssets(
+      server: server,
+      session: session,
+      request: MetadataSearchRequest(filters: SearchFilters(), trashedOnly: true)
+    )
   }
 
   public func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {
@@ -469,42 +612,63 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     }
   }
 
+  public func emptyTrash(server: ImmichServer, session: UserSession) async throws {
+    var request = authorizedRequest(url: server.baseURL.appending(path: "trash/empty"), session: session)
+    request.httpMethod = "POST"
+    let (_, response) = try await urlSession.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+      throw ImmichAPIError.requestFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "Failed to empty trash")
+    }
+  }
+
   // MARK: - Search
 
   public func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
     let response = try await performSmartSearch(
       server: server,
       session: session,
-      request: SmartSearchRequest(query: query, filters: filters, page: try searchPageNumber(from: page))
+      request: SmartSearchRequest(query: query, filters: filters, page: page)
     )
-    return Self.searchResult(from: response)
+    return Self.searchResult(from: response, nextPage: response.assets.nextPage)
   }
 
   public func searchMetadataText(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(originalFileName: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(
+        originalFileName: Self.nonEmptySearchText(query),
+        filters: filters,
+        cursor: page
+      )
     )
-    return Self.searchResult(from: response)
+    return Self.searchResult(from: response, nextPage: response.assets.nextCursor)
   }
 
   public func searchMetadataDescription(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(description: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(
+        description: Self.nonEmptySearchText(query),
+        filters: filters,
+        cursor: page
+      )
     )
-    return Self.searchResult(from: response)
+    return Self.searchResult(from: response, nextPage: response.assets.nextCursor)
   }
 
   public func searchMetadataOCR(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
     let response = try await performMetadataSearch(
       server: server,
       session: session,
-      request: MetadataSearchRequest(ocr: Self.nonEmptySearchText(query), filters: filters, page: try searchPageNumber(from: page, defaultPage: 1))
+      request: MetadataSearchRequest(
+        ocr: Self.nonEmptySearchText(query),
+        filters: filters,
+        cursor: page
+      )
     )
-    return Self.searchResult(from: response)
+    return Self.searchResult(from: response, nextPage: response.assets.nextCursor)
   }
 
   private func performSmartSearch(server: ImmichServer, session: UserSession, request searchRequest: SmartSearchRequest) async throws -> SearchAssetsResponse {
@@ -523,22 +687,15 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     return try await perform(request)
   }
 
-  private static func searchResult(from response: SearchAssetsResponse) -> SearchResult {
+  private static func searchResult(from response: SearchAssetsResponse, nextPage: String?) -> SearchResult {
     let assets = response.assets.items.compactMap { $0.toTimelineAsset() }
-    return SearchResult(assets: assets, totalCount: response.assets.total ?? assets.count, nextPage: response.assets.nextPage)
+    let totalCount = response.assets.total ?? response.assets.count ?? assets.count
+    return SearchResult(assets: assets, totalCount: totalCount, nextPage: nextPage)
   }
 
   private static func nonEmptySearchText(_ query: String) -> String? {
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
-  }
-
-  private func searchPageNumber(from page: String?, defaultPage: Int? = nil) throws -> Int? {
-    guard let page else { return defaultPage }
-    guard let pageNumber = Int(page) else {
-      throw ImmichAPIError.invalidResponse(url: "search page \(page)")
-    }
-    return pageNumber
   }
 
   public func fetchSearchSuggestions(server: ImmichServer, session: UserSession, type: String, filters: [String: String]) async throws -> [String] {
@@ -559,7 +716,7 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     try await fetchMetadataAssets(
       server: server,
       session: session,
-      request: MetadataSearchRequest(personIds: [personId], filters: SearchFilters())
+      request: MetadataSearchRequest(filters: SearchFilters(), personIds: [personId])
     )
   }
 
@@ -607,6 +764,26 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     let request = authorizedRequest(url: server.baseURL.appending(path: "map/markers"), session: session)
     let responses: [MapMarkerResponse] = try await perform(request)
     return responses.map { $0.toModel() }
+  }
+
+  public func fetchAlbumMapMarkers(server: ImmichServer, session: UserSession, albumId: String) async throws -> [MapMarker] {
+    let request = authorizedRequest(
+      url: server.baseURL.appending(path: "albums").appending(path: albumId).appending(path: "map-markers"),
+      session: session
+    )
+    let responses: [MapMarkerResponse] = try await perform(request)
+    return responses.map { $0.toModel() }
+  }
+
+  public func reverseGeocode(server: ImmichServer, session: UserSession, latitude: Double, longitude: Double) async throws -> [ReverseGeocodePlace] {
+    var components = URLComponents(url: server.baseURL.appending(path: "map/reverse-geocode"), resolvingAgainstBaseURL: false)
+    components?.queryItems = [
+      URLQueryItem(name: "lat", value: String(latitude)),
+      URLQueryItem(name: "lon", value: String(longitude)),
+    ]
+    guard let url = components?.url else { throw ImmichAPIError.invalidResponse(url: "map/reverse-geocode") }
+    let responses: [ReverseGeocodeResponse] = try await perform(authorizedRequest(url: url, session: session))
+    return responses.map { ReverseGeocodePlace(city: $0.city, state: $0.state, country: $0.country) }
   }
 
   // MARK: - Memories
@@ -676,24 +853,26 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
 
   // MARK: - Upload Asset
 
-  public func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String {
+  public func uploadAsset(server: ImmichServer, session: UserSession, fileURL: URL, fileCreatedAt: Date? = nil, durationMilliseconds: Int?, onProgress: @escaping @Sendable (Double) -> Void) async throws -> String {
     let boundary = UUID().uuidString
     let filename = fileURL.lastPathComponent
     let mimeType = fileURL.mimeType
 
-    // Get file creation date
+    // Preserve the file timestamps expected by Immich's asset-upload API.
     let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
-    let createdDate = (attrs?[.creationDate] as? Date) ?? Date()
-    let deviceAssetId = "\(filename)-\(Int(createdDate.timeIntervalSince1970 * 1000))"
+    let createdDate = fileCreatedAt ?? (attrs?[.creationDate] as? Date) ?? Date()
+    let modifiedDate = (attrs?[.modificationDate] as? Date) ?? createdDate
+    var fields = [
+      MultipartFormField(name: "fileCreatedAt", value: iso8601FractionalSecondsString(for: createdDate)),
+      MultipartFormField(name: "fileModifiedAt", value: iso8601FractionalSecondsString(for: modifiedDate)),
+      MultipartFormField(name: "isFavorite", value: "false"),
+    ]
+    if let durationMilliseconds {
+      fields.append(MultipartFormField(name: "duration", value: String(durationMilliseconds)))
+    }
     let multipartBody = try buildMultipartBodyFile(
       boundary: boundary,
-      fields: [
-        MultipartFormField(name: "deviceAssetId", value: deviceAssetId),
-        MultipartFormField(name: "deviceId", value: "macos-desktop"),
-        MultipartFormField(name: "fileCreatedAt", value: iso8601FractionalSecondsString(for: createdDate)),
-        MultipartFormField(name: "fileModifiedAt", value: iso8601FractionalSecondsString(for: Date())),
-        MultipartFormField(name: "isFavorite", value: "false"),
-      ],
+      fields: fields,
       fileFieldName: "assetData",
       fileURL: fileURL,
       filename: filename,
@@ -819,51 +998,6 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     )
   }
 
-  public func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws {
-    let boundary = UUID().uuidString
-    let mimeType: String
-    if filename.lowercased().hasSuffix(".png") {
-      mimeType = "image/png"
-    } else {
-      mimeType = "image/jpeg"
-    }
-
-    var body = Data()
-    func appendField(_ name: String, _ value: String) {
-      body.append("--\(boundary)\r\n".data(using: .utf8)!)
-      body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-      body.append("\(value)\r\n".data(using: .utf8)!)
-    }
-    appendField("deviceAssetId", "\(filename)-edited-\(Int(Date().timeIntervalSince1970 * 1000))")
-    appendField("deviceId", "macos-desktop")
-    appendField("fileCreatedAt", iso8601FractionalSecondsString(for: Date()))
-    appendField("fileModifiedAt", iso8601FractionalSecondsString(for: Date()))
-
-    body.append("--\(boundary)\r\n".data(using: .utf8)!)
-    body.append("Content-Disposition: form-data; name=\"assetData\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-    body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
-    body.append(imageData)
-    body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-
-    var request = authorizedRequest(
-      url: server.baseURL
-        .appendingPathComponent("assets")
-        .appendingPathComponent(assetId)
-        .appendingPathComponent("original"),
-      session: session
-    )
-    request.httpMethod = "PUT"
-    request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-    request.httpBody = body
-
-    let (_, response) = try await urlSession.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-      throw ImmichAPIError.requestFailed(
-        statusCode: (response as? HTTPURLResponse)?.statusCode ?? 0,
-        message: "Replace asset failed"
-      )
-    }
-  }
 
   // MARK: - API Keys
 
@@ -1080,11 +1214,11 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     request metadataRequest: MetadataSearchRequest
   ) async throws -> [AssetDetailResponse] {
     var items: [AssetDetailResponse] = []
-    var page = metadataRequest.page ?? 1
+    var cursor = metadataRequest.cursor
 
     while true {
       var pagedRequest = metadataRequest
-      pagedRequest.page = page
+      pagedRequest.cursor = cursor
 
       let response = try await performMetadataSearch(
         server: server,
@@ -1093,11 +1227,14 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
       )
       items.append(contentsOf: response.assets.items)
 
-      guard response.assets.nextPage?.isEmpty == false else {
+      guard
+        let nextCursor = response.assets.nextCursor,
+        !nextCursor.isEmpty,
+        nextCursor != cursor
+      else {
         break
       }
-
-      page += 1
+      cursor = nextCursor
     }
 
     return items
@@ -1137,6 +1274,57 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
   }
 
 
+  private func responseShape(_ data: Data) -> String {
+    guard let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
+      return "non-JSON (\(data.count) bytes)"
+    }
+
+    if let object = value as? [String: Any] {
+      let keys = object.keys.sorted()
+      let summary = keys.prefix(16).joined(separator: ", ")
+      let suffix = keys.count > 16 ? ", …" : ""
+      return "JSON object keys [\(summary)\(suffix)]"
+    }
+    if value is String { return "JSON string" }
+    if value is [Any] { return "JSON array" }
+    if value is NSNull { return "JSON null" }
+    return "JSON scalar"
+  }
+
+  private func decodingFailureDetail(
+    for error: Error,
+    responseData: Data,
+    httpResponse: HTTPURLResponse
+  ) -> String {
+    let envelope = "HTTP \(httpResponse.statusCode), Content-Type \(httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "missing"), body \(responseShape(responseData))"
+    guard let decodingError = error as? DecodingError else {
+      return "\(error.localizedDescription); \(envelope)"
+    }
+
+    let context: DecodingError.Context
+    var pathSuffix: String?
+    var expectedType: String?
+    switch decodingError {
+    case .typeMismatch(let type, let value), .valueNotFound(let type, let value):
+      context = value
+      expectedType = String(reflecting: type)
+    case .dataCorrupted(let value):
+      context = value
+    case .keyNotFound(let key, let value):
+      context = value
+      pathSuffix = key.stringValue
+    @unknown default:
+      return "\(error.localizedDescription); \(envelope)"
+    }
+
+    let path = (context.codingPath.map(\.stringValue) + [pathSuffix].compactMap { $0 })
+      .joined(separator: ".")
+    let location = path.isEmpty ? "response root" : "coding path \(path)"
+    let expected = expectedType.map { " (expected \($0))" } ?? ""
+    return "\(context.debugDescription) at \(location)\(expected); \(envelope)"
+  }
+
+
   private func perform<Response: Decodable>(_ request: URLRequest) async throws -> Response {
     let requestURL = request.url?.absoluteString ?? "unknown"
     let (data, response) = try await urlSession.data(for: request)
@@ -1151,7 +1339,10 @@ public struct URLSessionImmichAPIClient: ImmichAPIClient {
     do {
       return try JSONDecoder().decode(Response.self, from: data)
     } catch {
-      throw ImmichAPIError.decodingFailed(url: requestURL, detail: error.localizedDescription)
+      throw ImmichAPIError.decodingFailed(
+        url: requestURL,
+        detail: decodingFailureDetail(for: error, responseData: data, httpResponse: httpResponse)
+      )
     }
   }
 
@@ -1185,16 +1376,23 @@ private struct ServerVersionResponse: Decodable {
   let patch: Int
 }
 
-private struct ServerFeaturesResponse: Decodable {
-  let oauth: Bool
-  let passwordLogin: Bool
-}
+private struct PublicConfigResponse: Decodable {
+  let oauth: OAuthConfig
+  let passwordLogin: PasswordLoginConfig
+  let server: ServerConfig
 
-private struct ServerConfigResponse: Decodable {
-  let isInitialized: Bool
-  let isOnboarded: Bool
-  let loginPageMessage: String
-  let oauthButtonText: String
+  struct OAuthConfig: Decodable {
+    let enabled: Bool
+    let buttonText: String?
+  }
+
+  struct PasswordLoginConfig: Decodable {
+    let enabled: Bool
+  }
+
+  struct ServerConfig: Decodable {
+    let loginPageMessage: String?
+  }
 }
 
 private struct LoginRequest: Encodable {
@@ -1354,31 +1552,31 @@ private struct AdminUserResponse: Decodable {
 }
 
 private struct TimelineBucketResponse: Decodable {
-  let city: [String?]
-  let country: [String?]
-  let duration: [String?]
+  let city: [String?]?
+  let country: [String?]?
+  let duration: [Int?]?
   let fileCreatedAt: [String]
-  let createdAt: [String]?
+  let createdAt: [String?]?
   let id: [String]
   let isFavorite: [Bool]
   let isImage: [Bool]
   let isTrashed: [Bool]
   let latitude: [Double?]?
-  let livePhotoVideoId: [String?]
-  let localOffsetHours: [Double]
+  let livePhotoVideoId: [String?]?
   let longitude: [Double?]?
   let ownerId: [String]
-  let projectionType: [String?]
+  let projectionType: [String?]?
   let ratio: [Double]
   let stack: [[String]?]?
-  let thumbhash: [String?]
+  let thumbhash: [String?]?
   let visibility: [String]
 }
 
 private enum TimelineBucketMapper {
   static func assets(from response: TimelineBucketResponse) -> [RemoteTimelineAsset] {
-    return response.id.indices.compactMap { index in
+    response.id.indices.compactMap { index in
       guard
+        let id = response.id[safe: index],
         let createdAtString = response.fileCreatedAt[safe: index],
         let createdAt = parseDate(createdAtString),
         let ownerID = response.ownerId[safe: index],
@@ -1391,35 +1589,30 @@ private enum TimelineBucketMapper {
         return nil
       }
 
-      let stackChildrenCount: Int?
-      if let stackArray = response.stack,
-         let maybePair = stackArray[safe: index],
-         let pair = maybePair,
-         let countString = pair[safe: 1] {
-        stackChildrenCount = Int(countString)
-      } else {
-        stackChildrenCount = nil
-      }
+      let stack = response.stack?[safe: index] ?? nil
+      let stackChildrenCount = stack?.dropFirst().first.flatMap(Int.init)
+      let durationMilliseconds = response.duration?[safe: index] ?? nil
+      let addedAt = response.createdAt?[safe: index] ?? nil
 
       return RemoteTimelineAsset(
-        id: response.id[index],
-        city: response.city[safe: index] ?? nil,
-        country: response.country[safe: index] ?? nil,
+        id: id,
+        city: response.city?[safe: index] ?? nil,
+        country: response.country?[safe: index] ?? nil,
         createdAt: createdAt,
-        duration: response.duration[safe: index] ?? nil,
+        durationMilliseconds: durationMilliseconds,
         isFavorite: isFavorite,
         isImage: isImage,
         isTrashed: isTrashed,
         latitude: response.latitude?[safe: index] ?? nil,
         longitude: response.longitude?[safe: index] ?? nil,
-        livePhotoVideoID: response.livePhotoVideoId[safe: index] ?? nil,
+        livePhotoVideoID: response.livePhotoVideoId?[safe: index] ?? nil,
         ownerID: ownerID,
-        projectionType: response.projectionType[safe: index] ?? nil,
+        projectionType: response.projectionType?[safe: index] ?? nil,
         ratio: ratio,
         stackChildrenCount: stackChildrenCount,
-        thumbhash: response.thumbhash[safe: index] ?? nil,
+        thumbhash: response.thumbhash?[safe: index] ?? nil,
         visibility: visibility,
-        addedAt: response.createdAt?[safe: index].flatMap { $0 }.flatMap(parseDate)
+        addedAt: addedAt.flatMap(parseDate)
       )
     }
   }
@@ -1428,7 +1621,8 @@ private enum TimelineBucketMapper {
     "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
     "yyyy-MM-dd'T'HH:mm:ssZ",
     "yyyy-MM-dd'T'HH:mm:ss.SSS",
-    "yyyy-MM-dd'T'HH:mm:ss"
+    "yyyy-MM-dd'T'HH:mm:ss",
+    "yyyy-MM-dd"
   ]
   private nonisolated(unsafe) static let iso8601WithFractionalSeconds: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
@@ -1511,6 +1705,7 @@ private struct AlbumResponse: Decodable {
   let isActivityEnabled: Bool?
   let shared: Bool?
   let ownerId: String?
+  let albumUsers: [AlbumUserResponse]?
 
   func toModel() -> Album {
     Album(
@@ -1523,105 +1718,24 @@ private struct AlbumResponse: Decodable {
       updatedAt: updatedAt.flatMap { TimelineBucketMapper.parseDate($0) } ?? Date(),
       isActivityEnabled: isActivityEnabled ?? false,
       shared: shared ?? false,
-      ownerID: ownerId ?? ""
+      ownerID: albumUsers?.first?.user.id ?? ownerId ?? ""
     )
   }
 }
 
-// MARK: - Album Detail Response (includes assets)
+private struct AlbumUserResponse: Decodable {
+  let user: AlbumUserAccountResponse
+}
 
-private struct AlbumDetailResponse: Decodable {
+private struct AlbumUserAccountResponse: Decodable {
   let id: String
-  let albumName: String
-  let description: String?
-  let assetCount: Int
-  let albumThumbnailAssetId: String?
-  let createdAt: String
-  let updatedAt: String
-  let isActivityEnabled: Bool?
-  let shared: Bool?
-  let ownerId: String?
-  let assets: [AlbumAssetResponse]?
-
-  func toAlbumModel() -> Album {
-    Album(
-      id: id,
-      albumName: albumName,
-      description: description ?? "",
-      assetCount: assetCount,
-      albumThumbnailAssetId: albumThumbnailAssetId,
-      createdAt: TimelineBucketMapper.parseDate(createdAt) ?? Date(),
-      updatedAt: TimelineBucketMapper.parseDate(updatedAt) ?? Date(),
-      isActivityEnabled: isActivityEnabled ?? false,
-      shared: shared ?? false,
-      ownerID: ownerId ?? ""
-    )
-  }
-
-  func toAssetModels() -> [RemoteTimelineAsset] {
-    (assets ?? []).compactMap { $0.toModel() }
-  }
 }
 
-private struct AlbumAssetResponse: Decodable {
-  let id: String
-  let type: String?
-  let createdAt: String?
-  let fileCreatedAt: String?
-  let duration: String?
-  let isFavorite: Bool?
-  let isTrashed: Bool?
-  let livePhotoVideoId: String?
-  let ownerId: String?
-  let exifInfo: AlbumAssetExifResponse?
-  let projectionType: String?
-  let thumbhash: String?
-  let stack: AlbumAssetStackResponse?
-
-  func toModel() -> RemoteTimelineAsset? {
-        guard let createdAtStr = fileCreatedAt,
-          let createdAt = TimelineBucketMapper.parseDate(createdAtStr) else {
-      return nil
-    }
-    let isImage = (type ?? "IMAGE") == "IMAGE"
-    return RemoteTimelineAsset(
-      id: id,
-      city: exifInfo?.city,
-      country: exifInfo?.country,
-      createdAt: createdAt,
-      duration: duration,
-      isFavorite: isFavorite ?? false,
-      isImage: isImage,
-      isTrashed: isTrashed ?? false,
-      latitude: exifInfo?.latitude,
-      longitude: exifInfo?.longitude,
-      livePhotoVideoID: livePhotoVideoId,
-      ownerID: ownerId ?? "",
-      projectionType: projectionType,
-      ratio: 1.0,
-      stackChildrenCount: stack?.assetCount,
-      thumbhash: thumbhash,
-      visibility: "timeline",
-      addedAt: self.createdAt.flatMap { TimelineBucketMapper.parseDate($0) }
-    )
-  }
-}
-
-private struct AlbumAssetExifResponse: Decodable {
-  let city: String?
-  let country: String?
-  let latitude: Double?
-  let longitude: Double?
-}
-
-private struct AlbumAssetStackResponse: Decodable {
-  let id: String?
-  let assetCount: Int?
-}
 
 // MARK: - People Response DTOs
 
 private struct PeopleResponse: Decodable {
+  let hidden: Int
   let total: Int
   let people: [PersonResponse]
   let hasNextPage: Bool?
@@ -1631,7 +1745,7 @@ private struct PersonResponse: Decodable {
   let id: String
   let name: String
   let birthDate: String?
-  let thumbnailPath: String?
+  let thumbnailPath: String
   let isHidden: Bool
   let updatedAt: String?
 
@@ -1641,7 +1755,7 @@ private struct PersonResponse: Decodable {
       id: id,
       name: name,
       birthDate: birthDateParsed,
-      thumbnailPath: thumbnailPath ?? "",
+      thumbnailPath: thumbnailPath,
       isHidden: isHidden,
       assetCount: 0
     )
@@ -1657,10 +1771,15 @@ private struct AssetDetailResponse: Decodable {
   let createdAt: String?
   let localDateTime: String?
   let fileCreatedAt: String?
+  let width: Int?
+  let height: Int?
+  let fileSizeInByte: Int?
+  let ownerId: String?
+  let visibility: String?
   let exifInfo: ExifInfoResponse?
   let isFavorite: Bool?
   let isTrashed: Bool?
-  let duration: String?
+  let duration: Int?
   let livePhotoVideoId: String?
   let tags: [TagResponse]?
 
@@ -1702,38 +1821,42 @@ private struct AssetDetailResponse: Decodable {
       originalFileName: originalFileName ?? "",
       localDateTime: localDateTime.flatMap { TimelineBucketMapper.parseDate($0) },
       fileCreatedAt: fileCreatedAt.flatMap { TimelineBucketMapper.parseDate($0) },
-      width: exifInfo?.exifImageWidth,
-      height: exifInfo?.exifImageHeight,
-      fileSizeInByte: exifInfo?.fileSizeInByte,
+      width: width ?? exifInfo?.exifImageWidth,
+      height: height ?? exifInfo?.exifImageHeight,
+      fileSizeInByte: fileSizeInByte ?? exifInfo?.fileSizeInByte,
       isFavorite: isFavorite ?? false,
-      duration: duration,
+      durationMilliseconds: duration,
       livePhotoVideoId: livePhotoVideoId,
       exif: exifModel,
-      tags: (tags ?? []).map { $0.toModel() }
+      tags: (tags ?? []).map { $0.toModel() },
+      ownerID: ownerId,
+      visibility: visibility
     )
   }
 
   func toTimelineAsset() -> RemoteTimelineAsset? {
     guard let createdAt = fileCreatedAt.flatMap({ TimelineBucketMapper.parseDate($0) }) else { return nil }
+    let width = self.width ?? exifInfo?.exifImageWidth ?? 1
+    let height = self.height ?? exifInfo?.exifImageHeight ?? 1
 
     return RemoteTimelineAsset(
       id: id,
       city: exifInfo?.city,
       country: exifInfo?.country,
       createdAt: createdAt,
-      duration: duration,
+      durationMilliseconds: duration,
       isFavorite: isFavorite ?? false,
       isImage: (type ?? "IMAGE") == "IMAGE",
       isTrashed: isTrashed ?? false,
       latitude: exifInfo?.latitude,
       longitude: exifInfo?.longitude,
       livePhotoVideoID: livePhotoVideoId,
-      ownerID: "",
+      ownerID: ownerId ?? "",
       projectionType: nil,
-      ratio: Double(exifInfo?.exifImageWidth ?? 1) / Double(exifInfo?.exifImageHeight ?? 1),
+      ratio: Double(width) / Double(height),
       stackChildrenCount: nil,
       thumbhash: nil,
-      visibility: "timeline",
+      visibility: visibility ?? "timeline",
       addedAt: self.createdAt.flatMap { TimelineBucketMapper.parseDate($0) }
     )
   }
@@ -1751,100 +1874,140 @@ private struct AssetStatisticsResponse: Decodable {
 
 private struct SmartSearchRequest: Encodable {
   let query: String?
-  let takenAfter: String?
-  let takenBefore: String?
-  let make: String?
-  let model: String?
-  let city: String?
-  let country: String?
-  let type: String?
-  let isFavorite: Bool?
-  let withStacked: Bool?
-  let withPeople: Bool?
-  let withExif: Bool?
+  let filter: SearchFilterRequest?
+  let size: Int
   let page: Int?
 
-  init(query: String, filters: SearchFilters, page: Int? = nil) {
+  init(query: String, filters: SearchFilters, page: String?) {
     self.query = query.isEmpty ? nil : query
-    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
-    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
-    self.make = filters.cameraMake
-    self.model = filters.cameraModel
-    self.city = filters.city
-    self.country = filters.country
-    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
-    self.isFavorite = filters.isFavorite
-    self.withStacked = true
-    self.withPeople = nil
-    self.withExif = nil
-    self.page = page
+    let searchFilter = SearchFilterRequest(filters: filters)
+    self.filter = searchFilter.isEmpty ? nil : searchFilter
+    self.size = 1000
+    self.page = page.flatMap(Int.init)
   }
 }
 
 private struct MetadataSearchRequest: Encodable {
-  var personIds: [String]?
-  var originalFileName: String?
-  var originalPath: String?
-  var description: String?
-  var ocr: String?
-  var type: String?
-  var size: Int?
-  var page: Int?
-  var takenAfter: String?
-  var takenBefore: String?
-  var make: String?
-  var model: String?
-  var city: String?
-  var country: String?
-  var isFavorite: Bool?
-  var withStacked: Bool?
-  var withExif: Bool?
+  let filter: SearchFilterRequest?
+  let originalFileName: String?
+  let originalPath: String?
+  let description: String?
+  let ocr: String?
+  var cursor: String?
+  let size: Int
+  let withExif: Bool?
+  let withStacked: Bool?
 
   init(
     originalFileName: String? = nil,
     originalPath: String? = nil,
     description: String? = nil,
     ocr: String? = nil,
-    filters: SearchFilters,
-    withExif: Bool = false,
-    page: Int? = 1
+    filters: SearchFilters = SearchFilters(),
+    withExif: Bool? = nil,
+    cursor: String? = nil,
+    albumIds: [String]? = nil,
+    personIds: [String]? = nil,
+    trashedOnly: Bool = false,
+    visibility: String? = nil
   ) {
+    let searchFilter = SearchFilterRequest(
+      filters: filters,
+      personIds: personIds,
+      albumIds: albumIds,
+      trashedOnly: trashedOnly,
+      visibility: visibility
+    )
+    self.filter = searchFilter.isEmpty ? nil : searchFilter
     self.originalFileName = originalFileName
     self.originalPath = originalPath
     self.description = description
     self.ocr = ocr
-    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
-    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
-    self.make = filters.cameraMake
-    self.model = filters.cameraModel
-    self.city = filters.city
-    self.country = filters.country
-    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
-    self.isFavorite = filters.isFavorite
-    self.withStacked = true
-    self.withExif = withExif
-    self.page = page
+    self.cursor = cursor
     self.size = 1000
+    self.withExif = withExif
+    self.withStacked = true
+  }
+}
+
+private struct SearchFilterRequest: Encodable {
+  let takenAt: DateFilterRequest?
+  let make: StringFilterRequest?
+  let model: StringFilterRequest?
+  let city: StringFilterRequest?
+  let country: StringFilterRequest?
+  let type: EnumFilterRequest?
+  let isFavorite: BoolFilterRequest?
+  let personIds: IdsFilterRequest?
+  let albumIds: IdsFilterRequest?
+  let trashedAt: NullableDateFilterRequest?
+  let visibility: EnumFilterRequest?
+
+  init(
+    filters: SearchFilters,
+    personIds: [String]? = nil,
+    albumIds: [String]? = nil,
+    trashedOnly: Bool = false,
+    visibility: String? = nil
+  ) {
+    self.visibility = visibility.map(EnumFilterRequest.init(eq:))
+    let gte = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
+    let lte = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
+    self.takenAt = gte == nil && lte == nil ? nil : DateFilterRequest(gte: gte, lte: lte)
+    self.make = filters.cameraMake.map(StringFilterRequest.init(eq:))
+    self.model = filters.cameraModel.map(StringFilterRequest.init(eq:))
+    self.city = filters.city.map(StringFilterRequest.init(eq:))
+    self.country = filters.country.map(StringFilterRequest.init(eq:))
+    switch filters.mediaType {
+    case .some(.image):
+      self.type = EnumFilterRequest(eq: "IMAGE")
+    case .some(.video):
+      self.type = EnumFilterRequest(eq: "VIDEO")
+    case .some(.all), nil:
+      self.type = nil
+    }
+    self.isFavorite = filters.isFavorite.map(BoolFilterRequest.init(eq:))
+    self.personIds = personIds.flatMap { $0.isEmpty ? nil : IdsFilterRequest(any: $0) }
+    self.albumIds = albumIds.flatMap { $0.isEmpty ? nil : IdsFilterRequest(any: $0) }
+    self.trashedAt = trashedOnly ? NullableDateFilterRequest(ne: JSONNull()) : nil
   }
 
-  init(personIds: [String], filters: SearchFilters) {
-    self.personIds = personIds
-    self.originalFileName = nil
-    self.originalPath = nil
-    self.description = nil
-    self.ocr = nil
-    self.takenAfter = filters.takenAfter.map { iso8601FractionalSecondsString(for: $0) }
-    self.takenBefore = filters.takenBefore.map { iso8601FractionalSecondsString(for: $0) }
-    self.make = filters.cameraMake
-    self.model = filters.cameraModel
-    self.city = filters.city
-    self.country = filters.country
-    self.type = filters.mediaType == .image ? "IMAGE" : filters.mediaType == .video ? "VIDEO" : nil
-    self.isFavorite = filters.isFavorite
-    self.withStacked = true
-    self.withExif = false
-    self.page = 1
-    self.size = 1000
+  var isEmpty: Bool {
+    takenAt == nil && make == nil && model == nil && city == nil && country == nil
+      && type == nil && isFavorite == nil && personIds == nil && albumIds == nil && trashedAt == nil
+      && visibility == nil
+  }
+}
+
+private struct DateFilterRequest: Encodable {
+  let gte: String?
+  let lte: String?
+}
+
+private struct StringFilterRequest: Encodable {
+  let eq: String
+}
+
+private struct EnumFilterRequest: Encodable {
+  let eq: String
+}
+
+private struct BoolFilterRequest: Encodable {
+  let eq: Bool
+}
+
+private struct IdsFilterRequest: Encodable {
+  let any: [String]
+}
+
+private struct NullableDateFilterRequest: Encodable {
+  let ne: JSONNull
+}
+
+private struct JSONNull: Encodable {
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encodeNil()
   }
 }
 
@@ -1853,22 +2016,15 @@ private struct SearchAssetsResponse: Decodable {
 
   struct SearchAssetsPage: Decodable {
     let items: [AssetDetailResponse]
+    let count: Int?
     let total: Int?
+    let nextCursor: String?
     let nextPage: String?
   }
 }
 
-// MARK: - Trash DTOs
-
 private struct TrashRequest: Encodable {
   let ids: [String]
-}
-
-private struct TrashedSearchRequest: Encodable {
-  let withDeleted = true
-  let trashedAfter = "1970-01-01T00:00:00.000Z"
-  let page: Int
-  let size = 1000
 }
 
 // MARK: - Map DTOs
@@ -1878,11 +2034,117 @@ private struct MapMarkerResponse: Decodable {
   let lat: Double
   let lon: Double
   let city: String?
+  let state: String?
   let country: String?
 
   func toModel() -> MapMarker {
-    MapMarker(id: id, latitude: lat, longitude: lon, city: city, country: country)
+    MapMarker(id: id, latitude: lat, longitude: lon, city: city, country: country, state: state)
   }
+}
+
+private struct AssetBulkUpdateRequest: Encodable {
+  let ids: [String]
+  let update: AssetBulkUpdate
+
+  private enum CodingKeys: String, CodingKey {
+    case ids, rating, isFavorite, visibility, dateTimeRelative, timeZone
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(ids, forKey: .ids)
+    switch update.rating {
+    case .stars(let stars):
+      try container.encode(min(max(stars, 1), 5), forKey: .rating)
+    case .none?:
+      try container.encodeNil(forKey: .rating)
+    case nil:
+      break
+    }
+    try container.encodeIfPresent(update.isFavorite, forKey: .isFavorite)
+    try container.encodeIfPresent(update.visibility, forKey: .visibility)
+    try container.encodeIfPresent(update.dateTimeRelativeMinutes, forKey: .dateTimeRelative)
+    try container.encodeIfPresent(update.timeZone, forKey: .timeZone)
+  }
+}
+
+private struct AssetEditsRequest: Encodable {
+  let edits: [AssetEditItem]
+}
+
+private struct AssetEditsResponse: Decodable {
+  let edits: [AssetEditItem]
+}
+
+/// One `AssetEditActionItemDto`. `parameters` is a crop, rotate, or mirror object chosen by `action`.
+private struct AssetEditItem: Codable {
+  let action: String
+  let parameters: Parameters
+
+  struct Parameters: Codable {
+    var x: Int?
+    var y: Int?
+    var width: Int?
+    var height: Int?
+    var angle: Int?
+    var axis: String?
+  }
+
+  init(_ model: AssetEditAction) {
+    switch model {
+    case .crop(let x, let y, let width, let height):
+      action = "crop"
+      parameters = Parameters(x: x, y: y, width: width, height: height)
+    case .rotate(let degrees):
+      action = "rotate"
+      parameters = Parameters(angle: degrees)
+    case .mirror(let axis):
+      action = "mirror"
+      parameters = Parameters(axis: axis)
+    }
+  }
+
+  var model: AssetEditAction? {
+    switch action {
+    case "crop":
+      guard let x = parameters.x, let y = parameters.y, let width = parameters.width, let height = parameters.height else { return nil }
+      return .crop(x: x, y: y, width: width, height: height)
+    case "rotate":
+      return parameters.angle.map { .rotate(degrees: $0) }
+    case "mirror":
+      return parameters.axis.map { .mirror(axis: $0) }
+    default:
+      return nil
+    }
+  }
+}
+
+private struct DuplicateGroupResponse: Decodable {
+  let duplicateId: String
+  let assets: [AssetDetailResponse]
+  let suggestedKeepAssetIds: [String]
+}
+
+private struct DuplicateResolveRequest: Encodable {
+  let groups: [DuplicateResolveGroupRequest]
+}
+
+private struct DuplicateResolveGroupRequest: Encodable {
+  let duplicateId: String
+  let keepAssetIds: [String]
+  let trashAssetIds: [String]
+}
+
+private struct ReverseGeocodeResponse: Decodable {
+  let city: String?
+  let state: String?
+  let country: String?
+}
+
+private struct BulkLocationUpdateRequest: Encodable {
+  let ids: [String]
+  let latitude: Double
+  let longitude: Double
 }
 
 // MARK: - Memory DTOs
@@ -1917,6 +2179,7 @@ private struct MemoryResponse: Decodable {
 
 private struct UploadResponse: Decodable {
   let id: String
+  let status: String
 }
 
 private struct CreateAlbumRequest: Encodable {

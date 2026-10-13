@@ -1,5 +1,6 @@
 #if canImport(Foundation)
 import Foundation
+import CoreFoundation
 import ImmichAPI
 import ImmichCore
 
@@ -26,8 +27,6 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
   private var webSocketTask: URLSessionWebSocketTask?
   private var session: URLSession?
   private var connectionRequest: URLRequest?
-  private var pingTimer: Timer?
-  private var pingInterval: TimeInterval = 25
   private var isConnected = false
   private var reconnectTask: Task<Void, Never>?
   private var reconnectAttempt = 0
@@ -78,7 +77,6 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
     intentionalDisconnect = true
     reconnectTask?.cancel()
     reconnectTask = nil
-    stopPingTimer()
     webSocketTask?.cancel(with: .goingAway, reason: nil)
     webSocketTask = nil
     connectionRequest = nil
@@ -118,9 +116,11 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
 
     switch firstChar {
     case "0":
-      handleEngineIOOpen(raw)
+      handleEngineIOOpen()
     case "2":
-      sendRaw("3")
+      if let response = Self.engineIOHeartbeatResponse(toServerPacket: raw) {
+        sendRaw(response)
+      }
     case "3":
       break
     case "4":
@@ -131,17 +131,8 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
   }
 
   @MainActor
-  private func handleEngineIOOpen(_ raw: String) {
-    let jsonString = String(raw.dropFirst())
-    if let data = jsonString.data(using: .utf8),
-       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-      if let interval = json["pingInterval"] as? TimeInterval {
-        pingInterval = interval / 1000.0
-      }
-    }
-
+  private func handleEngineIOOpen() {
     sendRaw("40")
-    startPingTimer()
   }
 
   @MainActor
@@ -194,15 +185,75 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
       immichLog("[WebSocket] Session deleted by server")
     case "on_new_release":
       if let payload = eventData as? [String: Any],
-         let releaseVersion = payload["releaseVersion"] as? String {
-        let serverVersion = payload["serverVersion"] as? String
+         let versions = Self.releaseVersions(from: payload) {
         delegate?.webSocketDidReceiveReleaseNotification(
-          releaseVersion: releaseVersion,
-          serverVersion: serverVersion
+          releaseVersion: versions.releaseVersion,
+          serverVersion: versions.serverVersion
         )
       }
     default:
       break
+    }
+  }
+
+  static func engineIOHeartbeatResponse(toServerPacket packet: String) -> String? {
+    guard packet.first == "2" else { return nil }
+    return "3" + String(packet.dropFirst())
+  }
+
+  static func releaseVersions(
+    from payload: [String: Any]
+  ) -> (releaseVersion: String, serverVersion: String?)? {
+    guard let releaseVersion = semanticVersion(from: payload["releaseVersion"]) else {
+      return nil
+    }
+    return (
+      releaseVersion: releaseVersion,
+      serverVersion: semanticVersion(from: payload["serverVersion"])
+    )
+  }
+
+  private static func semanticVersion(from value: Any?) -> String? {
+    guard let version = value as? [String: Any],
+          let major = versionComponent(version["major"]),
+          let minor = versionComponent(version["minor"]),
+          let patch = versionComponent(version["patch"]) else {
+      return nil
+    }
+
+    var result = "\(major).\(minor).\(patch)"
+    if let prereleaseValue = version["prerelease"], !(prereleaseValue is NSNull) {
+      guard let prerelease = prereleaseValue as? String else { return nil }
+      if !prerelease.isEmpty {
+        guard isValidPrerelease(prerelease) else { return nil }
+        result += "-\(prerelease)"
+      }
+    }
+    return result
+  }
+
+  private static func versionComponent(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber,
+          CFGetTypeID(number) != CFBooleanGetTypeID(),
+          let component = Int(number.stringValue),
+          component >= 0 else {
+      return nil
+    }
+    return component
+  }
+
+  private static func isValidPrerelease(_ prerelease: String) -> Bool {
+    let identifiers = prerelease.split(separator: ".", omittingEmptySubsequences: false)
+    guard !identifiers.isEmpty else { return false }
+    return identifiers.allSatisfy { identifier in
+      guard !identifier.isEmpty,
+            identifier.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else {
+        return false
+      }
+      if identifier.allSatisfy(\.isNumber), identifier.count > 1, identifier.first == "0" {
+        return false
+      }
+      return true
     }
   }
 
@@ -215,29 +266,13 @@ final class ImmichWebSocketService: NSObject, ImmichWebSocketServicing, @uncheck
   }
 
   @MainActor
-  private func startPingTimer() {
-    stopPingTimer()
-    pingTimer = Timer.scheduledTimer(withTimeInterval: pingInterval, repeats: true) { [weak self] _ in
-      Task { @MainActor [weak self] in
-        self?.sendRaw("2")
-      }
-    }
-  }
-
-  @MainActor
-  private func stopPingTimer() {
-    pingTimer?.invalidate()
-    pingTimer = nil
-  }
-
-  @MainActor
   private func handleDisconnection() {
     guard !intentionalDisconnect else {
       // disconnect() already notified the delegate and cleaned up state.
       return
     }
     isConnected = false
-    stopPingTimer()
+
     delegate?.webSocketDidDisconnect()
 
     guard reconnectAttempt < maxReconnectAttempts else {

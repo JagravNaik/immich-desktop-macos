@@ -53,23 +53,17 @@ public struct VersionCheckState: Decodable, Sendable {
 }
 
 public struct ServerLoginConfiguration: Sendable {
-  public let isInitialized: Bool
-  public let isOnboarded: Bool
   public let loginPageMessage: String
   public let oauthButtonText: String
   public let passwordLoginEnabled: Bool
   public let oauthEnabled: Bool
 
   public init(
-    isInitialized: Bool,
-    isOnboarded: Bool,
     loginPageMessage: String,
     oauthButtonText: String,
     passwordLoginEnabled: Bool,
     oauthEnabled: Bool
   ) {
-    self.isInitialized = isInitialized
-    self.isOnboarded = isOnboarded
     self.loginPageMessage = loginPageMessage
     self.oauthButtonText = oauthButtonText
     self.passwordLoginEnabled = passwordLoginEnabled
@@ -319,7 +313,7 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
   public let country: String?
   public let createdAt: Date
   public let addedAt: Date?
-  public let duration: String?
+  public let durationMilliseconds: Int?
   public let isFavorite: Bool
   public let isImage: Bool
   public let isTrashed: Bool
@@ -338,7 +332,7 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
     city: String?,
     country: String?,
     createdAt: Date,
-    duration: String?,
+    durationMilliseconds: Int?,
     isFavorite: Bool,
     isImage: Bool,
     isTrashed: Bool,
@@ -358,7 +352,7 @@ public struct RemoteTimelineAsset: Identifiable, Hashable, Sendable {
     self.country = country
     self.createdAt = createdAt
     self.addedAt = addedAt
-    self.duration = duration
+    self.durationMilliseconds = durationMilliseconds
     self.isFavorite = isFavorite
     self.isImage = isImage
     self.isTrashed = isTrashed
@@ -494,13 +488,104 @@ public struct MapMarker: Identifiable, Hashable, Sendable {
   public let longitude: Double
   public let city: String?
   public let country: String?
+  public let state: String?
 
-  public init(id: String, latitude: Double, longitude: Double, city: String?, country: String?) {
+  public init(id: String, latitude: Double, longitude: Double, city: String?, country: String?, state: String? = nil) {
     self.id = id
     self.latitude = latitude
     self.longitude = longitude
     self.city = city
     self.country = country
+    self.state = state
+  }
+}
+
+/// One Immich v3 non-destructive edit (`/assets/{id}/edits`): crop, rotate, or mirror.
+/// Crop is in pixels from the top-left of the image as transformed by the preceding actions.
+public enum AssetEditAction: Equatable, Hashable, Sendable {
+  case crop(x: Int, y: Int, width: Int, height: Int)
+  /// Clockwise degrees: 90, 180, or 270.
+  case rotate(degrees: Int)
+  /// `horizontal` or `vertical`.
+  case mirror(axis: String)
+}
+
+/// Fields for Immich v3 bulk asset updates (`PUT /assets`). Only non-nil fields are sent.
+public struct AssetBulkUpdate: Equatable, Sendable {
+  public enum Rating: Equatable, Sendable {
+    /// One to five stars (Photos' Set Star Rating ⌥1–⌥5).
+    case stars(Int)
+    /// Unrated (Photos' Remove Rating ⌥0). Immich v3 represents this as `null`.
+    case none
+  }
+
+  public var rating: Rating?
+  public var isFavorite: Bool?
+  /// `timeline`, `hidden`, `archive`, or `locked`.
+  public var visibility: String?
+  /// Shift capture dates by this many minutes (Photos' Adjust Date and Time).
+  public var dateTimeRelativeMinutes: Int?
+  /// IANA time zone identifier.
+  public var timeZone: String?
+
+  public init(
+    rating: Rating? = nil,
+    isFavorite: Bool? = nil,
+    visibility: String? = nil,
+    dateTimeRelativeMinutes: Int? = nil,
+    timeZone: String? = nil
+  ) {
+    self.rating = rating
+    self.isFavorite = isFavorite
+    self.visibility = visibility
+    self.dateTimeRelativeMinutes = dateTimeRelativeMinutes
+    self.timeZone = timeZone
+  }
+}
+
+/// An Immich duplicate group (`GET /duplicates`), the backing for Photos' Utilities ▸ Duplicates.
+public struct DuplicateGroup: Identifiable, Hashable, Sendable {
+  public let id: String
+  public let assets: [RemoteTimelineAsset]
+  public let suggestedKeepAssetIDs: [String]
+
+  public init(id: String, assets: [RemoteTimelineAsset], suggestedKeepAssetIDs: [String]) {
+    self.id = id
+    self.assets = assets
+    self.suggestedKeepAssetIDs = suggestedKeepAssetIDs
+  }
+
+  /// IDs Photos' Merge Duplicates would discard: everything except the kept assets.
+  public var suggestedTrashAssetIDs: [String] {
+    let keep = Set(keepAssetIDs)
+    return assets.map(\.id).filter { !keep.contains($0) }
+  }
+
+  /// Server suggestion, falling back to the first asset so a merge always keeps one item.
+  public var keepAssetIDs: [String] {
+    let known = Set(assets.map(\.id))
+    let suggested = suggestedKeepAssetIDs.filter(known.contains)
+    if !suggested.isEmpty { return suggested }
+    return assets.first.map { [$0.id] } ?? []
+  }
+}
+
+/// A place name returned by Immich reverse geocoding (`GET /map/reverse-geocode`).
+public struct ReverseGeocodePlace: Hashable, Sendable {
+  public let city: String?
+  public let state: String?
+  public let country: String?
+
+  public init(city: String?, state: String?, country: String?) {
+    self.city = city
+    self.state = state
+    self.country = country
+  }
+
+  /// Photos joins place components with ", " (`IPXPlacesMailingAddressOneLineDelimiter`).
+  public var displayName: String? {
+    let parts = [city, state, country].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    return parts.isEmpty ? nil : parts.joined(separator: ", ")
   }
 }
 
@@ -543,7 +628,9 @@ public struct AssetDetail: Sendable {
   public let height: Int?
   public let fileSizeInByte: Int?
   public let isFavorite: Bool
-  public let duration: String?
+  public let durationMilliseconds: Int?
+  public let ownerID: String?
+  public let visibility: String?
   public let livePhotoVideoId: String?
   public let exif: ExifInfo?
   public let tags: [ImmichTag]
@@ -558,10 +645,12 @@ public struct AssetDetail: Sendable {
     height: Int?,
     fileSizeInByte: Int?,
     isFavorite: Bool,
-    duration: String?,
+    durationMilliseconds: Int?,
     livePhotoVideoId: String?,
     exif: ExifInfo?,
-    tags: [ImmichTag]
+    tags: [ImmichTag],
+    ownerID: String? = nil,
+    visibility: String? = nil
   ) {
     self.id = id
     self.type = type
@@ -572,10 +661,12 @@ public struct AssetDetail: Sendable {
     self.height = height
     self.fileSizeInByte = fileSizeInByte
     self.isFavorite = isFavorite
-    self.duration = duration
+    self.durationMilliseconds = durationMilliseconds
     self.livePhotoVideoId = livePhotoVideoId
     self.exif = exif
     self.tags = tags
+    self.ownerID = ownerID
+    self.visibility = visibility
   }
 }
 
@@ -626,10 +717,16 @@ public struct ExifInfo: Sendable {
 public struct UploadItem: Identifiable, Equatable, Sendable {
   public let id: UUID
   public let fileURL: URL
+  public let fileCreatedAt: Date?
 
-  public init(id: UUID = UUID(), fileURL: URL) {
+  public init(
+    id: UUID = UUID(),
+    fileURL: URL,
+    fileCreatedAt: Date? = nil
+  ) {
     self.id = id
     self.fileURL = fileURL
+    self.fileCreatedAt = fileCreatedAt
   }
 }
 

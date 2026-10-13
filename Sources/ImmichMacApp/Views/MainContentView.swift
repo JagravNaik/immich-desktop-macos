@@ -122,6 +122,27 @@ struct MainContentView: View {
     .sheet(isPresented: $appState.showAdminUsersSheet) {
       AdminUsersSheet(appState: appState)
     }
+    .sheet(isPresented: $appState.showAssignLocationSheet) {
+      AssetLocationEditor(initialCoordinate: nil) { latitude, longitude in
+        try await appState.assignLocation(
+          itemIDs: appState.assignLocationItemIDs,
+          latitude: latitude,
+          longitude: longitude
+        )
+      }
+    }
+    .sheet(isPresented: $appState.showAdjustDateTimeSheet) {
+      AdjustDateTimeSheet(appState: appState)
+    }
+    .focusedSceneObject(appState)
+    .focusedSceneObject(editingPipeline)
+    .focusedSceneObject(thumbnailStore)
+    .onChange(of: appState.isEditing) { _, isEditing in
+      if !isEditing {
+        editingPipeline.endSession()
+        appState.editingSessionState = .idle
+      }
+    }
     .alert("Immich Update Available", isPresented: $appState.showVersionAnnouncement) {
       Button("Release Notes") {
         if let releaseVersion = appState.availableReleaseVersion,
@@ -281,7 +302,7 @@ struct MainContentView: View {
       if appState.isEditing {
         HStack(spacing: 0) {
           Spacer()
-          EditingSidebar(appState: appState, pipeline: editingPipeline, item: item)
+          EditingSidebar(appState: appState, pipeline: editingPipeline, thumbnailStore: thumbnailStore, item: item)
             .transition(.move(edge: .trailing))
         }
         .opacity(viewerOpacity)
@@ -373,6 +394,7 @@ struct MainContentView: View {
     switch appState.sidebarSelection {
     case .library: "Library"
     case .collections: "Collections"
+    case .recentDays: "Recent Days"
     case .map: "Map"
     case .favorites: "Favorites"
     case .videos: "Videos"
@@ -381,6 +403,8 @@ struct MainContentView: View {
     case .screenshots: "Screenshots"
     case .imports: "Imports"
     case .recentlyDeleted: "Recently Deleted"
+    case .hidden: "Hidden"
+    case .duplicates: "Duplicates"
     case .allAlbums: "Albums"
     case .allPeople: "People"
     case .allMemories: "Memories"
@@ -399,6 +423,15 @@ struct MainContentView: View {
     switch appState.sidebarSelection {
     case .collections:
       CollectionsView(appState: appState, thumbnailStore: thumbnailStore)
+    case .recentDays:
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
+        .task { await appState.loadCompleteTimelineIfNeeded() }
     case .map:
       MapBrowserView(
         appState: appState,
@@ -455,6 +488,18 @@ struct MainContentView: View {
         onHeroFramesChanged: { heroItemFrames = $0 }
       )
         .task { await appState.loadScreenshots() }
+    case .hidden:
+      LibraryGridView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        heroHiddenItemID: activeHeroHiddenItemID,
+        onOpenAsset: handleOpenAsset,
+        onHeroFramesChanged: { heroItemFrames = $0 }
+      )
+        .task { await appState.loadHiddenItems() }
+    case .duplicates:
+      DuplicatesView(appState: appState, thumbnailStore: thumbnailStore)
+        .task { await appState.loadDuplicates() }
     case .videos, .livePhotos, .panoramas:
       LibraryGridView(
         appState: appState,
@@ -491,7 +536,7 @@ struct MainContentView: View {
       }
     }
 
-    // Center: Years | Months | All Photos segmented control (Library only)
+    // Center: Years | Months | Days | All Photos (Photos' curated library zoom levels)
     ToolbarItem(placement: .principal) {
       if showsTimelineViewModePicker {
         Picker("", selection: $appState.timelineViewMode) {
@@ -500,7 +545,7 @@ struct MainContentView: View {
           }
         }
         .pickerStyle(.segmented)
-        .frame(width: 240)
+        .frame(width: 320)
       }
     }
 
@@ -584,8 +629,8 @@ struct MainContentView: View {
       } label: {
         Image(systemName: "plus")
       }
-      .help("Import Files")
-      .accessibilityLabel("Import Files")
+      .help("Import Media")
+      .accessibilityLabel("Import Media")
 
       // View options
       Menu {
@@ -666,10 +711,11 @@ struct MainContentView: View {
         .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
         .accessibilityLabel(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
 
-        if !item.isVideo {
+        // While editing, the sidebar's Done button saves and closes; the toolbar can't discard edits.
+        if !item.isVideo, !appState.isEditing {
           Button {
             withAnimation(ImmichMotion.Curves.structuralMedium) {
-              appState.isEditing.toggle()
+              appState.isEditing = true
             }
           } label: {
             Image(systemName: "slider.horizontal.3")
@@ -1013,30 +1059,52 @@ struct AllPeopleView: View {
 struct AllMemoriesView: View {
   @ObservedObject var appState: AppState
   @ObservedObject var thumbnailStore: ThumbnailStore
+  @State private var playingMemory: Memory?
 
   var body: some View {
-    if appState.memories.isEmpty {
-      VStack(spacing: 12) {
-        Image(systemName: "memories")
-          .font(.system(size: 42, weight: .light))
-          .foregroundStyle(.quaternary)
-        Text("No memories")
-          .font(.title3.weight(.medium))
-          .foregroundStyle(.secondary)
-      }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-    } else {
-      ScrollView {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 16)], spacing: 16) {
-          ForEach(appState.memories) { memory in
-            MemoryCard(memory: memory, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
-              .onTapGesture {
-                appState.sidebarSelection = .memory(id: memory.id)
-              }
-          }
+    Group {
+      if appState.memories.isEmpty {
+        VStack(spacing: 12) {
+          Image(systemName: "memories")
+            .font(.system(size: 42, weight: .light))
+            .foregroundStyle(.quaternary)
+          Text("No memories")
+            .font(.title3.weight(.medium))
+            .foregroundStyle(.secondary)
         }
-        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else {
+        ScrollView {
+          LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 16)], spacing: 16) {
+            ForEach(appState.memories) { memory in
+              VStack(alignment: .trailing, spacing: 8) {
+                MemoryCard(memory: memory, context: appState.thumbnailContext, thumbnailStore: thumbnailStore)
+                  .onTapGesture {
+                    appState.sidebarSelection = .memory(id: memory.id)
+                  }
+
+                Button {
+                  appState.loadMemory(memory.id)
+                  playingMemory = memory
+                } label: {
+                  Label("Play Memory", systemImage: "play.fill")
+                }
+                .buttonStyle(.bordered)
+                .help("Play this Memory")
+                .accessibilityLabel("Play \(memory.title)")
+              }
+            }
+          }
+          .padding(20)
+        }
       }
+    }
+    .sheet(item: $playingMemory) { memory in
+      MemoryPlaybackView(
+        appState: appState,
+        thumbnailStore: thumbnailStore,
+        memory: memory
+      )
     }
   }
 }
@@ -1049,6 +1117,8 @@ struct RecentlyDeletedView: View {
   let heroHiddenItemID: String?
   let onOpenAsset: (AppState.PhotoItem, CGRect, NSImage?) -> Void
   let onHeroFramesChanged: ([String: CGRect]) -> Void
+  @State private var isConfirmingEmptyTrash = false
+  @State private var emptyTrashError: String?
 
   private var gridColumns: [GridItem] {
     [
@@ -1117,6 +1187,55 @@ struct RecentlyDeletedView: View {
       }
     }
     .task { await appState.loadTrashedAssets() }
+    .overlay(alignment: .topTrailing) {
+      if !appState.trashedItems.isEmpty {
+        Button {
+          isConfirmingEmptyTrash = true
+        } label: {
+          if appState.isEmptyingTrash {
+            ProgressView()
+              .controlSize(.small)
+              .accessibilityLabel("Emptying Recently Deleted")
+          } else {
+            Label("Empty Recently Deleted", systemImage: "trash")
+          }
+        }
+        .buttonStyle(.bordered)
+        .disabled(appState.isLoadingTrash || appState.isEmptyingTrash)
+        .help("Permanently delete all items in Recently Deleted")
+        .padding(.top, 12)
+        .padding(.trailing, 16)
+      }
+    }
+    .confirmationDialog(
+      "Permanently Delete All Items?",
+      isPresented: $isConfirmingEmptyTrash,
+      titleVisibility: .visible
+    ) {
+      Button("Delete All", role: .destructive) {
+        Task {
+          do {
+            try await appState.emptyTrash()
+          } catch {
+            emptyTrashError = error.localizedDescription
+          }
+        }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Items in Recently Deleted will be permanently removed from Immich. This action can’t be undone.")
+    }
+    .alert(
+      "Couldn’t Empty Recently Deleted",
+      isPresented: Binding(
+        get: { emptyTrashError != nil },
+        set: { if !$0 { emptyTrashError = nil } }
+      )
+    ) {
+      Button("OK", role: .cancel) { emptyTrashError = nil }
+    } message: {
+      Text(emptyTrashError ?? "")
+    }
   }
 }
 

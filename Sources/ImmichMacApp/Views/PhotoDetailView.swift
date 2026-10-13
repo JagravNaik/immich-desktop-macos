@@ -13,6 +13,7 @@ struct PhotoDetailView: View {
   let onDismissPresentationChanged: (InteractiveDismissPresentation) -> Void
   let onDismiss: (InteractiveDismissPresentation) -> Void
 
+  @State private var isShowingVideoTrim = false
   @State private var image: NSImage?
   @State private var currentItemID: String?
   @State private var isLoading = false
@@ -26,6 +27,14 @@ struct PhotoDetailView: View {
   @State private var isAnimatingPageSwipe = false
   @State private var isPinchDismissing = false
   @State private var pageSwipeTask: Task<Void, Never>?
+  // Photos-style zoomed panning (IPXElasticScrollAnimator / IPXElasticPanGestureAnimator).
+  @State private var rawScrollPanOffset: CGSize?
+  @State private var dragPanOrigin: CGSize?
+  @State private var panDriver = PhotosFrameDriver()
+  // Live Photos (IPXViewerMediaController + IPXBadgesOverlayController).
+  @StateObject private var livePhotoStore = LivePhotoStore()
+  @State private var isLiveBadgeExpanded = true
+  @State private var liveBadgeCollapseTask: Task<Void, Never>?
 
   var body: some View {
     if let item = appState.selectedItem {
@@ -81,10 +90,22 @@ struct PhotoDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
       }
+      .onContinuousHover { phase in
+        if case .active = phase, item.isLivePhoto {
+          revealLiveBadge()
+        }
+      }
+      .task(id: "live::\(item.id)") {
+        isLiveBadgeExpanded = true
+        revealLiveBadge()
+        loadLivePhotoIfNeeded(item)
+      }
       .onDisappear {
         pageSwipeTask?.cancel()
         pageSwipeTask = nil
         isAnimatingPageSwipe = false
+        panDriver.stop()
+        liveBadgeCollapseTask?.cancel()
       }
       .onChange(of: item.id) { _, newID in
         image = initialDisplayImage
@@ -94,7 +115,16 @@ struct PhotoDetailView: View {
         resetImageViewState()
         onDismissPresentationChanged(.identity)
       }
-      .task(id: "\(item.id)::\(isHeroTransitioning)") {
+      .onChange(of: appState.isEditing) { _, isEditing in
+        guard isEditing else { return }
+        dragOffset = .zero
+        dismissProgress = 0
+        resetPinchDismissInteraction()
+        resetImageViewState()
+        // The editor works on the unedited original plus Immich's saved crop/rotate/mirror.
+        Task { await appState.beginEditingSession(pipeline: editingPipeline, fallbackImage: image) }
+      }
+      .task(id: "\(item.id)::\(isHeroTransitioning)::\(thumbnailStore.revision(for: item))") {
         currentItemID = item.id
         isLoading = true
 
@@ -111,9 +141,6 @@ struct PhotoDetailView: View {
         }
 
         if isHeroTransitioning {
-          if let img = self.image {
-            editingPipeline.setSourceImage(img)
-          }
           return
         }
 
@@ -155,13 +182,6 @@ struct PhotoDetailView: View {
           ) {
             guard currentItemID == item.id else { return }
             self.image = original
-            // Feed the best available image to the editing pipeline
-            editingPipeline.setSourceImage(original)
-          }
-        } else {
-          // For non-original loads, still set the pipeline source from best available
-          if let img = self.image {
-            editingPipeline.setSourceImage(img)
           }
         }
       }
@@ -174,14 +194,14 @@ struct PhotoDetailView: View {
   private func itemContainer(for item: AppState.PhotoItem, isCurrent: Bool) -> some View {
     let content = contentView(for: item, isCurrent: isCurrent)
       .overlay(alignment: .topLeading) {
-        if isCurrent, item.isLivePhoto {
+        if isCurrent, item.isLivePhoto, !appState.isEditing {
           liveBadge
             .padding(16)
         }
       }
       .scaleEffect(isCurrent ? interactiveScale : 1.0)
       
-    if isCurrent, !item.isPanorama {
+    if isCurrent, !item.isPanorama, !appState.isEditing {
       content.gesture(dismissDragGesture)
     } else {
       content
@@ -192,8 +212,12 @@ struct PhotoDetailView: View {
   private func contentView(for item: AppState.PhotoItem, isCurrent: Bool) -> some View {
     ZStack {
       // Still image: show edited version when editing, otherwise raw
-      if isCurrent, appState.isEditing, let editedImage = editingPipeline.editedImage {
-        zoomableImageView(editedImage)
+      if isCurrent, appState.isEditing {
+        EditorCanvasView(
+          pipeline: editingPipeline,
+          isLoading: appState.editingSessionState == .loading,
+          fallbackImage: displayImage(for: item)
+        )
       } else if item.isPanorama, let img = displayImage(for: item), !isHeroTransitioning {
         ZStack(alignment: .bottomLeading) {
           PanoramaSceneView(image: img)
@@ -229,19 +253,49 @@ struct PhotoDetailView: View {
           .accessibilityHidden(true)
       }
 
-      // Video layer
-      if isCurrent, item.isVideo, !isHeroTransitioning {
-        // Regular video: always show the player
-        if let videoURL = videoPlaybackURL(for: item) {
-          AuthenticatedVideoPlayer(
-            url: videoURL,
-            authHeaderFields: appState.thumbnailContext?.assetHeaderFields ?? [:],
-            showControls: true,
-            onPlaybackEnded: nil
-          )
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      if isCurrent, item.isVideo, !isHeroTransitioning,
+         let videoURL = videoPlaybackURL(for: item) {
+        AuthenticatedVideoPlayer(
+          url: videoURL,
+          authHeaderFields: appState.thumbnailContext?.assetHeaderFields ?? [:],
+          showControls: true,
+          onPlaybackEnded: nil
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topTrailing) {
+          Button {
+            isShowingVideoTrim = true
+          } label: {
+            Label("Trim", systemImage: "scissors")
+              .labelStyle(.titleAndIcon)
+          }
+          .buttonStyle(.bordered)
+          .tint(.white)
+          .padding(16)
+          .help("Trim and export a copy of this video")
+          .sheet(isPresented: $isShowingVideoTrim) {
+            VideoTrimEditor(
+              url: videoURL,
+              authHeaderFields: appState.thumbnailContext?.assetHeaderFields ?? [:]
+            )
+          }
         }
-      } else if isCurrent, item.isLivePhoto, let videoURL = livePhotoPlaybackURL(for: item), !isHeroTransitioning {
+      } else if isCurrent, item.isLivePhoto, !isHeroTransitioning, !appState.isEditing,
+                case .ready(let livePhoto) = livePhotoStore.state(for: item.id) {
+        // Apple's own Live Photo player, as in Photos; hidden while zoomed so pan/zoom stay ours.
+        LivePhotoPlayerView(
+          livePhoto: livePhoto,
+          isPlaying: appState.isViewingLivePhoto,
+          onPlaybackEnded: {
+            appState.isViewingLivePhoto = false
+            appState.isPeeking = false
+          }
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .opacity(isImageZoomed ? 0 : 1)
+        .allowsHitTesting(false)
+      } else if isCurrent, item.isLivePhoto, let videoURL = livePhotoPlaybackURL(for: item), !isHeroTransitioning,
+                livePhotoStore.state(for: item.id) == .unavailable {
         // Live photo: keep player mounted, fade with opacity
         AuthenticatedVideoPlayer(
           url: videoURL,
@@ -295,8 +349,8 @@ struct PhotoDetailView: View {
           onMagnifyEnded: {
             finishMagnificationGesture()
           },
-          onPan: { translation in
-            handlePanScroll(translation, image: image)
+          onPan: { sample in
+            handlePanScroll(sample, image: image)
           }
         )
       }
@@ -307,6 +361,7 @@ struct PhotoDetailView: View {
       && !item.isVideo
       && !item.isPanorama
       && !appState.isViewingLivePhoto
+      && !appState.isEditing
       && !isImageZoomed
   }
 
@@ -323,27 +378,49 @@ struct PhotoDetailView: View {
   // MARK: - Live Photo Badge
 
   private var liveBadge: some View {
-    Button {
-      withAnimation(ImmichMotion.Curves.structuralShort) {
-        appState.isViewingLivePhoto.toggle()
-        appState.isPeeking = false
-      }
-    } label: {
-      HStack(spacing: 4) {
-        Image(systemName: "livephoto")
-          .accessibilityHidden(true)
-        if appState.isViewingLivePhoto {
-          Text("LIVE")
-            .font(.system(size: 10, weight: .bold))
+    LivePhotoBadge(
+      isExpanded: isLiveBadgeExpanded,
+      isPlaying: appState.isViewingLivePhoto,
+      isLoading: appState.selectedItem.map { livePhotoStore.state(for: $0.id) == .loading } ?? false,
+      onHoverChanged: { hovering in
+        // Photos plays a Live Photo when the pointer enters its LIVE badge.
+        if hovering, !appState.isViewingLivePhoto {
+          appState.isViewingLivePhoto = true
         }
+      },
+      onPressChanged: { pressed in
+        // Press-and-hold plays while held (NSPressGestureRecognizer, minimum duration 0).
+        appState.isPeeking = false
+        appState.isViewingLivePhoto = pressed
       }
-      .foregroundStyle(appState.isViewingLivePhoto ? Color.accentColor : .white)
-      .padding(.horizontal, 8)
-      .padding(.vertical, 5)
-      .background(.ultraThinMaterial, in: Capsule())
+    )
+  }
+
+  /// Photos expands the LIVE badge while the pointer moves over the photo, then collapses it
+  /// to the glyph 3 s later (`_hideMouseOverBadgesAfterDelay:`).
+  private func revealLiveBadge() {
+    if !isLiveBadgeExpanded {
+      isLiveBadgeExpanded = true
     }
-    .buttonStyle(.plain)
-    .accessibilityLabel(appState.isViewingLivePhoto ? "Exit Live Photo" : "View Live Photo")
+    liveBadgeCollapseTask?.cancel()
+    liveBadgeCollapseTask = Task { @MainActor in
+      try? await Task.sleep(for: .seconds(PhotosMotion.badgeCollapseDelay))
+      guard !Task.isCancelled else { return }
+      isLiveBadgeExpanded = false
+    }
+  }
+
+  private func loadLivePhotoIfNeeded(_ item: AppState.PhotoItem) {
+    guard item.isLivePhoto, let videoID = item.livePhotoVideoID,
+          case .remoteAsset(let assetID) = item.source,
+          let download = appState.originalDownloader() else { return }
+    livePhotoStore.load(
+      itemID: item.id,
+      stillAssetID: assetID,
+      videoAssetID: videoID,
+      placeholder: displayImage(for: item),
+      download: download
+    )
   }
 
   // MARK: - Dismiss Drag Gesture
@@ -351,9 +428,17 @@ struct PhotoDetailView: View {
   private var dismissDragGesture: some Gesture {
     DragGesture()
       .onChanged { value in
+        if isImageZoomed, let item = appState.selectedItem, let image = displayImage(for: item) {
+          handleZoomedDrag(value, image: image)
+          return
+        }
         updateDismissOffset(value.translation)
       }
       .onEnded { value in
+        if dragPanOrigin != nil, let item = appState.selectedItem, let image = displayImage(for: item) {
+          finishZoomedDrag(value, image: image)
+          return
+        }
         finishDismissInteraction(with: value.translation)
       }
   }
@@ -441,7 +526,7 @@ struct PhotoDetailView: View {
   }
 
   private func updateDismissOffset(_ translation: CGSize) {
-    guard !isImageZoomed, !isAnimatingPageSwipe else { return }
+    guard !appState.isEditing, !isImageZoomed, !isAnimatingPageSwipe else { return }
     resetPinchDismissInteraction(notify: false)
     let offset = dismissOffset(for: translation)
 
@@ -458,7 +543,7 @@ struct PhotoDetailView: View {
   }
 
   private func finishDismissInteraction(with translation: CGSize) {
-    guard !isImageZoomed, !isAnimatingPageSwipe else { return }
+    guard !appState.isEditing, !isImageZoomed, !isAnimatingPageSwipe else { return }
     resetPinchDismissInteraction(notify: false)
     let offset = dismissOffset(for: translation)
 
@@ -618,14 +703,104 @@ struct PhotoDetailView: View {
     }
   }
 
-  private func handlePanScroll(_ translation: CGSize, image: NSImage) {
-    guard isImageZoomed else { return }
+  // MARK: - Zoomed panning (Photos physics)
 
-    let proposedOffset = CGSize(
-      width: imagePanOffset.width + translation.width,
-      height: imagePanOffset.height + translation.height
+  private func panLimits(for image: NSImage, zoomScale: CGFloat? = nil) -> CGSize {
+    let fittedSize = fittedImageSize(for: image)
+    let scale = zoomScale ?? effectiveZoomScale
+    return CGSize(
+      width: max((fittedSize.width * scale - containerSize.width) / 2, 0),
+      height: max((fittedSize.height * scale - containerSize.height) / 2, 0)
     )
-    imagePanOffset = clampedImagePanOffset(proposedOffset, zoomScale: effectiveZoomScale, image: image)
+  }
+
+  private func resistedPan(_ raw: CGSize, limits: CGSize) -> CGSize {
+    CGSize(
+      width: PhotosRubberBand.resisted(raw.width, lower: -limits.width, upper: limits.width),
+      height: PhotosRubberBand.resisted(raw.height, lower: -limits.height, upper: limits.height)
+    )
+  }
+
+  /// Trackpad two-finger pan on a zoomed photo: rubber-bands past the edges and springs back when
+  /// the gesture (or the system momentum that follows it) ends, like IPXElasticScrollAnimator.
+  private func handlePanScroll(_ sample: PanScrollSample, image: NSImage) {
+    guard isImageZoomed else { return }
+    let limits = panLimits(for: image)
+    switch sample.phase {
+    case .changed, .momentum:
+      panDriver.stop()
+      let base = rawScrollPanOffset ?? CGSize(
+        width: PhotosRubberBand.raw(fromResisted: imagePanOffset.width, lower: -limits.width, upper: limits.width),
+        height: PhotosRubberBand.raw(fromResisted: imagePanOffset.height, lower: -limits.height, upper: limits.height)
+      )
+      var raw = CGSize(width: base.width + sample.translation.width, height: base.height + sample.translation.height)
+      if sample.phase == .momentum {
+        // Momentum stops at the edge; only direct finger movement stretches past it.
+        raw.width = min(max(raw.width, -limits.width), limits.width)
+        raw.height = min(max(raw.height, -limits.height), limits.height)
+      }
+      rawScrollPanOffset = raw
+      imagePanOffset = resistedPan(raw, limits: limits)
+    case .ended, .momentumEnded:
+      rawScrollPanOffset = nil
+      springPanBack(limits: limits, spring: .elasticScroll)
+    }
+  }
+
+  /// Click-drag on a zoomed photo: rubber band, then a quartic momentum coast or spring-back
+  /// (IPXElasticPanGestureAnimator).
+  private func handleZoomedDrag(_ value: DragGesture.Value, image: NSImage) {
+    if dragPanOrigin == nil {
+      panDriver.stop()
+      dragPanOrigin = imagePanOffset
+    }
+    guard let origin = dragPanOrigin else { return }
+    let raw = CGSize(width: origin.width + value.translation.width, height: origin.height + value.translation.height)
+    imagePanOffset = resistedPan(raw, limits: panLimits(for: image))
+  }
+
+  private func finishZoomedDrag(_ value: DragGesture.Value, image: NSImage) {
+    dragPanOrigin = nil
+    let limits = panLimits(for: image)
+    let overshoot = CGSize(
+      width: PhotosRubberBand.overshoot(imagePanOffset.width, lower: -limits.width, upper: limits.width),
+      height: PhotosRubberBand.overshoot(imagePanOffset.height, lower: -limits.height, upper: limits.height)
+    )
+    let velocity = CGVector(dx: value.velocity.width, dy: value.velocity.height)
+    guard overshoot == .zero, hypot(velocity.dx, velocity.dy) >= PhotosMotion.minimumMomentumSpeed else {
+      springPanBack(limits: limits, spring: .elasticPan)
+      return
+    }
+    let momentum = PhotosMomentum(velocity: velocity)
+    let start = imagePanOffset
+    panDriver.start { elapsed in
+      let offset = momentum.offset(at: elapsed)
+      let raw = CGSize(width: start.width + offset.dx, height: start.height + offset.dy)
+      // Momentum is stopped at the edges, then any overshoot springs back.
+      imagePanOffset = CGSize(
+        width: min(max(raw.width, -limits.width), limits.width),
+        height: min(max(raw.height, -limits.height), limits.height)
+      )
+      return elapsed < momentum.duration
+    }
+  }
+
+  /// Animates any overshoot back to the nearest edge with Photos' critically damped spring.
+  private func springPanBack(limits: CGSize, spring: PhotosSpring) {
+    let start = imagePanOffset
+    let overshoot = CGSize(
+      width: PhotosRubberBand.overshoot(start.width, lower: -limits.width, upper: limits.width),
+      height: PhotosRubberBand.overshoot(start.height, lower: -limits.height, upper: limits.height)
+    )
+    guard overshoot != .zero else { return }
+    let rest = CGSize(width: start.width - overshoot.width, height: start.height - overshoot.height)
+    panDriver.start { elapsed in
+      let dx = spring.displacement(at: elapsed, initialPosition: overshoot.width, initialVelocity: 0)
+      let dy = spring.displacement(at: elapsed, initialPosition: overshoot.height, initialVelocity: 0)
+      let settled = abs(dx) < 0.5 && abs(dy) < 0.5
+      imagePanOffset = settled ? rest : CGSize(width: rest.width + dx, height: rest.height + dy)
+      return !settled
+    }
   }
 
   private func clampImagePanIfNeeded() {
@@ -722,12 +897,20 @@ private struct TrackpadSwipeDismissOverlay: NSViewRepresentable {
   }
 }
 
+/// One trackpad scroll event while a photo is zoomed, with its gesture/momentum phase.
+struct PanScrollSample {
+  enum Phase { case changed, ended, momentum, momentumEnded }
+  let translation: CGSize
+  let phase: Phase
+  let timestamp: TimeInterval
+}
+
 private struct PhotoPanAndZoomOverlay: NSViewRepresentable {
   let isEnabled: Bool
   let isZoomed: Bool
   let onMagnify: (CGFloat, CGPoint) -> Void
   let onMagnifyEnded: () -> Void
-  let onPan: (CGSize) -> Void
+  let onPan: (PanScrollSample) -> Void
 
   func makeNSView(context: Context) -> PhotoPanAndZoomNSView {
     let view = PhotoPanAndZoomNSView()
@@ -855,7 +1038,7 @@ private final class PhotoPanAndZoomNSView: NSView {
   var isZoomed = false
   var onMagnify: (CGFloat, CGPoint) -> Void = { _, _ in }
   var onMagnifyEnded: () -> Void = {}
-  var onPan: (CGSize) -> Void = { _ in }
+  var onPan: (PanScrollSample) -> Void = { _ in }
 
   private let eventMonitor = ScrollWheelEventMonitor()
 
@@ -900,7 +1083,15 @@ private final class PhotoPanAndZoomNSView: NSView {
       width: CGFloat(event.scrollingDeltaX),
       height: CGFloat(event.scrollingDeltaY)
     )
-    onPan(translation)
+    let phase: PanScrollSample.Phase
+    if !event.momentumPhase.isEmpty {
+      phase = event.momentumPhase.contains(.ended) || event.momentumPhase.contains(.cancelled) ? .momentumEnded : .momentum
+    } else if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+      phase = .ended
+    } else {
+      phase = .changed
+    }
+    onPan(PanScrollSample(translation: translation, phase: phase, timestamp: event.timestamp))
     return nil
   }
 }

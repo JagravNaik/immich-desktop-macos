@@ -8,18 +8,30 @@ This repository is the standalone macOS desktop app split out of the Immich mono
 
 This is an experimental native desktop client, not an official Immich release. It is useful for developing and testing a Photos-style macOS experience against an existing Immich server, but it does not replace the Immich web or mobile apps yet.
 
+## Immich API Compatibility
+
+The client request and response contracts are audited against the [Immich v3.3.1 OpenAPI specification](https://github.com/immich-app/immich/blob/v3.3.1/open-api/immich-openapi-specs.json). Immich server APIs can change between releases.
+The timeline bucket summary returns date-only bucket IDs, while `GET /timeline/bucket` expects a UTC-midnight ISO-8601 timestamp (`YYYY-MM-DDT00:00:00.000Z`). The client normalizes those IDs before requesting assets. Immich marks both timeline endpoints internal; recheck them when upgrading the server.
+API tests cover the normalized request and a response fixture with Immich v3.3.1 timeline fields. This change was not exercised against a live Immich server.
+Favorite, location, caption, and capture-date updates use Immich v3 `PATCH /assets/:id`; tests verify the request method and payload. No live server mutation was performed.
+
+## Photos Parity Status
+
+This is a Photos-style Immich client, not a full Photos replacement. Current workflows include timeline browsing with a Recent Days mosaic grouped by local capture day, albums, people and memory collections with manual slideshow playback, a MapKit places browser with point selection and place search for asset locations, editable captions and capture dates, basic still-image editing/export, local video trimming to a new file, local-file import, and macOS system sharing.
+
+Major gaps remain: Smart Albums; people/pet review, rename, and merge; Memory soundtrack and personalization; location removal (unsupported by Immich v3); broader video editing; full Photos/camera import and export controls; Shared Album membership/comments; per-item permanent deletion; non-destructive edit history; and verified keyboard/VoiceOver parity. Immich does not expose an iCloud Shared Photo Library equivalent.
+
 ## Highlights
 
 - Native SwiftUI app targeting macOS 14 and newer.
 - Immich server verification plus password, API key, and OAuth sign-in paths.
 - Keychain-backed credential storage for access tokens and API keys.
 - Photos-style library browsing with timeline buckets, month/year sections, grid zoom, keyboard navigation, multi-select, context menus, and hero-style viewer transitions.
-- Media type surfaces for videos, Live Photos, panoramas, screenshots, imports, favorites, and recently deleted assets.
 - Albums, people, memories, pinned albums, and collection browsing backed by Immich APIs.
-- Smart search and metadata search modes for filename, description, OCR, date filters, camera metadata, tags, people, and location fields.
+- Smart search and metadata search for filenames, descriptions, and OCR, with Immich date, camera, location, media-type, and favorite filters.
 - Native MapKit browser for geotagged assets, including clustered places, selected-place preview grids, and defensive viewport handling for invalid coordinates and antimeridian-spanning libraries.
 - Viewer tools for playback, Live Photo peek/playback, panorama viewing, metadata inspection, download/export, sharing, favoriting, trashing, and tag editing.
-- Core Image editing pipeline with adjustment, filter, crop, save, and export flows.
+- Photos-style editor: Adjust (Light, Color, Black & White, White Balance, Curves, Levels, Definition, Selective Color, Noise Reduction, Sharpen, Vignette, Retouch, Red-eye, Histogram), Photos' nine filters, and Crop with straighten, aspect presets, and flip. It also has undo/redo, Copy/Paste Edits, and hold-M compare. Crop, rotate, and flip are saved to Immich as non-destructive edits. Other adjustments are saved as a new photo or exported.
 - Upload queue with progress tracking and WebSocket-driven library updates.
 - Management sheets for API keys, tags, tag assignment, and admin users.
 - SwiftPM test coverage for API encoding, search behavior, timeline/media indexing, map selection, album operations, favorite/trash flows, and app state regressions.
@@ -75,6 +87,7 @@ Useful bundle options:
 ```
 
 The bundle is created at `.build/app/ImmichMacApp.app` unless `--output` is provided. The script signs with an ad hoc identity by default; set `CODESIGN_IDENTITY` to use a development certificate:
+The packaging script uses SwiftPM's reported binary path, so configured scratch paths are honored.
 
 ```bash
 CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh
@@ -124,7 +137,7 @@ The sidebar mirrors a Photos-style organization: Library, Map, Collections, Albu
 
 ### Search
 
-Search supports Immich smart search and metadata-backed modes. The toolbar search field can apply filters such as date ranges, city/state/country, camera make/model, tags, people, and media metadata. Recent searches are saved locally.
+Search supports Immich smart search and metadata-backed filename, description, and OCR modes. Filters map to Immich v3 fields: date range, city/country, camera make/model, media type, and favorite. Recent searches are saved locally.
 
 ### Media Types
 
@@ -132,7 +145,7 @@ Videos, Live Photos, panoramas, and screenshots are indexed into dedicated sideb
 
 ### Editing
 
-The editing sidebar provides adjustment, filter, and crop flows backed by a Core Image pipeline. Edited images can be saved back through Immich replacement APIs or exported locally.
+The image editor mirrors Photos for macOS and renders with Core Image. Crop, rotate, and flip are stored as Immich v3 non-destructive edits (`/assets/{id}/edits`), so they stay revertible. Revert to Original removes them. Immich cannot store tonal or color adjustments on an original, so those edits are uploaded as a new photo dated like the original, or exported. The video trim tool still exports a separate local file. See [docs/photos-reverse-engineering.md](./docs/photos-reverse-engineering.md#part-3--image-editor).
 
 ### Map
 
@@ -170,3 +183,4 @@ When changing the map browser, pay special attention to invalid coordinates, ver
 
 - [Immich project](https://immich.app/)
 - [Map browser implementation notes](./docs/map-browser.md)
+- [Apple Photos reverse-engineering notes and parity ledger](./docs/photos-reverse-engineering.md)

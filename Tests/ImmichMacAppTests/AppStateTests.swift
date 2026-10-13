@@ -1,4 +1,6 @@
 import XCTest
+import AVFoundation
+import CoreVideo
 @testable import ImmichMacApp
 import ImmichAPI
 import ImmichCore
@@ -41,6 +43,48 @@ final class AppStateTests: XCTestCase {
   }
 
   @MainActor
+  func testSelectedItemResolvesDetachedSearchAndScreenshotResults() {
+    let appState = AppState(apiClient: MockImmichAPIClient(), webSocketService: NoOpWebSocketService())
+    let searchResult = makePhotoItem(id: "search-result")
+    appState.searchResults = [searchResult]
+    appState.selectedItemID = searchResult.id
+    XCTAssertEqual(appState.selectedItem?.id, searchResult.id)
+
+    let screenshotResult = makePhotoItem(id: "screenshot-result")
+    appState.searchResults = []
+    appState.screenshotItems = [screenshotResult]
+    appState.selectedItemID = screenshotResult.id
+    XCTAssertEqual(appState.selectedItem?.id, screenshotResult.id)
+  }
+
+  @MainActor
+  func testWebSocketAssetUpdateRefreshesSelectedSearchCopy() {
+    let appState = AppState(apiClient: MockImmichAPIClient(), webSocketService: NoOpWebSocketService())
+    let staleItem = makePhotoItem(id: "shared-asset")
+    appState.libraryItems = [staleItem]
+    appState.searchResults = [staleItem]
+    appState.selectedItemID = staleItem.id
+
+    appState.webSocketDidReceiveAssetUpdate(assetJSON: [
+      "id": staleItem.id,
+      "type": "IMAGE",
+      "originalFileName": "updated.jpg",
+      "fileCreatedAt": "2026-05-06T10:00:00.000Z",
+      "createdAt": "2026-05-07T10:00:00.000Z",
+      "isFavorite": true,
+      "width": 3000,
+      "height": 2000,
+    ])
+
+    XCTAssertEqual(appState.libraryItems.first?.title, "updated.jpg")
+    XCTAssertTrue(appState.libraryItems.first?.isFavorite == true)
+    XCTAssertEqual(appState.searchResults.first?.title, "updated.jpg")
+    XCTAssertTrue(appState.searchResults.first?.isFavorite == true)
+    XCTAssertEqual(appState.selectedItem?.title, "updated.jpg")
+    XCTAssertTrue(appState.selectedItem?.isFavorite == true)
+  }
+
+  @MainActor
   func testToggleFavoriteUpdatesVisibleCollectionsAndSyncsServer() async throws {
     let apiClient = MockImmichAPIClient()
     let appState = try await makeSignedInState(apiClient: apiClient)
@@ -49,6 +93,11 @@ final class AppStateTests: XCTestCase {
     appState.libraryItems = [item]
     appState.activeAlbumItems = [item]
     appState.activePersonItems = [item]
+    appState.mapSelectionItems = [item]
+    appState.activeMemoryItems = [item]
+    appState.searchResults = [item]
+    appState.screenshotItems = [item]
+    appState.trashedItems = [item]
     appState.rebuildLibrarySections()
 
     appState.toggleFavorite(for: item.id)
@@ -56,12 +105,308 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.libraryItems[0].isFavorite)
     XCTAssertTrue(appState.activeAlbumItems[0].isFavorite)
     XCTAssertTrue(appState.activePersonItems[0].isFavorite)
+    XCTAssertTrue(appState.mapSelectionItems[0].isFavorite)
+    XCTAssertTrue(appState.activeMemoryItems[0].isFavorite)
+    XCTAssertTrue(appState.searchResults[0].isFavorite)
+    XCTAssertTrue(appState.screenshotItems[0].isFavorite)
+    XCTAssertTrue(appState.trashedItems[0].isFavorite)
     XCTAssertEqual(appState.favoritesCount, 1)
 
     try await eventually {
       let updates = await apiClient.recordedFavoriteUpdates()
       return updates == [FavoriteUpdate(assetID: item.id, isFavorite: true)]
     }
+  }
+
+  @MainActor
+  func testUpdateAssetLocationUpdatesVisibleCopiesAndMapAfterServerSuccess() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "located-asset")
+
+    appState.libraryItems = [item]
+    appState.searchResults = [item]
+    appState.mapSelectionItems = [item]
+    appState.mapMarkers = [
+      MapMarker(id: item.id, latitude: 1, longitude: 2, city: "Old City", country: "Old Country")
+    ]
+    appState.selectedMapMarkerID = item.id
+
+    try await appState.updateAssetLocation(itemID: item.id, latitude: 37.7749, longitude: -122.4194)
+
+    XCTAssertEqual(appState.libraryItems.first?.latitude, 37.7749)
+    XCTAssertEqual(appState.libraryItems.first?.longitude, -122.4194)
+    XCTAssertEqual(appState.searchResults.first?.latitude, 37.7749)
+    XCTAssertEqual(appState.mapMarkers, [
+      MapMarker(id: item.id, latitude: 37.7749, longitude: -122.4194, city: nil, country: nil)
+    ])
+    XCTAssertNil(appState.selectedMapMarkerID)
+    XCTAssertTrue(appState.mapSelectionItems.isEmpty)
+    let updates = await apiClient.recordedLocationUpdates()
+    XCTAssertEqual(updates, [
+      LocationUpdate(assetID: item.id, latitude: 37.7749, longitude: -122.4194)
+    ])
+  }
+
+  @MainActor
+  func testAssignLocationToSeveralItemsUsesBulkUpdateAndReverseGeocodedPlace() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setReverseGeocodeResult([ReverseGeocodePlace(city: "Paris", state: "Île-de-France", country: "France")])
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let first = makePhotoItem(id: "bulk-1")
+    let second = makePhotoItem(id: "bulk-2")
+    appState.libraryItems = [first, second]
+
+    try await appState.assignLocation(itemIDs: [first.id, second.id, first.id], latitude: 48.8584, longitude: 2.2945)
+
+    XCTAssertEqual(appState.libraryItems.map(\.latitude), [48.8584, 48.8584])
+    XCTAssertEqual(Set(appState.mapMarkers), [
+      MapMarker(id: first.id, latitude: 48.8584, longitude: 2.2945, city: "Paris", country: "France", state: "Île-de-France"),
+      MapMarker(id: second.id, latitude: 48.8584, longitude: 2.2945, city: "Paris", country: "France", state: "Île-de-France"),
+    ])
+    let bulkUpdates = await apiClient.recordedBulkLocationUpdates()
+    XCTAssertEqual(bulkUpdates, [BulkLocationUpdate(assetIDs: [first.id, second.id], latitude: 48.8584, longitude: 2.2945)])
+    let singleUpdates = await apiClient.recordedLocationUpdates()
+    XCTAssertTrue(singleUpdates.isEmpty)
+  }
+
+  @MainActor
+  func testCopyAndPasteLocationAssignsCopiedCoordinate() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    var source = makePhotoItem(id: "source")
+    source.latitude = 35.6586
+    source.longitude = 139.7454
+    let target = makePhotoItem(id: "target")
+    appState.libraryItems = [source, target]
+
+    XCTAssertFalse(appState.copyLocation(from: [target.id]))
+    XCTAssertTrue(appState.copyLocation(from: [target.id, source.id]))
+    try await appState.pasteLocation(to: [target.id])
+
+    XCTAssertEqual(appState.libraryItems.last?.latitude, 35.6586)
+    let updates = await apiClient.recordedLocationUpdates()
+    XCTAssertEqual(updates, [LocationUpdate(assetID: target.id, latitude: 35.6586, longitude: 139.7454)])
+  }
+
+  @MainActor
+  func testSetRatingSendsBulkUpdateAndUpdatesCopies() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "rated")
+    appState.libraryItems = [item]
+
+    try await appState.setRating(7, for: [item.id])
+    XCTAssertEqual(appState.libraryItems.first?.rating, 5)
+    try await appState.adjustRating(by: -1, for: [item.id])
+    XCTAssertEqual(appState.libraryItems.first?.rating, 4)
+    try await appState.setRating(nil, for: [item.id])
+    XCTAssertNil(appState.libraryItems.first?.rating)
+
+    let calls = await apiClient.recordedBulkAssetUpdates()
+    XCTAssertEqual(calls.map(\.update.rating), [.stars(5), .stars(4), AssetBulkUpdate.Rating.none])
+  }
+
+  @MainActor
+  func testHideMovesItemsToHiddenAndShowRestoresThem() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "secret")
+    appState.libraryItems = [item, makePhotoItem(id: "public")]
+    appState.selectedItemIDs = [item.id]
+
+    XCTAssertTrue(appState.hideCommandHides([item.id]))
+    try await appState.setHidden(true, for: [item.id])
+    XCTAssertEqual(appState.libraryItems.map(\.id), ["public"])
+    XCTAssertEqual(appState.hiddenItems.map(\.id), [item.id])
+    XCTAssertTrue(appState.selectedItemIDs.isEmpty)
+    XCTAssertFalse(appState.hideCommandHides([item.id]))
+
+    try await appState.setHidden(false, for: [item.id])
+    XCTAssertTrue(appState.hiddenItems.isEmpty)
+    XCTAssertEqual(Set(appState.libraryItems.map(\.id)), [item.id, "public"])
+
+    let calls = await apiClient.recordedBulkAssetUpdates()
+    XCTAssertEqual(calls.map(\.update.visibility), ["hidden", "timeline"])
+  }
+
+  @MainActor
+  func testAdjustDateTimeShiftsItemsBySameOffset() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "dated")
+    appState.libraryItems = [item]
+
+    try await appState.adjustDateTime(for: [item.id], offsetMinutes: 90, timeZone: TimeZone(identifier: "Asia/Tokyo"))
+
+    XCTAssertEqual(appState.libraryItems.first?.date, item.date.addingTimeInterval(90 * 60))
+    let calls = await apiClient.recordedBulkAssetUpdates()
+    XCTAssertEqual(calls, [BulkAssetUpdateCall(
+      assetIDs: [item.id],
+      update: AssetBulkUpdate(dateTimeRelativeMinutes: 90, timeZone: "Asia/Tokyo")
+    )])
+  }
+
+  @MainActor
+  func testMergeDuplicatesKeepsSuggestedCopyAndRemovesOthers() async throws {
+    let apiClient = MockImmichAPIClient()
+    let keep = makeRemoteAsset(id: "keep")
+    let extra = makeRemoteAsset(id: "extra")
+    let group = DuplicateGroup(id: "dup-1", assets: [extra, keep], suggestedKeepAssetIDs: ["keep"])
+    await apiClient.setDuplicates([group, DuplicateGroup(id: "single", assets: [keep], suggestedKeepAssetIDs: [])])
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    appState.libraryItems = [makePhotoItem(id: "keep"), makePhotoItem(id: "extra")]
+
+    await appState.loadDuplicates()
+    XCTAssertEqual(appState.duplicateGroups.map(\.id), ["dup-1"])
+    XCTAssertEqual(group.suggestedTrashAssetIDs, ["extra"])
+
+    try await appState.mergeDuplicates(appState.duplicateGroups)
+    XCTAssertTrue(appState.duplicateGroups.isEmpty)
+    XCTAssertEqual(appState.libraryItems.map(\.id), ["keep"])
+    let resolved = await apiClient.recordedResolvedDuplicateGroups()
+    XCTAssertEqual(resolved.map(\.id), ["dup-1"])
+  }
+
+  @MainActor
+  func testSavingGeometryEditsWritesImmichEditsAndRevertRemovesThem() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "editable")
+    appState.libraryItems = [item]
+    appState.selectedItemID = item.id
+    let store = ThumbnailStore()
+    let pipeline = PhotoEditingPipeline()
+    let image = NSImage(size: NSSize(width: 40, height: 30))
+    image.lockFocus(); NSColor.gray.setFill(); NSRect(x: 0, y: 0, width: 40, height: 30).fill(); image.unlockFocus()
+    pipeline.beginSession(original: image, adjustments: .init())
+
+    pipeline.rotateRight()
+    let saved = try await appState.saveGeometryEdits(pipeline: pipeline, thumbnailStore: store)
+
+    XCTAssertTrue(saved)
+    XCTAssertFalse(pipeline.hasUnsavedChanges)
+    XCTAssertEqual(store.revision(for: item), 1)
+    let edits = await apiClient.recordedAssetEdits(for: item.id)
+    XCTAssertEqual(edits, [.rotate(degrees: 90)])
+
+    try await appState.revertSavedEdits(itemID: item.id, thumbnailStore: store)
+    let afterRevert = await apiClient.recordedAssetEdits(for: item.id)
+    XCTAssertNil(afterRevert)
+  }
+
+  @MainActor
+  func testSavingPixelAdjustmentsRequiresANewPhoto() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "tonal")
+    appState.libraryItems = [item]
+    appState.selectedItemID = item.id
+    let pipeline = PhotoEditingPipeline()
+    pipeline.beginSession(original: NSImage(size: NSSize(width: 10, height: 10)), adjustments: .init())
+    pipeline.adjustments.light.exposure = 0.3
+
+    let saved = try await appState.saveGeometryEdits(pipeline: pipeline, thumbnailStore: ThumbnailStore())
+    XCTAssertFalse(saved)
+    XCTAssertEqual(AppState.saveStrategy(for: pipeline), .newPhoto)
+    let edits = await apiClient.recordedAssetEdits(for: item.id)
+    XCTAssertNil(edits)
+  }
+
+  @MainActor
+  func testQuickRotateFromGridComposesWithSavedEdits() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "quick")
+    appState.libraryItems = [item]
+    let store = ThumbnailStore()
+
+    try await appState.applyQuickGeometry(to: [item.id], thumbnailStore: store) { $0.rotated(by: 1) }
+    try await appState.applyQuickGeometry(to: [item.id], thumbnailStore: store) { $0.rotated(by: 1) }
+    try await appState.applyQuickGeometry(to: [item.id], thumbnailStore: store) { var g = $0; g.flipHorizontal.toggle(); return g }
+
+    let edits = await apiClient.recordedAssetEdits(for: item.id)
+    XCTAssertEqual(edits, [.rotate(degrees: 180), .mirror(axis: "horizontal")])
+    XCTAssertEqual(store.revision(for: item), 3)
+  }
+
+  @MainActor
+  func testBeginEditingFailsGracefullyForUndecodableOriginal() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "broken")
+    appState.libraryItems = [item]
+    appState.selectedItemID = item.id
+    let pipeline = PhotoEditingPipeline()
+
+    await appState.beginEditingSession(pipeline: pipeline, fallbackImage: nil)
+
+    XCTAssertEqual(appState.editingSessionState, .failed("This photo format can’t be edited."))
+    XCTAssertFalse(pipeline.isSourceLoaded)
+  }
+
+  @MainActor
+  func testUpdateAssetLocationLeavesStateUnchangedAfterServerFailure() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setLocationUpdateError(TestError.expectedFailure)
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "location-failure")
+    appState.libraryItems = [item]
+
+    do {
+      try await appState.updateAssetLocation(itemID: item.id, latitude: 48.8566, longitude: 2.3522)
+      XCTFail("Expected the location update to fail.")
+    } catch TestError.expectedFailure {
+      // State must not claim the uncommitted server change.
+    }
+
+    XCTAssertNil(appState.libraryItems.first?.latitude)
+    XCTAssertNil(appState.libraryItems.first?.longitude)
+    XCTAssertTrue(appState.mapMarkers.isEmpty)
+  }
+
+  @MainActor
+  func testUpdateAssetDateTimeMovesVisibleCopiesToNewTimelineMonth() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "dated-asset")
+    let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-04-15T12:30:00Z"))
+    appState.libraryItems = [item]
+    appState.searchResults = [item]
+    appState.rebuildLibrarySections()
+
+    try await appState.updateAssetDateTime(itemID: item.id, date: date)
+
+    XCTAssertEqual(appState.libraryItems.first?.date, date)
+    XCTAssertEqual(appState.searchResults.first?.date, date)
+    XCTAssertEqual(appState.libraryItems.first?.timeBucketKey, "2026-04-01")
+    XCTAssertEqual(appState.librarySections.map(\.id), ["2026-04-01"])
+    let updates = await apiClient.recordedDateTimeUpdates()
+    XCTAssertEqual(updates, [DateTimeUpdate(assetID: item.id, date: date)])
+  }
+
+  @MainActor
+  func testUpdateAssetDateTimeLeavesStateUnchangedAfterServerFailure() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setDateTimeUpdateError(TestError.expectedFailure)
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "date-failure")
+    let originalDate = item.date
+    let originalBucket = item.timeBucketKey
+    appState.libraryItems = [item]
+
+    do {
+      try await appState.updateAssetDateTime(
+        itemID: item.id,
+        date: try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-04-15T12:30:00Z"))
+      )
+      XCTFail("Expected the date update to fail.")
+    } catch TestError.expectedFailure {
+      // State must not claim the uncommitted server change.
+    }
+
+    XCTAssertEqual(appState.libraryItems.first?.date, originalDate)
+    XCTAssertEqual(appState.libraryItems.first?.timeBucketKey, originalBucket)
   }
 
   @MainActor
@@ -73,6 +418,12 @@ final class AppStateTests: XCTestCase {
 
     appState.libraryItems = [item]
     appState.activeAlbumItems = [item]
+    appState.activePersonItems = [item]
+    appState.mapSelectionItems = [item]
+    appState.activeMemoryItems = [item]
+    appState.searchResults = [item]
+    appState.screenshotItems = [item]
+    appState.trashedItems = [item]
     appState.rebuildLibrarySections()
 
     appState.toggleFavorite(for: item.id)
@@ -80,9 +431,15 @@ final class AppStateTests: XCTestCase {
     XCTAssertTrue(appState.libraryItems[0].isFavorite)
 
     try await eventually {
-      appState.libraryItems.first?.isFavorite == false &&
-      appState.activeAlbumItems.first?.isFavorite == false &&
-      appState.favoritesCount == 0
+      appState.libraryItems.first?.isFavorite == false
+        && appState.activeAlbumItems.first?.isFavorite == false
+        && appState.activePersonItems.first?.isFavorite == false
+        && appState.mapSelectionItems.first?.isFavorite == false
+        && appState.activeMemoryItems.first?.isFavorite == false
+        && appState.searchResults.first?.isFavorite == false
+        && appState.screenshotItems.first?.isFavorite == false
+        && appState.trashedItems.first?.isFavorite == false
+        && appState.favoritesCount == 0
     }
   }
 
@@ -115,7 +472,7 @@ final class AppStateTests: XCTestCase {
         height: 3000,
         fileSizeInByte: 2_048,
         isFavorite: true,
-        duration: nil,
+        durationMilliseconds: nil,
         livePhotoVideoId: nil,
         exif: ExifInfo(
           make: nil,
@@ -149,7 +506,7 @@ final class AppStateTests: XCTestCase {
         height: 1080,
         fileSizeInByte: 4_096,
         isFavorite: false,
-        duration: "0:08",
+        durationMilliseconds: 8_000,
         livePhotoVideoId: nil,
         exif: ExifInfo(
           make: nil,
@@ -247,6 +604,74 @@ final class AppStateTests: XCTestCase {
     XCTAssertNotNil(region)
     XCTAssertLessThan(region?.span.longitudeDelta ?? .infinity, 10)
     XCTAssertGreaterThan(abs(region?.center.longitude ?? 0), 170)
+  }
+
+  func testMapPlaceGroupingNormalizesNamedPlacesAndSeparatesUnnamedAreas() {
+    let markers = [
+      MapMarker(
+        id: "new-york-1",
+        latitude: 40.7128,
+        longitude: -74.0060,
+        city: " New York ",
+        country: "United States",
+        state: "NY"
+      ),
+      MapMarker(
+        id: "new-york-2",
+        latitude: 40.7130,
+        longitude: -74.0062,
+        city: "new york",
+        country: "united states",
+        state: "ny"
+      ),
+      MapMarker(
+        id: "albany",
+        latitude: 42.6526,
+        longitude: -73.7562,
+        city: "Albany",
+        country: "United States",
+        state: "NY"
+      ),
+      MapMarker(
+        id: "san-francisco-1",
+        latitude: 37.7749,
+        longitude: -122.4194,
+        city: nil,
+        country: "United States",
+        state: "California"
+      ),
+      MapMarker(
+        id: "san-francisco-2",
+        latitude: 37.7750,
+        longitude: -122.4200,
+        city: nil,
+        country: "United States",
+        state: "California"
+      ),
+      MapMarker(
+        id: "los-angeles",
+        latitude: 34.05,
+        longitude: -118.25,
+        city: nil,
+        country: "United States",
+        state: "California"
+      ),
+    ]
+
+    let groups = MapPlaceGrouping.groups(from: markers)
+
+    XCTAssertEqual(groups.count, 4)
+
+    let newYork = groups.first { $0.markers.contains(where: { $0.id == "new-york-1" }) }
+    XCTAssertEqual(Set(newYork?.markers.map(\.id) ?? []), Set(["new-york-1", "new-york-2"]))
+    XCTAssertEqual(newYork?.title, "New York, NY, United States")
+
+    let sanFrancisco = groups.first { $0.markers.contains(where: { $0.id == "san-francisco-1" }) }
+    XCTAssertEqual(Set(sanFrancisco?.markers.map(\.id) ?? []), Set(["san-francisco-1", "san-francisco-2"]))
+    XCTAssertTrue(sanFrancisco?.title.contains("California, United States") == true)
+
+    let losAngeles = groups.first { $0.markers.contains(where: { $0.id == "los-angeles" }) }
+    XCTAssertEqual(losAngeles?.markers.map(\.id), ["los-angeles"])
   }
 
   @MainActor
@@ -503,6 +928,46 @@ final class AppStateTests: XCTestCase {
     XCTAssertEqual(appState.libraryItems.first?.id, "restore-1")
   }
 
+  @MainActor
+  func testEmptyTrashRemovesDeletedItemsOnlyAfterServerSuccess() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let deletedItem = makePhotoItem(id: "empty-trash-item")
+    let retainedItem = makePhotoItem(id: "retained-item")
+    appState.trashedItems = [deletedItem]
+    appState.searchResults = [deletedItem, retainedItem]
+    appState.selectedItemID = deletedItem.id
+    appState.isViewingPhoto = true
+
+    try await appState.emptyTrash()
+
+    XCTAssertTrue(appState.trashedItems.isEmpty)
+    XCTAssertEqual(appState.searchResults.map(\.id), ["retained-item"])
+    XCTAssertNil(appState.selectedItemID)
+    XCTAssertFalse(appState.isViewingPhoto)
+    XCTAssertFalse(appState.isEmptyingTrash)
+  }
+
+  @MainActor
+  func testEmptyTrashRetainsItemsWhenServerFails() async throws {
+    let apiClient = MockImmichAPIClient()
+    await apiClient.setEmptyTrashError(TestError.expectedFailure)
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let item = makePhotoItem(id: "failed-empty-trash-item")
+    appState.trashedItems = [item]
+
+    do {
+      try await appState.emptyTrash()
+      XCTFail("Expected empty-trash request to fail")
+    } catch TestError.expectedFailure {
+    } catch {
+      XCTFail("Unexpected empty-trash error: \(error)")
+    }
+
+    XCTAssertEqual(appState.trashedItems.map(\.id), [item.id])
+    XCTAssertFalse(appState.isEmptyingTrash)
+  }
+
   // MARK: - Album CRUD Tests
 
   @MainActor
@@ -604,19 +1069,55 @@ final class AppStateTests: XCTestCase {
   func testBatchTrashRemovesAndClearsSelection() async throws {
     let apiClient = MockImmichAPIClient()
     let appState = try await makeSignedInState(apiClient: apiClient)
-    appState.libraryItems = [
-      makePhotoItem(id: "keep"),
-      makePhotoItem(id: "trash-a"),
-      makePhotoItem(id: "trash-b"),
-    ]
+    let keep = makePhotoItem(id: "keep", isFavorite: true)
+    let trashA = makePhotoItem(id: "trash-a", isFavorite: true, isVideo: true)
+    let trashB = makePhotoItem(id: "trash-b")
+    appState.libraryItems = [keep, trashA, trashB]
+    appState.activeAlbumItems = [trashA, trashB]
+    appState.activePersonItems = [trashA, trashB]
+    appState.mapSelectionItems = [trashA, trashB]
+    appState.activeMemoryItems = [trashA, trashB]
+    appState.searchResults = [trashA, trashB]
+    appState.screenshotItems = [trashA, trashB]
+    appState.trashedItems = [trashA, trashB]
     appState.selectedItemIDs = ["trash-a", "trash-b"]
     appState.isMultiSelectMode = true
 
     appState.batchTrash()
 
-    XCTAssertEqual(appState.libraryItems.count, 1)
-    XCTAssertEqual(appState.libraryItems.first?.id, "keep")
+    XCTAssertEqual(appState.libraryItems.map(\.id), ["keep"])
+    XCTAssertEqual(appState.favoritesCount, 1)
+    XCTAssertEqual(appState.videosCount, 0)
+    XCTAssertTrue(appState.activeAlbumItems.isEmpty)
+    XCTAssertTrue(appState.activePersonItems.isEmpty)
+    XCTAssertTrue(appState.mapSelectionItems.isEmpty)
+    XCTAssertTrue(appState.activeMemoryItems.isEmpty)
+    XCTAssertTrue(appState.searchResults.isEmpty)
+    XCTAssertTrue(appState.screenshotItems.isEmpty)
+    XCTAssertTrue(appState.trashedItems.isEmpty)
     XCTAssertTrue(appState.selectedItemIDs.isEmpty)
+  }
+
+  @MainActor
+  func testTrashItemRemovesMapAndSearchCopiesAndAdvancesViewer() async throws {
+    let appState = try await makeSignedInState(apiClient: MockImmichAPIClient())
+    let deletedItem = makePhotoItem(id: "map-delete")
+    let nextItem = makePhotoItem(id: "map-next")
+    appState.sidebarSelection = .map
+    appState.mapSelectionItems = [deletedItem, nextItem]
+    appState.searchResults = [deletedItem]
+    appState.selectedItemID = deletedItem.id
+    appState.selectedItemIDs = [deletedItem.id]
+    appState.isViewingPhoto = true
+
+    appState.trashItem(deletedItem.id)
+
+    XCTAssertEqual(appState.mapSelectionItems.map(\.id), [nextItem.id])
+    XCTAssertTrue(appState.searchResults.isEmpty)
+    XCTAssertEqual(appState.selectedItemID, nextItem.id)
+    XCTAssertEqual(appState.selectedItem?.id, nextItem.id)
+    XCTAssertFalse(appState.isViewingPhoto)
+    XCTAssertFalse(appState.selectedItemIDs.contains(deletedItem.id))
   }
 
   @MainActor
@@ -765,6 +1266,35 @@ final class AppStateTests: XCTestCase {
     XCTAssertEqual(appState.librarySections.last?.items.count, 1)
   }
 
+  @MainActor
+  func testRecentDaySectionsGroupByLocalCaptureDayAndSortWithinDay() throws {
+    let calendar = Calendar.current
+    let morning = try XCTUnwrap(
+      calendar.date(from: DateComponents(year: 2026, month: 6, day: 2, hour: 9))
+    )
+    let evening = try XCTUnwrap(
+      calendar.date(from: DateComponents(year: 2026, month: 6, day: 2, hour: 18))
+    )
+    let previousDay = try XCTUnwrap(
+      calendar.date(from: DateComponents(year: 2026, month: 6, day: 1, hour: 12))
+    )
+    var earlyItem = makePhotoItem(id: "early")
+    earlyItem.date = morning
+    var lateItem = makePhotoItem(id: "late")
+    lateItem.date = evening
+    var previousItem = makePhotoItem(id: "previous")
+    previousItem.date = previousDay
+    let appState = AppState(apiClient: MockImmichAPIClient())
+    appState.sidebarSelection = .recentDays
+    appState.libraryItems = [previousItem, earlyItem, lateItem]
+
+    let sections = appState.visibleRecentDaySections
+
+    XCTAssertEqual(sections.map { $0.items.map(\.id) }, [["late", "early"], ["previous"]])
+    XCTAssertEqual(sections.map(\.itemCount), [2, 1])
+    XCTAssertTrue(calendar.isDate(sections[0].items[0].date, inSameDayAs: evening))
+  }
+
   // MARK: - Filtered Items Tests
 
   @MainActor
@@ -813,7 +1343,7 @@ final class AppStateTests: XCTestCase {
     }
 
     assetsByBucket["2026-01-01"] = [
-      makeRemoteAsset(id: "video-1", timeBucketKey: "2026-01-01", isImage: false, duration: "0:05"),
+      makeRemoteAsset(id: "video-1", timeBucketKey: "2026-01-01", isImage: false, durationMilliseconds: 5_000),
       makeRemoteAsset(id: "live-1", timeBucketKey: "2026-01-01", isImage: true, livePhotoVideoID: "motion-1"),
       makeRemoteAsset(id: "pano-1", timeBucketKey: "2026-01-01", isImage: true, ratio: 2.8),
     ]
@@ -982,6 +1512,21 @@ final class AppStateTests: XCTestCase {
     XCTAssertFalse(item.isPanorama)
   }
 
+  @MainActor
+  func testPhotoItemTimeLabelFormatsImmichMillisecondDurations() {
+    let shortVideo = AppState.makePhotoItem(
+      from: makeRemoteAsset(id: "duration-short", isImage: false, durationMilliseconds: 65_000),
+      timeBucket: "2026-03-01"
+    )
+    XCTAssertEqual(shortVideo.timeLabel, "1:05")
+
+    let longVideo = AppState.makePhotoItem(
+      from: makeRemoteAsset(id: "duration-long", isImage: false, durationMilliseconds: 3_723_000),
+      timeBucket: "2026-03-01"
+    )
+    XCTAssertEqual(longVideo.timeLabel, "1:02:03")
+  }
+
   func testPhotoItemTimeLabelReturnsVideoDuration() {
     let video = makePhotoItem(id: "vid-1", isVideo: true)
     XCTAssertEqual(video.timeLabel, "0:03")
@@ -1028,6 +1573,31 @@ final class AppStateTests: XCTestCase {
     XCTAssertEqual(appState.emptyStateTitle, "Trash is empty")
   }
 
+  // MARK: - Upload Metadata Tests
+
+  @MainActor
+  func testVideoImportPassesDurationMillisecondsToImmichUpload() async throws {
+    let apiClient = MockImmichAPIClient()
+    let appState = try await makeSignedInState(apiClient: apiClient)
+    let fileURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+      .appendingPathExtension("mov")
+    defer { try? FileManager.default.removeItem(at: fileURL) }
+    try await makeTestVideo(at: fileURL)
+
+    let mediaDuration = try await AVURLAsset(url: fileURL).load(.duration)
+    XCTAssertGreaterThan(mediaDuration.seconds, 0)
+    let expectedMilliseconds = Int((mediaDuration.seconds * 1000).rounded())
+    appState.importFiles([fileURL])
+
+    try await eventually(timeout: .seconds(5)) {
+      let durations = await apiClient.recordedUploadDurations()
+      return durations.count == 1
+    }
+    let durations = await apiClient.recordedUploadDurations()
+    XCTAssertEqual(durations.count, 1)
+    XCTAssertEqual(durations[0], expectedMilliseconds)
+  }
   // MARK: - Helpers
 
   @MainActor
@@ -1043,6 +1613,66 @@ final class AppStateTests: XCTestCase {
 
     XCTAssertEqual(appState.appPhase, .library)
     return appState
+  }
+
+  @MainActor
+  private func makeTestVideo(at url: URL) async throws {
+    let width = 16
+    let height = 16
+    let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+    let input = AVAssetWriterInput(
+      mediaType: .video,
+      outputSettings: [
+        AVVideoCodecKey: AVVideoCodecType.h264,
+        AVVideoWidthKey: width,
+        AVVideoHeightKey: height,
+      ]
+    )
+    let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+      assetWriterInput: input,
+      sourcePixelBufferAttributes: [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferWidthKey as String: width,
+        kCVPixelBufferHeightKey as String: height,
+        kCVPixelBufferCGImageCompatibilityKey as String: true,
+        kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+      ]
+    )
+    guard writer.canAdd(input) else { throw TestError.expectedFailure }
+    writer.add(input)
+    guard writer.startWriting() else { throw writer.error ?? TestError.expectedFailure }
+    writer.startSession(atSourceTime: .zero)
+    guard let pool = adaptor.pixelBufferPool else { throw TestError.expectedFailure }
+
+    var pixelBuffer: CVPixelBuffer?
+    let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer)
+    guard status == kCVReturnSuccess, let pixelBuffer else { throw TestError.expectedFailure }
+    if CVPixelBufferLockBaseAddress(pixelBuffer, []) == kCVReturnSuccess {
+      if let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) {
+        baseAddress.initializeMemory(
+          as: UInt8.self,
+          repeating: 0,
+          count: CVPixelBufferGetDataSize(pixelBuffer)
+        )
+      }
+      CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+    }
+
+    for frame in [0, 30] {
+      while !input.isReadyForMoreMediaData {
+        guard writer.status != .failed else { throw writer.error ?? TestError.expectedFailure }
+        try await Task.sleep(for: .milliseconds(1))
+      }
+      let presentationTime = CMTime(value: Int64(frame), timescale: 30)
+      guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
+        throw writer.error ?? TestError.expectedFailure
+      }
+    }
+    input.markAsFinished()
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      writer.finishWriting { continuation.resume() }
+    }
+    guard writer.status == .completed else { throw writer.error ?? TestError.expectedFailure }
   }
 
   private func makePhotoItem(
@@ -1081,7 +1711,7 @@ final class AppStateTests: XCTestCase {
     livePhotoVideoID: String? = nil,
     projectionType: String? = nil,
     ratio: Double = 1.3,
-    duration: String? = nil
+    durationMilliseconds: Int? = nil
   ) -> RemoteTimelineAsset {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime]
@@ -1091,7 +1721,7 @@ final class AppStateTests: XCTestCase {
       city: nil,
       country: nil,
       createdAt: createdAt,
-      duration: duration,
+      durationMilliseconds: durationMilliseconds,
       isFavorite: false,
       isImage: isImage,
       isTrashed: isTrashed,
@@ -1145,6 +1775,28 @@ private struct FavoriteUpdate: Equatable {
   let assetID: String
   let isFavorite: Bool
 }
+
+private struct LocationUpdate: Equatable, Sendable {
+  let assetID: String
+  let latitude: Double
+  let longitude: Double
+}
+
+private struct BulkLocationUpdate: Equatable, Sendable {
+  let assetIDs: [String]
+  let latitude: Double
+  let longitude: Double
+}
+
+private struct BulkAssetUpdateCall: Equatable, Sendable {
+  let assetIDs: [String]
+  let update: AssetBulkUpdate
+}
+
+private struct DateTimeUpdate: Equatable, Sendable {
+  let assetID: String
+  let date: Date
+}
 private struct SearchCall: Equatable, Sendable {
   let kind: String
   let query: String
@@ -1158,9 +1810,26 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   private var assetDetailsByID: [String: AssetDetail] = [:]
   private var favoriteUpdates: [FavoriteUpdate] = []
   private var favoriteError: Error?
+  private var locationUpdates: [LocationUpdate] = []
+  private var locationUpdateError: Error?
+  private var bulkLocationUpdates: [BulkLocationUpdate] = []
+  private var reverseGeocodeResponse: [ReverseGeocodePlace] = []
+  private var bulkAssetUpdates: [BulkAssetUpdateCall] = []
+  private var hiddenAssetsResponse: [RemoteTimelineAsset] = []
+  private var duplicatesResponse: [DuplicateGroup] = []
+  private var resolvedDuplicateGroups: [DuplicateGroup] = []
+  private var assetEditsByID: [String: [AssetEditAction]] = [:]
+
+  func recordedAssetEdits(for assetID: String) -> [AssetEditAction]? {
+    assetEditsByID[assetID]
+  }
+  private var dateTimeUpdates: [DateTimeUpdate] = []
+  private var dateTimeUpdateError: Error?
+  private var emptyTrashError: Error?
   private var versionCheckState = VersionCheckState(checkedAt: nil, releaseVersion: nil)
   private var searchResult = SearchResult(assets: [], totalCount: 0)
   private var searchCalls: [SearchCall] = []
+  private var uploadedDurations: [Int?] = []
 
   func setTimelineData(buckets: [TimelineBucketSummary], assetsByBucket: [String: [RemoteTimelineAsset]]) {
     timelineBucketsResponse = buckets
@@ -1178,6 +1847,15 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func setFavoriteError(_ error: Error?) {
     favoriteError = error
   }
+  func setLocationUpdateError(_ error: Error?) {
+    locationUpdateError = error
+  }
+  func setDateTimeUpdateError(_ error: Error?) {
+    dateTimeUpdateError = error
+  }
+  func setEmptyTrashError(_ error: Error?) {
+    emptyTrashError = error
+  }
 
   func setVersionCheckState(_ state: VersionCheckState) {
     versionCheckState = state
@@ -1186,6 +1864,28 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func recordedFavoriteUpdates() -> [FavoriteUpdate] {
     favoriteUpdates
   }
+
+  func recordedLocationUpdates() -> [LocationUpdate] {
+    locationUpdates
+  }
+  func recordedBulkLocationUpdates() -> [BulkLocationUpdate] {
+    bulkLocationUpdates
+  }
+  func setReverseGeocodeResult(_ places: [ReverseGeocodePlace]) {
+    reverseGeocodeResponse = places
+  }
+  func recordedBulkAssetUpdates() -> [BulkAssetUpdateCall] {
+    bulkAssetUpdates
+  }
+  func setDuplicates(_ groups: [DuplicateGroup]) {
+    duplicatesResponse = groups
+  }
+  func recordedResolvedDuplicateGroups() -> [DuplicateGroup] {
+    resolvedDuplicateGroups
+  }
+  func recordedDateTimeUpdates() -> [DateTimeUpdate] {
+    dateTimeUpdates
+  }
   func setSearchResult(_ result: SearchResult) {
     searchResult = result
   }
@@ -1193,6 +1893,10 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func recordedSearchCalls() -> [SearchCall] {
     searchCalls
   }
+  func recordedUploadDurations() -> [Int?] {
+    uploadedDurations
+  }
+
 
   func fetchServerInfo(server: ImmichServer, apiKey: String?) async throws -> ServerInfo {
     ServerInfo(version: "1.132.0")
@@ -1204,8 +1908,6 @@ private actor MockImmichAPIClient: ImmichAPIClient {
 
   func fetchLoginConfiguration(server: ImmichServer) async throws -> ServerLoginConfiguration {
     ServerLoginConfiguration(
-      isInitialized: true,
-      isOnboarded: true,
       loginPageMessage: "",
       oauthButtonText: "OAuth",
       passwordLoginEnabled: true,
@@ -1288,7 +1990,7 @@ private actor MockImmichAPIClient: ImmichAPIClient {
       height: 2000,
       fileSizeInByte: 1_024,
       isFavorite: false,
-      duration: nil,
+      durationMilliseconds: nil,
       livePhotoVideoId: nil,
       exif: nil,
       tags: []
@@ -1306,9 +2008,46 @@ private actor MockImmichAPIClient: ImmichAPIClient {
     }
   }
 
+  func updateAssetLocation(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    latitude: Double,
+    longitude: Double
+  ) async throws {
+    locationUpdates.append(LocationUpdate(assetID: assetId, latitude: latitude, longitude: longitude))
+    if let locationUpdateError {
+      throw locationUpdateError
+    }
+  }
+
+  func updateAssetDescription(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    description: String
+  ) async throws {}
+
+  func updateAssetDateTime(
+    server: ImmichServer,
+    session: UserSession,
+    assetId: String,
+    date: Date
+  ) async throws {
+    dateTimeUpdates.append(DateTimeUpdate(assetID: assetId, date: date))
+    if let dateTimeUpdateError {
+      throw dateTimeUpdateError
+    }
+  }
+
   func trashAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
   func fetchTrashedAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { [] }
   func restoreAssets(server: ImmichServer, session: UserSession, assetIds: [String]) async throws {}
+  func emptyTrash(server: ImmichServer, session: UserSession) async throws {
+    if let emptyTrashError {
+      throw emptyTrashError
+    }
+  }
   func searchAssets(server: ImmichServer, session: UserSession, query: String, filters: SearchFilters, page: String?) async throws -> SearchResult {
     searchCalls.append(SearchCall(kind: "smart", query: query, page: page))
     return searchResult
@@ -1335,6 +2074,33 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func fetchPersonAssets(server: ImmichServer, session: UserSession, personId: String) async throws -> [RemoteTimelineAsset] { [] }
   func fetchScreenshots(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { [] }
   func fetchMapMarkers(server: ImmichServer, session: UserSession) async throws -> [MapMarker] { mapMarkersResponse }
+  func fetchAlbumMapMarkers(server: ImmichServer, session: UserSession, albumId: String) async throws -> [MapMarker] { mapMarkersResponse }
+  func reverseGeocode(server: ImmichServer, session: UserSession, latitude: Double, longitude: Double) async throws -> [ReverseGeocodePlace] {
+    reverseGeocodeResponse
+  }
+  func updateAssets(server: ImmichServer, session: UserSession, assetIds: [String], update: AssetBulkUpdate) async throws {
+    bulkAssetUpdates.append(BulkAssetUpdateCall(assetIDs: assetIds, update: update))
+  }
+  func fetchHiddenAssets(server: ImmichServer, session: UserSession) async throws -> [RemoteTimelineAsset] { hiddenAssetsResponse }
+  func fetchAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws -> [AssetEditAction] {
+    assetEditsByID[assetId] ?? []
+  }
+  func replaceAssetEdits(server: ImmichServer, session: UserSession, assetId: String, edits: [AssetEditAction]) async throws {
+    assetEditsByID[assetId] = edits
+  }
+  func deleteAssetEdits(server: ImmichServer, session: UserSession, assetId: String) async throws {
+    assetEditsByID[assetId] = nil
+  }
+  func fetchDuplicates(server: ImmichServer, session: UserSession) async throws -> [DuplicateGroup] { duplicatesResponse }
+  func resolveDuplicates(server: ImmichServer, session: UserSession, groups: [DuplicateGroup]) async throws {
+    resolvedDuplicateGroups.append(contentsOf: groups)
+  }
+  func updateAssetsLocation(server: ImmichServer, session: UserSession, assetIds: [String], latitude: Double, longitude: Double) async throws {
+    bulkLocationUpdates.append(BulkLocationUpdate(assetIDs: assetIds, latitude: latitude, longitude: longitude))
+    if let locationUpdateError {
+      throw locationUpdateError
+    }
+  }
   func fetchMemories(server: ImmichServer, session: UserSession) async throws -> [Memory] { [] }
 
   func downloadOriginalAsset(server: ImmichServer, session: UserSession, assetId: String) async throws -> (Data, String) {
@@ -1345,8 +2111,11 @@ private actor MockImmichAPIClient: ImmichAPIClient {
     server: ImmichServer,
     session: UserSession,
     fileURL: URL,
+    fileCreatedAt: Date?,
+    durationMilliseconds: Int?,
     onProgress: @escaping @Sendable (Double) -> Void
   ) async throws -> String {
+    uploadedDurations.append(durationMilliseconds)
     onProgress(1)
     return UUID().uuidString
   }
@@ -1370,7 +2139,6 @@ private actor MockImmichAPIClient: ImmichAPIClient {
   func deleteAlbum(server: ImmichServer, session: UserSession, albumId: String) async throws {}
   func addAssetsToAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws {}
   func removeAssetsFromAlbum(server: ImmichServer, session: UserSession, albumId: String, assetIds: [String]) async throws {}
-  func replaceAsset(server: ImmichServer, session: UserSession, assetId: String, imageData: Data, filename: String) async throws {}
   func fetchAPIKeys(server: ImmichServer, session: UserSession) async throws -> [ImmichAPIKey] { [] }
 
   func createAPIKey(server: ImmichServer, session: UserSession, name: String, permissions: [String]) async throws -> CreatedAPIKey {

@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import AVFoundation
 import AuthenticationServices
 import UniformTypeIdentifiers
 import ImmichAPI
@@ -101,15 +102,17 @@ final class AppState: ObservableObject {
     let isVideo: Bool
     let isImported: Bool
     let livePhotoVideoID: String?
-    let latitude: Double?
-    let longitude: Double?
+    var latitude: Double?
+    var longitude: Double?
     let durationText: String?
     let city: String?
     let country: String?
     let stackCount: Int?
-    let timeBucketKey: String
+    var timeBucketKey: String
     let projectionType: String?
     let aspectRatio: CGFloat
+    /// Star rating 1–5, or nil when unrated (Photos' Image ▸ Set Rating).
+    var rating: Int? = nil
 
     var isLivePhoto: Bool { livePhotoVideoID != nil }
     var isPanorama: Bool {
@@ -137,9 +140,11 @@ final class AppState: ObservableObject {
     let representativeItem: PhotoItem?
   }
 
+  /// Photos' library zoom levels (`PXCuratedLibrary{Years,Months,Days,AllPhotos}ZoomLevelButtonTitle`).
   enum TimelineViewMode: String, CaseIterable, Identifiable {
     case years = "Years"
     case months = "Months"
+    case days = "Days"
     case allPhotos = "All Photos"
 
     var id: String { rawValue }
@@ -232,10 +237,18 @@ final class AppState: ObservableObject {
   // Trash
   @Published var trashedItems: [PhotoItem] = []
   @Published var isLoadingTrash = false
-
+  @Published var isEmptyingTrash = false
   // Screenshots (server-side search)
   @Published var screenshotItems: [PhotoItem] = []
   @Published var isLoadingScreenshots = false
+
+  // Utilities ▸ Hidden and Duplicates (see AppState+Organize.swift)
+  @Published var hiddenItems: [PhotoItem] = []
+  @Published var isLoadingHidden = false
+  @Published var duplicateGroups: [DuplicateGroup] = []
+  @Published var isLoadingDuplicates = false
+  @Published var showAdjustDateTimeSheet = false
+  @Published var adjustDateTimeItemIDs: [String] = []
 
   // Viewer
   @Published var selectedItemID: String?
@@ -256,6 +269,8 @@ final class AppState: ObservableObject {
   @Published var showAPIKeysSheet = false
   @Published var showTagsSheet = false
   @Published var showTagEditorSheet = false
+  @Published var showAssignLocationSheet = false
+  @Published private(set) var assignLocationItemIDs: [String] = []
   @Published var showAdminUsersSheet = false
   @Published var newAlbumName = ""
   @Published var newAlbumDescription = ""
@@ -269,6 +284,13 @@ final class AppState: ObservableObject {
   @Published var isLoadingMapSelection = false
   @Published var selectedMapMarkerID: String?
   @Published var mapSelectionItems: [PhotoItem] = []
+  /// Coordinate held by Image ▸ Location ▸ Copy Location.
+  @Published var copiedLocation: CopiedLocation?
+
+  struct CopiedLocation: Equatable {
+    let latitude: Double
+    let longitude: Double
+  }
   private var lastLoadedMapMarkerIDs: Set<String> = []
   @Published var apiKeys: [ImmichAPIKey] = []
   @Published var tags: [ImmichTag] = []
@@ -301,6 +323,8 @@ final class AppState: ObservableObject {
 
   // Editing
   @Published var isEditing = false
+  /// Loading/saving state of the Photos-style editor (see AppState+Editing.swift).
+  @Published var editingSessionState: EditingSessionState = .idle
   @Published var editingTab: EditingTab = .adjust
 
   // Pinned items (stored in UserDefaults)
@@ -328,10 +352,10 @@ final class AppState: ObservableObject {
 
   // MARK: - Private State
 
-  private let apiClient: any ImmichAPIClient
+  let apiClient: any ImmichAPIClient
   private let uploadQueue = UploadQueue()
   private let webSocketService: any ImmichWebSocketServicing
-  private var connectedServer: ImmichServer?
+  private(set) var connectedServer: ImmichServer?
   private var timelineBuckets: [TimelineBucketSummary] = []
   private var loadedTimelineBucketKeys: [String] = []
   private var totalTimelineItemCount = 0
@@ -367,6 +391,16 @@ final class AppState: ObservableObject {
   static let timelineSectionFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.dateFormat = "LLLL yyyy"
+    return formatter
+  }()
+  private static let recentDayIDFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
+  }()
+  private static let recentDaySectionFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "EEEE, MMMM d, yyyy"
     return formatter
   }()
   static let timelineYearFormatter: DateFormatter = {
@@ -409,13 +443,66 @@ final class AppState: ObservableObject {
 
   var selectedItem: PhotoItem? {
     guard let selectedItemID else { return nil }
-    // Check active album items first, then main library, then trash
-    return activeAlbumItems.first { $0.id == selectedItemID }
-      ?? activePersonItems.first { $0.id == selectedItemID }
-      ?? mapSelectionItems.first { $0.id == selectedItemID }
-      ?? activeMemoryItems.first { $0.id == selectedItemID }
-      ?? libraryItems.first { $0.id == selectedItemID }
-      ?? trashedItems.first { $0.id == selectedItemID }
+    return photoItem(withID: selectedItemID)
+  }
+
+  func photoItem(withID itemID: String) -> PhotoItem? {
+    if let item = activeAlbumItems.first(where: { $0.id == itemID }) { return item }
+    if let item = activePersonItems.first(where: { $0.id == itemID }) { return item }
+    if let item = mapSelectionItems.first(where: { $0.id == itemID }) { return item }
+    if let item = activeMemoryItems.first(where: { $0.id == itemID }) { return item }
+    if let item = searchResults.first(where: { $0.id == itemID }) { return item }
+    if let item = screenshotItems.first(where: { $0.id == itemID }) { return item }
+    if let item = hiddenItems.first(where: { $0.id == itemID }) { return item }
+    if let item = libraryItems.first(where: { $0.id == itemID }) { return item }
+    return trashedItems.first(where: { $0.id == itemID })
+  }
+
+  func updatePhotoItemCopies(withID itemID: String, _ mutation: (inout PhotoItem) -> Void) {
+    func updateItems(_ items: inout [PhotoItem]) {
+      guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
+      mutation(&items[index])
+    }
+
+    updateItems(&libraryItems)
+    updateItems(&activeAlbumItems)
+    updateItems(&activePersonItems)
+    updateItems(&mapSelectionItems)
+    updateItems(&activeMemoryItems)
+    updateItems(&searchResults)
+    updateItems(&screenshotItems)
+    updateItems(&hiddenItems)
+    updateItems(&trashedItems)
+  }
+
+  private func replacePhotoItemCopies(with updated: PhotoItem) {
+    func replace(_ items: inout [PhotoItem]) {
+      guard let index = items.firstIndex(where: { $0.id == updated.id }) else { return }
+      items[index] = updated
+    }
+
+    replace(&libraryItems)
+    replace(&activeAlbumItems)
+    replace(&activePersonItems)
+    replace(&mapSelectionItems)
+    replace(&activeMemoryItems)
+    replace(&searchResults)
+    replace(&screenshotItems)
+    replace(&hiddenItems)
+    replace(&trashedItems)
+  }
+
+
+  func removePhotoItemCopies(where shouldRemove: (PhotoItem) -> Bool) {
+    libraryItems.removeAll(where: shouldRemove)
+    activeAlbumItems.removeAll(where: shouldRemove)
+    activePersonItems.removeAll(where: shouldRemove)
+    mapSelectionItems.removeAll(where: shouldRemove)
+    activeMemoryItems.removeAll(where: shouldRemove)
+    searchResults.removeAll(where: shouldRemove)
+    screenshotItems.removeAll(where: shouldRemove)
+    hiddenItems.removeAll(where: shouldRemove)
+    trashedItems.removeAll(where: shouldRemove)
   }
 
   var thumbnailContext: ThumbnailContext? {
@@ -452,7 +539,7 @@ final class AppState: ObservableObject {
 
   private func itemsForCurrentSidebar() -> [PhotoItem] {
     switch sidebarSelection {
-    case .library, .none:
+    case .library, .recentDays, .none:
       return libraryItems
     case .favorites:
       return libraryItems.filter(\.isFavorite)
@@ -464,6 +551,10 @@ final class AppState: ObservableObject {
       return libraryItems.filter(\.isPanorama)
     case .screenshots:
       return screenshotItems
+    case .hidden:
+      return hiddenItems
+    case .duplicates:
+      return []
     case .imports:
       return libraryItems.filter(\.isImported)
     case .album, .pinnedAlbum:
@@ -485,7 +576,7 @@ final class AppState: ObservableObject {
 
   private func searchResultBelongsToCurrentSidebar(_ item: PhotoItem) -> Bool {
     switch sidebarSelection {
-    case .library, .none:
+    case .library, .recentDays, .none:
       return true
     case .favorites:
       return item.isFavorite
@@ -497,6 +588,10 @@ final class AppState: ObservableObject {
       return item.isPanorama
     case .screenshots:
       return screenshotItems.contains { $0.id == item.id }
+    case .hidden:
+      return hiddenItems.contains { $0.id == item.id }
+    case .duplicates:
+      return false
     case .imports:
       return item.isImported
     case .album, .pinnedAlbum:
@@ -539,9 +634,9 @@ final class AppState: ObservableObject {
 
   private var viewOptionsApplyToCurrentSidebar: Bool {
     switch sidebarSelection {
-    case .library, .none, .favorites, .imports, .album, .pinnedAlbum, .person, .map, .memory:
+    case .library, .recentDays, .none, .favorites, .imports, .album, .pinnedAlbum, .person, .map, .memory:
       return true
-    case .videos, .livePhotos, .panoramas, .screenshots, .recentlyDeleted,
+    case .videos, .livePhotos, .panoramas, .screenshots, .recentlyDeleted, .hidden, .duplicates,
          .allAlbums, .collections, .allPeople, .allMemories:
       return false
     }
@@ -593,6 +688,15 @@ final class AppState: ObservableObject {
 
   var visibleLibraryYearSections: [LibrarySection] {
     makeYearSections(from: applyVisibleViewOptions(to: libraryItems))
+  }
+
+  var visibleRecentDaySections: [LibrarySection] {
+    makeRecentDaySections(from: applyVisibleViewOptions(to: libraryItems))
+  }
+
+  /// Day sections for the library's Days zoom level.
+  var visibleLibraryDaySections: [LibrarySection] {
+    makeRecentDaySections(from: applyVisibleViewOptions(to: libraryItems))
   }
 
   func rebuildLibrarySections() {
@@ -656,6 +760,23 @@ final class AppState: ObservableObject {
         itemCount: items.count,
         items: items,
         representativeItem: items.first
+      )
+    }
+  }
+
+  private func makeRecentDaySections(from items: [PhotoItem]) -> [LibrarySection] {
+    let calendar = Calendar.current
+    let groupedItems = Dictionary(grouping: items) { item in
+      calendar.startOfDay(for: item.date)
+    }
+    return groupedItems.keys.sorted(by: >).compactMap { dayStart in
+      guard let dayItems = groupedItems[dayStart]?.sorted(by: { $0.date > $1.date }) else { return nil }
+      return LibrarySection(
+        id: Self.recentDayIDFormatter.string(from: dayStart),
+        title: Self.recentDaySectionFormatter.string(from: dayStart),
+        itemCount: dayItems.count,
+        items: dayItems,
+        representativeItem: dayItems.first
       )
     }
   }
@@ -724,6 +845,7 @@ final class AppState: ObservableObject {
       return "No Results"
     }
     return switch sidebarSelection {
+    case .recentDays: "No recent days yet"
     case .library: isLoadingTimeline ? "Loading timeline" : "Library is empty"
     case .map: isLoadingMap ? "Loading map" : "No places yet"
     case .favorites: "No favorites yet"
@@ -731,6 +853,8 @@ final class AppState: ObservableObject {
     case .livePhotos: "No Live Photos yet"
     case .panoramas: "No panoramas yet"
     case .screenshots: "No screenshots yet"
+    case .hidden: isLoadingHidden ? "Loading hidden items" : "No hidden items"
+    case .duplicates: isLoadingDuplicates ? "Looking for duplicates" : "No duplicates found"
     case .imports: "No imports yet"
     case .recentlyDeleted: "Trash is empty"
     default: "No items"
@@ -744,6 +868,8 @@ final class AppState: ObservableObject {
       return trimmedSearch.isEmpty ? "No items match the active filters." : "No results found for \"\(trimmedSearch)\""
     }
     switch sidebarSelection {
+    case .recentDays:
+      return "Photos and videos from your Immich library will appear here."
     case .library:
       if isLoadingTimeline { return "Fetching latest from your Immich library." }
       if let msg = timelineErrorMessage { return msg }
@@ -1095,6 +1221,8 @@ final class AppState: ObservableObject {
     isLoadingTrash = false
     screenshotItems = []
     isLoadingScreenshots = false
+    hiddenItems = []
+    duplicateGroups = []
     uploadRows = []
     sidebarSelection = .library
     timelineBuckets = []
@@ -1467,7 +1595,7 @@ final class AppState: ObservableObject {
     guard timelineErrorMessage == nil else { return }
 
     switch sidebarSelection {
-    case .videos, .livePhotos, .panoramas:
+    case .videos, .livePhotos, .panoramas, .recentDays:
       await loadCompleteTimelineIfNeeded()
     default:
       break
@@ -1550,32 +1678,9 @@ final class AppState: ObservableObject {
   // MARK: - Item Actions
 
   func toggleFavorite(for itemID: String) {
-    var newVal: Bool?
-
-    if let index = libraryItems.firstIndex(where: { $0.id == itemID }) {
-      libraryItems[index].isFavorite.toggle()
-      newVal = libraryItems[index].isFavorite
-    }
-
-    if let index = activeAlbumItems.firstIndex(where: { $0.id == itemID }) {
-      if let newVal {
-        activeAlbumItems[index].isFavorite = newVal
-      } else {
-        activeAlbumItems[index].isFavorite.toggle()
-        newVal = activeAlbumItems[index].isFavorite
-      }
-    }
-
-    if let index = activePersonItems.firstIndex(where: { $0.id == itemID }) {
-      if let newVal {
-        activePersonItems[index].isFavorite = newVal
-      } else {
-        activePersonItems[index].isFavorite.toggle()
-        newVal = activePersonItems[index].isFavorite
-      }
-    }
-
-    guard let newVal else { return }
+    guard let item = photoItem(withID: itemID) else { return }
+    let newValue = !item.isFavorite
+    updatePhotoItemCopies(withID: itemID) { $0.isFavorite = newValue }
     rebuildLibrarySections()
     updateMediaCounts()
 
@@ -1583,18 +1688,15 @@ final class AppState: ObservableObject {
     guard let connectedServer, let currentSession else { return }
     Task {
       do {
-        try await apiClient.setFavorite(server: connectedServer, session: currentSession, assetId: itemID, isFavorite: newVal)
+        try await apiClient.setFavorite(
+          server: connectedServer,
+          session: currentSession,
+          assetId: itemID,
+          isFavorite: newValue
+        )
       } catch {
         // Revert on failure
-        if let idx = libraryItems.firstIndex(where: { $0.id == itemID }) {
-          libraryItems[idx].isFavorite = !newVal
-        }
-        if let idx = activeAlbumItems.firstIndex(where: { $0.id == itemID }) {
-          activeAlbumItems[idx].isFavorite = !newVal
-        }
-        if let idx = activePersonItems.firstIndex(where: { $0.id == itemID }) {
-          activePersonItems[idx].isFavorite = !newVal
-        }
+        updatePhotoItemCopies(withID: itemID) { $0.isFavorite = !newValue }
         rebuildLibrarySections()
         updateMediaCounts()
         immichLog("[Favorite] Sync failed: \(error)")
@@ -1604,10 +1706,10 @@ final class AppState: ObservableObject {
 
   func trashItem(_ itemID: String) {
     guard let connectedServer, let currentSession else { return }
-    libraryItems.removeAll { $0.id == itemID }
-    activeAlbumItems.removeAll { $0.id == itemID }
-    activePersonItems.removeAll { $0.id == itemID }
+    removePhotoItemCopies { $0.id == itemID }
+    selectedItemIDs.remove(itemID)
     rebuildLibrarySections()
+    updateMediaCounts()
     if selectedItemID == itemID {
       selectedItemID = filteredItems.first?.id
       isViewingPhoto = false
@@ -1717,14 +1819,14 @@ final class AppState: ObservableObject {
 
   private var timelineBackedSidebarUsesLibraryItems: Bool {
     switch sidebarSelection {
-    case .library, .none, .favorites, .imports:
+    case .library, .recentDays, .none, .favorites, .imports:
       return true
     default:
       return false
     }
   }
 
-  private func reconcileSelectionWithVisibleItems() {
+  func reconcileSelectionWithVisibleItems() {
     let visibleIDs = Set(itemsRenderedInCurrentGridMode().map(\.id))
     selectedItemIDs = selectedItemIDs.intersection(visibleIDs)
     if let selectedItemID, !visibleIDs.contains(selectedItemID) {
@@ -1741,7 +1843,9 @@ final class AppState: ObservableObject {
     case .years:
       return visibleLibraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
     case .months:
-      return visibleLibrarySections.flatMap(\.items)
+      return visibleLibrarySections.compactMap { CuratedLibrary.keyItem(in: $0.items) }
+    case .days:
+      return visibleLibraryDaySections.flatMap(\.items)
     case .allPhotos:
       return filteredItems
     }
@@ -1775,6 +1879,142 @@ final class AppState: ObservableObject {
       throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
     }
     return try await apiClient.fetchAssetDetail(server: connectedServer, session: currentSession, assetId: assetID)
+  }
+
+  func updateAssetLocation(itemID: String, latitude: Double, longitude: Double) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.updateAssetLocation(
+      server: connectedServer,
+      session: currentSession,
+      assetId: itemID,
+      latitude: latitude,
+      longitude: longitude
+    )
+
+    updatePhotoItemCopies(withID: itemID) {
+      $0.latitude = latitude
+      $0.longitude = longitude
+    }
+
+    let place = await reverseGeocodedPlace(latitude: latitude, longitude: longitude)
+    upsertMapMarkers(for: [itemID], latitude: latitude, longitude: longitude, place: place)
+    clearMapSelection()
+  }
+
+  /// Photos' Image ▸ Location ▸ Assign Location. One item uses `PATCH /assets/:id`; several use the
+  /// v3 bulk `PUT /assets`, mirroring "Assign Location to N Items".
+  func assignLocation(itemIDs: [String], latitude: Double, longitude: Double) async throws {
+    let ids = Array(NSOrderedSet(array: itemIDs)) as? [String] ?? itemIDs
+    guard !ids.isEmpty else { return }
+    guard ids.count > 1 else {
+      try await updateAssetLocation(itemID: ids[0], latitude: latitude, longitude: longitude)
+      return
+    }
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.updateAssetsLocation(
+      server: connectedServer,
+      session: currentSession,
+      assetIds: ids,
+      latitude: latitude,
+      longitude: longitude
+    )
+
+    for id in ids {
+      updatePhotoItemCopies(withID: id) {
+        $0.latitude = latitude
+        $0.longitude = longitude
+      }
+    }
+    let place = await reverseGeocodedPlace(latitude: latitude, longitude: longitude)
+    upsertMapMarkers(for: ids, latitude: latitude, longitude: longitude, place: place)
+    clearMapSelection()
+  }
+
+  /// Photos' Copy Location: remembers the first selected item's coordinate for Paste Location.
+  @discardableResult
+  func copyLocation(from itemIDs: [String]) -> Bool {
+    for id in itemIDs {
+      if let item = photoItem(withID: id), let latitude = item.latitude, let longitude = item.longitude {
+        copiedLocation = CopiedLocation(latitude: latitude, longitude: longitude)
+        return true
+      }
+      if let marker = mapMarkers.first(where: { $0.id == id }) {
+        copiedLocation = CopiedLocation(latitude: marker.latitude, longitude: marker.longitude)
+        return true
+      }
+    }
+    return false
+  }
+
+  func pasteLocation(to itemIDs: [String]) async throws {
+    guard let copiedLocation else { return }
+    try await assignLocation(itemIDs: itemIDs, latitude: copiedLocation.latitude, longitude: copiedLocation.longitude)
+  }
+
+  private func reverseGeocodedPlace(latitude: Double, longitude: Double) async -> ReverseGeocodePlace? {
+    guard let connectedServer, let currentSession else { return nil }
+    // Place names are best-effort; a geocoder failure must not undo a saved coordinate.
+    return try? await apiClient.reverseGeocode(
+      server: connectedServer,
+      session: currentSession,
+      latitude: latitude,
+      longitude: longitude
+    ).first
+  }
+
+  private func upsertMapMarkers(for itemIDs: [String], latitude: Double, longitude: Double, place: ReverseGeocodePlace?) {
+    for itemID in itemIDs {
+      let updatedMarker = MapMarker(
+        id: itemID,
+        latitude: latitude,
+        longitude: longitude,
+        city: place?.city,
+        country: place?.country,
+        state: place?.state
+      )
+      if let index = mapMarkers.firstIndex(where: { $0.id == itemID }) {
+        mapMarkers[index] = updatedMarker
+      } else {
+        mapMarkers.append(updatedMarker)
+      }
+    }
+  }
+
+  func updateAssetDescription(itemID: String, description: String) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.updateAssetDescription(
+      server: connectedServer,
+      session: currentSession,
+      assetId: itemID,
+      description: description
+    )
+  }
+
+  func updateAssetDateTime(itemID: String, date: Date) async throws {
+    guard let connectedServer, let currentSession else {
+      throw ImmichAPIError.requestFailed(statusCode: 0, message: "Not connected to server.")
+    }
+
+    try await apiClient.updateAssetDateTime(
+      server: connectedServer,
+      session: currentSession,
+      assetId: itemID,
+      date: date
+    )
+    updatePhotoItemCopies(withID: itemID) {
+      $0.date = date
+      $0.timeBucketKey = Self.timelineBucketKey(for: date)
+    }
+    rebuildLibrarySections()
   }
 
   func loadAPIKeys() async throws {
@@ -1872,6 +2112,35 @@ final class AppState: ObservableObject {
 
     try await apiClient.untagAssets(server: connectedServer, session: currentSession, tagID: tagID, assetIDs: assetIDs)
     activeTagEditorCurrentTags.removeAll { $0.id == tagID }
+  }
+
+  /// Items an Image-menu command acts on: the grid selection, else the item open in the viewer.
+  var commandTargetItemIDs: [String] {
+    if !selectedItemIDs.isEmpty {
+      return selectedItemIDs.sorted()
+    }
+    return selectedItemID.map { [$0] } ?? []
+  }
+
+  /// Photos' "Assign Location" / "Assign Location to %lu Photos|Videos|Items" menu title.
+  func assignLocationMenuTitle(for itemIDs: [String]) -> String {
+    guard itemIDs.count > 1 else { return "Assign Location…" }
+    let items = itemIDs.compactMap(photoItem(withID:))
+    let noun: String
+    if items.count == itemIDs.count, items.allSatisfy(\.isVideo) {
+      noun = "Videos"
+    } else if items.count == itemIDs.count, items.allSatisfy({ !$0.isVideo }) {
+      noun = "Photos"
+    } else {
+      noun = "Items"
+    }
+    return "Assign Location to \(itemIDs.count) \(noun)…"
+  }
+
+  func presentAssignLocation(for itemIDs: [String]) {
+    guard !itemIDs.isEmpty else { return }
+    assignLocationItemIDs = itemIDs
+    showAssignLocationSheet = true
   }
 
   func presentTagEditor(for assetIDs: [String], currentTags: [ImmichTag], title: String) {
@@ -2036,34 +2305,7 @@ final class AppState: ObservableObject {
 
   // MARK: - Trash Loading
 
-  // MARK: - Photo Editing (Save / Export)
-
-  func saveEditedImage(pipeline: PhotoEditingPipeline) {
-    guard
-      let connectedServer,
-      let currentSession,
-      let item = selectedItem,
-      !item.isVideo
-    else { return }
-    Task {
-      guard let jpegData = await pipeline.renderFinalJPEG() else { return }
-      do {
-        let filename = "\(item.title.isEmpty ? item.id : item.title).jpg"
-        try await apiClient.replaceAsset(
-          server: connectedServer,
-          session: currentSession,
-          assetId: item.id,
-          imageData: jpegData,
-          filename: filename
-        )
-        immichLog("[Edit] Saved edited image for asset \(item.id)")
-        isEditing = false
-        pipeline.resetAll()
-      } catch {
-        immichLog("[Edit] Save failed: \(error)")
-      }
-    }
-  }
+  // MARK: - Photo Editing (Export)
 
   func exportEditedImage(pipeline: PhotoEditingPipeline) {
     guard let item = selectedItem, !item.isVideo else { return }
@@ -2112,6 +2354,33 @@ final class AppState: ObservableObject {
     } catch {
       immichLog("[Trash] Failed to load trashed assets: \(error)")
     }
+  }
+
+  func emptyTrash() async throws {
+    guard
+      !isEmptyingTrash,
+      !trashedItems.isEmpty,
+      let connectedServer,
+      let currentSession
+    else {
+      return
+    }
+
+    isEmptyingTrash = true
+    defer { isEmptyingTrash = false }
+
+    try await apiClient.emptyTrash(server: connectedServer, session: currentSession)
+
+    let deletedIDs = Set(trashedItems.map(\.id))
+    removePhotoItemCopies { deletedIDs.contains($0.id) }
+    selectedItemIDs.subtract(deletedIDs)
+    if let selectedItemID, deletedIDs.contains(selectedItemID) {
+      self.selectedItemID = nil
+      isViewingPhoto = false
+      showInfoPopover = false
+    }
+    rebuildLibrarySections()
+    updateMediaCounts()
   }
 
   func restoreItem(_ itemID: String) {
@@ -2188,19 +2457,19 @@ final class AppState: ObservableObject {
 
   func batchTrash() {
     guard let connectedServer, let currentSession else { return }
-    let ids = Array(selectedItemIDs)
-    libraryItems.removeAll { ids.contains($0.id) }
-    activeAlbumItems.removeAll { ids.contains($0.id) }
-    activePersonItems.removeAll { ids.contains($0.id) }
+    let selectedIDs = selectedItemIDs
+    let assetIDs = Array(selectedIDs)
+    removePhotoItemCopies { selectedIDs.contains($0.id) }
     rebuildLibrarySections()
+    updateMediaCounts()
     selectedItemIDs.removeAll()
-    if let selectedItemID, ids.contains(selectedItemID) {
+    if let selectedItemID, selectedIDs.contains(selectedItemID) {
       self.selectedItemID = filteredItems.first?.id
       isViewingPhoto = false
     }
     Task {
       do {
-        try await apiClient.trashAssets(server: connectedServer, session: currentSession, assetIds: ids)
+        try await apiClient.trashAssets(server: connectedServer, session: currentSession, assetIds: assetIDs)
       } catch {
         immichLog("[BatchTrash] Failed: \(error)")
       }
@@ -2440,7 +2709,9 @@ final class AppState: ObservableObject {
   // MARK: - Pressure / Force Touch
 
   func handlePressureChange(stage: Int, pressure: Double) {
-    let isDeepPress = stage == 2 || pressure > 0.65
+    // Photos (-[IPXViewerMediaController pressureChangeWithEvent:]) plays a Live Photo when the
+    // press reaches stage 2 and stops once pressure falls back to stage 1 or less.
+    let isDeepPress = stage >= 2
 
     if isDeepPress {
       if !isViewingLivePhoto && !forceTouchConsumed {
@@ -2461,7 +2732,7 @@ final class AppState: ObservableObject {
           }
         }
       }
-    } else if pressure < 0.15 {
+    } else if stage <= 1 {
       forceTouchConsumed = false
       if isViewingLivePhoto {
         withAnimation(ImmichMotion.Curves.structuralShort) {
@@ -2478,40 +2749,49 @@ final class AppState: ObservableObject {
   // MARK: - Import / Upload
 
   func importFiles(_ urls: [URL]) {
-    for url in urls where Self.isSupportedImportURL(url) {
-      let uploadItem = UploadItem(fileURL: url)
-      let importDate = Self.localCreationDate(for: url) ?? .now
-      let addedDate = Date()
-      let isVideo = Self.isVideoImportURL(url)
-      let item = PhotoItem(
-        id: UUID().uuidString,
-        source: .localFile(url),
-        title: url.deletingPathExtension().lastPathComponent,
-        date: importDate,
-        dateAdded: addedDate,
-        isFavorite: false,
-        isVideo: isVideo,
-        isImported: true,
-        livePhotoVideoID: nil,
-        latitude: nil,
-        longitude: nil,
-        durationText: isVideo ? "Ready" : nil,
-        city: nil,
-        country: nil,
-        stackCount: nil,
-        timeBucketKey: Self.timelineBucketKey(for: importDate),
-        projectionType: nil,
-        aspectRatio: Self.localAspectRatio(for: url, isVideo: isVideo)
-      )
+    for url in urls {
+      enqueueImport(fileURL: url)
+    }
+  }
 
-      uploadRows.insert(UploadRow(id: uploadItem.id, filename: url.lastPathComponent, progress: 0, state: .queued), at: 0)
-      libraryItems.insert(item, at: 0)
-      rebuildLibrarySections()
+  private func enqueueImport(fileURL: URL) {
+    guard Self.isSupportedImportURL(fileURL) else { return }
 
-      Task {
-        await uploadQueue.enqueue(uploadItem)
-        await uploadAsset(uploadItem)
-      }
+    let importDate = Self.localCreationDate(for: fileURL) ?? .now
+    let uploadItem = UploadItem(
+      fileURL: fileURL,
+      fileCreatedAt: importDate
+    )
+    let addedDate = Date()
+    let isVideo = Self.isVideoImportURL(fileURL)
+    let item = PhotoItem(
+      id: UUID().uuidString,
+      source: .localFile(fileURL),
+      title: fileURL.deletingPathExtension().lastPathComponent,
+      date: importDate,
+      dateAdded: addedDate,
+      isFavorite: false,
+      isVideo: isVideo,
+      isImported: true,
+      livePhotoVideoID: nil,
+      latitude: nil,
+      longitude: nil,
+      durationText: isVideo ? "Ready" : nil,
+      city: nil,
+      country: nil,
+      stackCount: nil,
+      timeBucketKey: Self.timelineBucketKey(for: importDate),
+      projectionType: nil,
+      aspectRatio: Self.localAspectRatio(for: fileURL, isVideo: isVideo)
+    )
+
+    uploadRows.insert(UploadRow(id: uploadItem.id, filename: fileURL.lastPathComponent, progress: 0, state: .queued), at: 0)
+    libraryItems.insert(item, at: 0)
+    rebuildLibrarySections()
+
+    Task {
+      await uploadQueue.enqueue(uploadItem)
+      await uploadAsset(uploadItem)
     }
   }
 
@@ -2554,8 +2834,13 @@ final class AppState: ObservableObject {
       return
     }
     do {
+      let durationMilliseconds = await Self.localVideoDurationMilliseconds(for: item.fileURL)
       let remoteID = try await apiClient.uploadAsset(
-        server: connectedServer, session: currentSession, fileURL: item.fileURL,
+        server: connectedServer,
+        session: currentSession,
+        fileURL: item.fileURL,
+        fileCreatedAt: item.fileCreatedAt,
+        durationMilliseconds: durationMilliseconds,
         onProgress: { [weak self] progress in
           Task { @MainActor in
             self?.updateUploadRow(id: item.id, progress: progress, state: .uploading(progress: progress))
@@ -2621,6 +2906,7 @@ final class AppState: ObservableObject {
       immichLog("[Upload] Failed: \(error)")
     }
   }
+
 
   private func updateUploadRow(id: UUID, progress: Double, state: UploadState) {
     guard let idx = uploadRows.firstIndex(where: { $0.id == id }) else { return }
@@ -2726,7 +3012,7 @@ final class AppState: ObservableObject {
         livePhotoVideoID: detail.livePhotoVideoId,
         latitude: detail.exif?.latitude ?? loadedItem.marker.latitude,
         longitude: detail.exif?.longitude ?? loadedItem.marker.longitude,
-        durationText: isVideo ? detail.duration : nil,
+        durationText: isVideo ? Self.durationText(forMilliseconds: detail.durationMilliseconds) : nil,
         city: detail.exif?.city ?? loadedItem.marker.city,
         country: detail.exif?.country ?? loadedItem.marker.country,
         stackCount: nil,
@@ -2831,7 +3117,7 @@ final class AppState: ObservableObject {
       livePhotoVideoID: asset.livePhotoVideoID,
       latitude: asset.latitude,
       longitude: asset.longitude,
-      durationText: asset.duration,
+      durationText: Self.durationText(forMilliseconds: asset.durationMilliseconds),
       city: asset.city,
       country: asset.country,
       stackCount: asset.stackChildrenCount,
@@ -2840,6 +3126,20 @@ final class AppState: ObservableObject {
       aspectRatio: CGFloat(asset.ratio)
     )
   }
+  private static func durationText(forMilliseconds milliseconds: Int?) -> String? {
+    guard let milliseconds, milliseconds >= 0 else { return nil }
+
+    let totalSeconds = milliseconds / 1_000
+    let totalMinutes = totalSeconds / 60
+    let seconds = totalSeconds % 60
+    if totalMinutes >= 60 {
+      let hours = totalMinutes / 60
+      let minutes = totalMinutes % 60
+      return "\(hours):\(String(format: "%02d", minutes)):\(String(format: "%02d", seconds))"
+    }
+    return "\(totalMinutes):\(String(format: "%02d", seconds))"
+  }
+
 
   static func isSupportedImportURL(_ url: URL) -> Bool {
     isImageImportURL(url) || isVideoImportURL(url)
@@ -2858,6 +3158,15 @@ final class AppState: ObservableObject {
     }
     return fallbackVideoExtensions.contains(url.pathExtension.lowercased())
   }
+  private static func localVideoDurationMilliseconds(for url: URL) async -> Int? {
+    guard isVideoImportURL(url) else { return nil }
+    let asset = AVURLAsset(url: url)
+    guard let duration = try? await asset.load(.duration) else { return nil }
+    let milliseconds = duration.seconds * 1000
+    guard milliseconds.isFinite, milliseconds >= 0 else { return nil }
+    return Int(milliseconds.rounded())
+  }
+
 
   private static func localCreationDate(for url: URL) -> Date? {
     let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey]
@@ -2871,7 +3180,7 @@ final class AppState: ObservableObject {
     return image.size.width / image.size.height
   }
 
-  private static func timelineBucketKey(for date: Date) -> String {
+  static func timelineBucketKey(for date: Date) -> String {
     let c = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: date)
     return String(format: "%04d-%02d-01", c.year ?? 1970, c.month ?? 1)
   }
@@ -2907,12 +3216,13 @@ extension AppState: ImmichWebSocketDelegate {
 
   func webSocketDidReceiveAssetUpdate(assetJSON: [String: Any]) {
     guard let updated = parseAssetResponseDTO(assetJSON) else { return }
-    if let idx = libraryItems.firstIndex(where: { $0.id == updated.id }) {
-      libraryItems[idx] = updated
-      libraryItems.sort { $0.date > $1.date }
-      updateMediaCounts()
-      rebuildLibrarySections()
-    }
+    let isInLibrary = libraryItems.contains { $0.id == updated.id }
+    replacePhotoItemCopies(with: updated)
+    guard isInLibrary else { return }
+
+    libraryItems.sort { $0.date > $1.date }
+    updateMediaCounts()
+    rebuildLibrarySections()
   }
 
   func webSocketDidReceiveAssetDelete(assetID: String) {
@@ -2965,7 +3275,7 @@ extension AppState: ImmichWebSocketDelegate {
     let date = dateString.flatMap { Self.parseISO8601Date($0) } ?? .now
     let addedDate = (json["createdAt"] as? String).flatMap { Self.parseISO8601Date($0) } ?? date
 
-    let duration = json["duration"] as? String
+    let durationMilliseconds = json["duration"] as? Int
     let livePhotoVideoId = json["livePhotoVideoId"] as? String
     let originalFileName = json["originalFileName"] as? String ?? "Photo"
 
@@ -2992,7 +3302,7 @@ extension AppState: ImmichWebSocketDelegate {
       livePhotoVideoID: livePhotoVideoId,
       latitude: latitude,
       longitude: longitude,
-      durationText: isVideo ? duration : nil,
+      durationText: isVideo ? Self.durationText(forMilliseconds: durationMilliseconds) : nil,
       city: city,
       country: country,
       stackCount: nil,

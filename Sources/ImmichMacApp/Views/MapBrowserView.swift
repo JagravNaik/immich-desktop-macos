@@ -16,6 +16,7 @@ private struct DisplayMapMarker: Identifiable, Hashable {
   let latitude: Double
   let longitude: Double
   let city: String?
+  let state: String?
   let country: String?
   let members: [AssetMapMarker]
 
@@ -37,6 +38,123 @@ private struct DisplayMapMarker: Identifiable, Hashable {
   }
 }
 
+struct MapPlaceGroup: Identifiable {
+  let id: String
+  let title: String
+  let markers: [AssetMapMarker]
+}
+
+enum MapPlaceGrouping {
+  private static let coordinateBucketStep = 0.02
+
+  static func groups(from markers: [AssetMapMarker]) -> [MapPlaceGroup] {
+    var buckets: [PlaceKey: [AssetMapMarker]] = [:]
+    buckets.reserveCapacity(markers.count)
+
+    for marker in markers where MapViewportBuilder.isValid(marker: marker) {
+      let city = normalized(marker.city)
+      let state = normalized(marker.state) ?? ""
+      let country = normalized(marker.country) ?? ""
+      let key: PlaceKey
+
+      if let city {
+        key = .city(city: city, state: state, country: country)
+      } else {
+        key = .area(
+          latitudeBucket: Int((marker.latitude / coordinateBucketStep).rounded()),
+          longitudeBucket: Int((marker.longitude / coordinateBucketStep).rounded()),
+          state: state,
+          country: country
+        )
+      }
+
+      buckets[key, default: []].append(marker)
+    }
+
+    let groups = buckets.map { entry in
+      let (key, markers) = entry
+      return MapPlaceGroup(
+        id: key.id,
+        title: key.title(for: markers[0]),
+        markers: markers
+      )
+    }
+
+    return groups.sorted { lhs, rhs in
+      let comparison = lhs.title.localizedStandardCompare(rhs.title)
+      return comparison == .orderedSame ? lhs.id < rhs.id : comparison == .orderedAscending
+    }
+  }
+
+  private static func normalized(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    return trimmed.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+  }
+
+  private enum PlaceKey: Hashable {
+    case city(city: String, state: String, country: String)
+    case area(latitudeBucket: Int, longitudeBucket: Int, state: String, country: String)
+
+    var id: String {
+      switch self {
+      case .city(let city, let state, let country):
+        return "city|\(city.utf8.count):\(city)|\(state.utf8.count):\(state)|\(country.utf8.count):\(country)"
+      case .area(let latitudeBucket, let longitudeBucket, let state, let country):
+        return "area|\(latitudeBucket)|\(longitudeBucket)|\(state.utf8.count):\(state)|\(country.utf8.count):\(country)"
+      }
+    }
+
+    func title(for marker: AssetMapMarker) -> String {
+      switch self {
+      case .city:
+        return placeName(city: marker.city, state: marker.state, country: marker.country) ?? "Pinned Photo"
+      case .area(let latitudeBucket, let longitudeBucket, _, _):
+        let coordinate = String(
+          format: "Near %.2f°, %.2f°",
+          Double(latitudeBucket) * MapPlaceGrouping.coordinateBucketStep,
+          Double(longitudeBucket) * MapPlaceGrouping.coordinateBucketStep
+        )
+        guard let region = placeName(city: nil, state: marker.state, country: marker.country) else {
+          return coordinate
+        }
+        return "\(coordinate) · \(region)"
+      }
+    }
+  }
+}
+
+private func placeName(city: String?, state: String?, country: String?) -> String? {
+  var parts: [String] = []
+  for value in [city, state, country].compactMap({ $0 }) {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { continue }
+    if !parts.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+      parts.append(trimmed)
+    }
+  }
+  return parts.isEmpty ? nil : parts.joined(separator: ", ")
+}
+
+private enum MapDisplayMode: String, CaseIterable, Identifiable {
+  case map = "Map"
+  case satellite = "Satellite"
+  case grid = "Grid"
+
+  var id: String { rawValue }
+
+  var mapType: MKMapType {
+    switch self {
+    case .map, .grid:
+      return .standard
+    case .satellite:
+      return .satellite
+    }
+  }
+}
+
+
 private enum MapMarkerAggregator {
   static func aggregate(_ markers: [AssetMapMarker]) -> [DisplayMapMarker] {
     guard markers.count > 1 else {
@@ -46,6 +164,7 @@ private enum MapMarkerAggregator {
           latitude: $0.latitude,
           longitude: $0.longitude,
           city: $0.city,
+          state: $0.state,
           country: $0.country,
           members: [$0]
         )
@@ -75,16 +194,17 @@ private enum MapMarkerAggregator {
     let latitudeBucket: Int
     let longitudeBucket: Int
     let city: String
+    let state: String
     let country: String
 
     init(marker: AssetMapMarker, coordinateStep: Double) {
       latitudeBucket = Int((marker.latitude / coordinateStep).rounded())
       longitudeBucket = Int((marker.longitude / coordinateStep).rounded())
       city = marker.city?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+      state = marker.state?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
       country = marker.country?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
   }
-
   private static func aggregationStep(for markerCount: Int) -> Double {
     switch markerCount {
     case 0..<2_000:
@@ -108,6 +228,9 @@ private enum MapMarkerAggregator {
       if lhs.city != rhs.city {
         return (lhs.city ?? "").localizedCaseInsensitiveCompare(rhs.city ?? "") == .orderedAscending
       }
+      if lhs.state != rhs.state {
+        return (lhs.state ?? "").localizedCaseInsensitiveCompare(rhs.state ?? "") == .orderedAscending
+      }
       if lhs.country != rhs.country {
         return (lhs.country ?? "").localizedCaseInsensitiveCompare(rhs.country ?? "") == .orderedAscending
       }
@@ -119,30 +242,13 @@ private enum MapMarkerAggregator {
       latitude: latitude,
       longitude: longitude,
       city: representative.city,
+      state: representative.state,
       country: representative.country,
       members: sortedMembers
     )
   }
 }
 
-private enum MapDisplayMode: String, CaseIterable, Identifiable {
-  case map = "Map"
-  case satellite = "Satellite"
-  case grid = "Grid"
-
-  var id: String { rawValue }
-
-  var mapType: MKMapType {
-    switch self {
-    case .map:
-      return .standard
-    case .satellite:
-      return .satellite
-    case .grid:
-      return .hybrid
-    }
-  }
-}
 
 // MapKit is surprisingly strict here: invalid spans or center coordinates can throw inside
 // `setRegion`, and libraries that straddle the antimeridian need a wrapped longitude arc
@@ -307,6 +413,7 @@ struct MapBrowserView: View {
   @State private var displayMode: MapDisplayMode = .map
   @State private var searchText = ""
   @State private var isShowingLocationGallery = false
+  @State private var placeGroups: [MapPlaceGroup] = []
 
   var body: some View {
     ZStack {
@@ -323,8 +430,10 @@ struct MapBrowserView: View {
       } else if !hasPositionedCamera {
         focus(on: displayMarkers.isEmpty ? allDisplayMarkers : displayMarkers)
       }
+      rebuildPlaceGroups()
     }
     .onChange(of: appState.mapMarkers) { _, markers in
+      rebuildPlaceGroups()
       guard !markers.isEmpty else { return }
       if !hasPositionedCamera {
         let aggregatedMarkers = MapMarkerAggregator.aggregate(markers)
@@ -333,9 +442,15 @@ struct MapBrowserView: View {
     }
     .onChange(of: searchText) { _, _ in
       selectionError = nil
+      rebuildPlaceGroups()
       let markers = displayMarkers
       guard !markers.isEmpty else { return }
       focus(on: markers)
+    }
+    .onChange(of: displayMode) { _, mode in
+      if mode == .grid {
+        isShowingLocationGallery = false
+      }
     }
   }
 
@@ -347,6 +462,7 @@ struct MapBrowserView: View {
     return appState.mapMarkers.filter { marker in
       [
         marker.city,
+        marker.state,
         marker.country,
         markerSearchLabel(for: marker),
       ]
@@ -370,6 +486,20 @@ struct MapBrowserView: View {
   }
 
   private var mapBackground: some View {
+    Group {
+      if displayMode == .grid {
+        placesGrid
+          .transition(.opacity)
+      } else {
+        mapCanvas
+          .transition(.opacity)
+      }
+    }
+    .animation(ImmichMotion.Curves.structuralShort, value: displayMode)
+  }
+
+  @ViewBuilder
+  private var mapCanvas: some View {
     ZStack {
       if appState.isLoadingMap && appState.mapMarkers.isEmpty {
         ProgressView("Loading map…")
@@ -390,13 +520,13 @@ struct MapBrowserView: View {
           thumbnailStore: thumbnailStore,
           thumbnailContext: appState.thumbnailContext,
           onSelectMarkers: handleMarkerSelection,
-          onOpenMarkers: handleMarkerOpen
+          onZoomMarkers: handleMarkerZoom
         )
         .overlay {
           ContentUnavailableView(
             "No Matching Places",
             systemImage: "magnifyingglass",
-            description: Text("Try a different city or country.")
+            description: Text("Try a different city, state, or country.")
           )
           .padding(32)
           .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -410,11 +540,95 @@ struct MapBrowserView: View {
           thumbnailStore: thumbnailStore,
           thumbnailContext: appState.thumbnailContext,
           onSelectMarkers: handleMarkerSelection,
-          onOpenMarkers: handleMarkerOpen
+          onZoomMarkers: handleMarkerZoom
         )
       }
     }
     .background(Color.black)
+  }
+
+  @ViewBuilder
+  private var placesGrid: some View {
+    if appState.isLoadingMap && appState.mapMarkers.isEmpty {
+      ProgressView("Loading places…")
+        .controlSize(.large)
+        .tint(.white)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else if appState.mapMarkers.isEmpty {
+      ContentUnavailableView(
+        "No places yet",
+        systemImage: "map",
+        description: Text(loadError ?? "Photos and videos with location data will appear here.")
+      )
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else if placeGroups.isEmpty {
+      ContentUnavailableView(
+        "No Matching Places",
+        systemImage: "magnifyingglass",
+        description: Text("Try a different city, state, or country.")
+      )
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 28) {
+          HStack(alignment: .firstTextBaseline) {
+            Text("Places")
+              .font(.largeTitle.weight(.bold))
+            Spacer()
+            Text("\(filteredMarkers.count.formatted()) items · \(placeGroups.count.formatted()) places")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+          }
+
+          ForEach(placeGroups) { group in
+            placeGroupView(group)
+          }
+        }
+        .padding(24)
+      }
+      .background(Color.black)
+    }
+  }
+
+  private func placeGroupView(_ group: MapPlaceGroup) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(group.title)
+            .font(.title2.weight(.semibold))
+          Text("\(group.markers.count.formatted()) items")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+
+        Spacer()
+
+        Button("Show on Map") {
+          showOnMap(group)
+        }
+        .buttonStyle(.bordered)
+      }
+
+      LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 200), spacing: 10)], spacing: 10) {
+        ForEach(group.markers) { marker in
+          Button {
+            Task {
+              await openGridAsset(marker)
+            }
+          } label: {
+            AssetThumbnailView(
+              item: .mapThumbnailPlaceholder(for: marker),
+              context: appState.thumbnailContext,
+              store: thumbnailStore
+            )
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Open item at \(group.title)")
+        }
+      }
+    }
   }
 
   private var floatingChrome: some View {
@@ -433,7 +647,7 @@ struct MapBrowserView: View {
 
       Spacer(minLength: 0)
 
-      if let marker = selectedMarker, !appState.mapSelectionItems.isEmpty || appState.isLoadingMapSelection || selectionError != nil {
+      if displayMode != .grid, let marker = selectedMarker, !appState.mapSelectionItems.isEmpty || appState.isLoadingMapSelection || selectionError != nil {
         selectedLocationTray(for: marker)
           .padding(.horizontal, 24)
           .padding(.bottom, 20)
@@ -567,6 +781,11 @@ struct MapBrowserView: View {
           openInMaps(marker)
         }
         .buttonStyle(.bordered)
+        Button("Show All") {
+          isShowingLocationGallery = true
+        }
+        .buttonStyle(.bordered)
+        .disabled(appState.mapSelectionItems.isEmpty)
       }
 
       if appState.isLoadingMapSelection {
@@ -632,27 +851,29 @@ struct MapBrowserView: View {
   }
 
   private func markerLabel(for marker: DisplayMapMarker) -> String {
-    let parts = [marker.city, marker.country]
-      .compactMap { value -> String? in
-        guard let value, !value.isEmpty else { return nil }
-        return value
-      }
-    if !parts.isEmpty {
-      return parts.joined(separator: ", ")
-    }
-    return "Pinned Photo"
+    placeName(city: marker.city, state: marker.state, country: marker.country) ?? "Pinned Photo"
   }
 
   private func markerSearchLabel(for marker: AssetMapMarker) -> String {
-    let parts = [marker.city, marker.country]
-      .compactMap { value -> String? in
-        guard let value, !value.isEmpty else { return nil }
-        return value
-      }
-    if !parts.isEmpty {
-      return parts.joined(separator: ", ")
-    }
-    return "Pinned Photo"
+    placeName(city: marker.city, state: marker.state, country: marker.country) ?? "Pinned Photo"
+  }
+
+  private func rebuildPlaceGroups() {
+    placeGroups = MapPlaceGrouping.groups(from: filteredMarkers)
+  }
+
+  private func showOnMap(_ group: MapPlaceGroup) {
+    appState.clearMapSelection()
+    selectionError = nil
+    isShowingLocationGallery = false
+    displayMode = .map
+    focus(on: MapMarkerAggregator.aggregate(group.markers))
+  }
+
+  private func openGridAsset(_ marker: AssetMapMarker) async {
+    selectionError = await appState.selectMapMarker(marker, markers: [marker])
+    guard let item = appState.mapSelectionItems.first(where: { $0.id == marker.id }) else { return }
+    onOpenAsset(item, .zero, heroImage(for: item))
   }
 
   private func refreshMarkers() async {
@@ -663,7 +884,6 @@ struct MapBrowserView: View {
       focus(on: markers)
     }
   }
-
   private func handleMarkerSelection(_ markers: [DisplayMapMarker]) {
     DispatchQueue.main.async {
       Task {
@@ -672,11 +892,12 @@ struct MapBrowserView: View {
     }
   }
 
-  private func handleMarkerOpen(_ markers: [DisplayMapMarker]) {
+  private func handleMarkerZoom(_ markers: [DisplayMapMarker]) {
     DispatchQueue.main.async {
-      Task {
-        await openMarkers(markers)
-      }
+      selectionError = nil
+      appState.clearMapSelection()
+      isShowingLocationGallery = false
+      focus(on: markers)
     }
   }
 
@@ -693,22 +914,6 @@ struct MapBrowserView: View {
 
     focus(on: first)
     selectionError = await appState.selectMapMarker(first.representative, markers: first.members)
-  }
-
-  private func openMarkers(_ markers: [DisplayMapMarker]) async {
-    guard let first = markers.first else { return }
-    selectionError = nil
-
-    if markers.count > 1 {
-      focus(on: markers)
-    } else {
-      focus(on: first)
-    }
-
-    selectionError = await appState.selectMapMarker(first.representative, markers: first.members)
-    if selectionError == nil || !appState.mapSelectionItems.isEmpty {
-      isShowingLocationGallery = !appState.mapSelectionItems.isEmpty
-    }
   }
 
   private func focus(on marker: DisplayMapMarker) {
@@ -741,16 +946,27 @@ private extension AssetMapMarker {
 }
 
 private extension AppState.PhotoItem {
+  static func mapThumbnailPlaceholder(for marker: AssetMapMarker) -> Self {
+    mapThumbnailPlaceholder(
+      for: DisplayMapMarker(
+        id: marker.id,
+        latitude: marker.latitude,
+        longitude: marker.longitude,
+        city: marker.city,
+        state: marker.state,
+        country: marker.country,
+        members: [marker]
+      )
+    )
+  }
+
   static func mapThumbnailPlaceholder(for marker: DisplayMapMarker) -> Self {
-    let title = [marker.city, marker.country]
-      .compactMap { $0 }
-      .filter { !$0.isEmpty }
-      .joined(separator: ", ")
+    let title = placeName(city: marker.city, state: marker.state, country: marker.country) ?? "Pinned Photo"
 
     return AppState.PhotoItem(
       id: marker.id,
       source: .remoteAsset(id: marker.representative.id),
-      title: title.isEmpty ? "Pinned Photo" : title,
+      title: title,
       date: .distantPast,
       isFavorite: false,
       isVideo: false,
@@ -777,14 +993,14 @@ private struct PlacesMapView: NSViewRepresentable {
   let thumbnailStore: ThumbnailStore
   let thumbnailContext: AppState.ThumbnailContext?
   let onSelectMarkers: ([DisplayMapMarker]) -> Void
-  let onOpenMarkers: ([DisplayMapMarker]) -> Void
+  let onZoomMarkers: ([DisplayMapMarker]) -> Void
 
   func makeCoordinator() -> Coordinator {
     Coordinator(
       thumbnailStore: thumbnailStore,
       thumbnailContext: thumbnailContext,
       onSelectMarkers: onSelectMarkers,
-      onOpenMarkers: onOpenMarkers
+      onZoomMarkers: onZoomMarkers
     )
   }
 
@@ -793,7 +1009,7 @@ private struct PlacesMapView: NSViewRepresentable {
     mapView.delegate = context.coordinator
     mapView.mapType = mapType
     mapView.showsCompass = false
-    mapView.showsZoomControls = false
+    mapView.showsZoomControls = true
     mapView.showsScale = false
     mapView.pointOfInterestFilter = .includingAll
     mapView.isPitchEnabled = false
@@ -808,7 +1024,7 @@ private struct PlacesMapView: NSViewRepresentable {
     defer { context.coordinator.isUpdating = false }
 
     context.coordinator.onSelectMarkers = onSelectMarkers
-    context.coordinator.onOpenMarkers = onOpenMarkers
+    context.coordinator.onZoomMarkers = onZoomMarkers
     context.coordinator.thumbnailContext = thumbnailContext
     context.coordinator.thumbnailStore = thumbnailStore
     context.coordinator.updateAnnotations(markers, on: mapView)
@@ -827,7 +1043,7 @@ private struct PlacesMapView: NSViewRepresentable {
     var thumbnailStore: ThumbnailStore
     var thumbnailContext: AppState.ThumbnailContext?
     var onSelectMarkers: ([DisplayMapMarker]) -> Void
-    var onOpenMarkers: ([DisplayMapMarker]) -> Void
+    var onZoomMarkers: ([DisplayMapMarker]) -> Void
     var isUpdating = false
 
     private var annotationSignatures: Set<String> = []
@@ -841,22 +1057,51 @@ private struct PlacesMapView: NSViewRepresentable {
       thumbnailStore: ThumbnailStore,
       thumbnailContext: AppState.ThumbnailContext?,
       onSelectMarkers: @escaping ([DisplayMapMarker]) -> Void,
-      onOpenMarkers: @escaping ([DisplayMapMarker]) -> Void
+      onZoomMarkers: @escaping ([DisplayMapMarker]) -> Void
     ) {
       self.thumbnailStore = thumbnailStore
       self.thumbnailContext = thumbnailContext
       self.onSelectMarkers = onSelectMarkers
-      self.onOpenMarkers = onOpenMarkers
+      self.onZoomMarkers = onZoomMarkers
     }
 
     func updateAnnotations(_ markers: [DisplayMapMarker], on mapView: MKMapView) {
-      let newSignatures = Set(markers.map { "\($0.id)|\($0.latitude)|\($0.longitude)|\($0.city ?? "")|\($0.country ?? "")" })
+      let markersBySignature = Dictionary(
+        markers.map { (Self.signature(for: $0), $0) },
+        uniquingKeysWith: { first, _ in first }
+      )
+      let newSignatures = Set(markersBySignature.keys)
       guard newSignatures != annotationSignatures else { return }
+
+      // Like Photos' in-place update plan, keep annotations that survive the change so MapKit
+      // animates clusters splitting/merging instead of rebuilding every view.
+      let existing = mapView.annotations.compactMap { $0 as? PhotoMapAnnotation }
+      let stale = existing.filter { !newSignatures.contains(Self.signature(for: $0.marker)) }
+      let retainedSignatures = Set(existing.map { Self.signature(for: $0.marker) }).subtracting(stale.map { Self.signature(for: $0.marker) })
+      let added = newSignatures.subtracting(retainedSignatures).compactMap { markersBySignature[$0] }
 
       annotationSignatures = newSignatures
       lastAppliedSelectedMarkerID = nil
-      mapView.removeAnnotations(mapView.annotations)
-      mapView.addAnnotations(markers.map(PhotoMapAnnotation.init))
+      mapView.removeAnnotations(stale)
+      mapView.addAnnotations(added.map(PhotoMapAnnotation.init))
+    }
+
+    static func signature(for marker: DisplayMapMarker) -> String {
+      "\(marker.id)|\(marker.latitude)|\(marker.longitude)|\(marker.city ?? "")|\(marker.state ?? "")|\(marker.country ?? "")"
+    }
+
+    /// Photos fades new place annotations in over 0.15 s (`-[PXPlacesMapController _fadeInAnimationDuration]`).
+    func mapView(_ mapView: MKMapView, didAdd views: [MKAnnotationView]) {
+      guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+      for view in views {
+        view.alphaValue = 0
+      }
+      NSAnimationContext.runAnimationGroup { context in
+        context.duration = 0.15
+        for view in views {
+          view.animator().alphaValue = 1
+        }
+      }
     }
 
     func applySelection(_ selectedMarkerID: String?, on mapView: MKMapView) {
@@ -902,7 +1147,7 @@ private struct PlacesMapView: NSViewRepresentable {
         }
         clusterView.onDoublePress = { [weak self] in
           let markers = cluster.memberAnnotations.compactMap { ($0 as? PhotoMapAnnotation)?.marker }
-          self?.onOpenMarkers(markers)
+          self?.onZoomMarkers(markers)
         }
         return clusterView
 
@@ -922,7 +1167,7 @@ private struct PlacesMapView: NSViewRepresentable {
           self?.onSelectMarkers([marker.marker])
         }
         markerView.onDoublePress = { [weak self] in
-          self?.onOpenMarkers([marker.marker])
+          self?.onZoomMarkers([marker.marker])
         }
         return markerView
 
@@ -964,10 +1209,7 @@ private final class PhotoMapAnnotation: NSObject, MKAnnotation {
 
   var coordinate: CLLocationCoordinate2D { marker.coordinate }
   var title: String? {
-    [marker.city, marker.country]
-      .compactMap { $0 }
-      .filter { !$0.isEmpty }
-      .joined(separator: ", ")
+    placeName(city: marker.city, state: marker.state, country: marker.country)
   }
 
   init(marker: DisplayMapMarker) {

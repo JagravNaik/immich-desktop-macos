@@ -35,6 +35,7 @@ struct LibraryGridView: View {
   @State private var dragSelectionState: DragSelectionState?
   @State private var keyboardScrollTargetID: String?
   @State private var pendingTimelineScrollToTop = false
+  @State private var pendingZoomScrollTargetID: String?
   @FocusState private var isKeyboardFocused: Bool
 
   private struct SpatialBucket: Hashable {
@@ -64,73 +65,105 @@ struct LibraryGridView: View {
     ]
   }
 
-  private var yearsGridColumns: [GridItem] {
-    Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
-  }
-
-  // MARK: - Years Grid
+  // MARK: - Years (Photos curated library)
 
   private func yearsGrid(scrollProxy: ScrollViewProxy) -> some View {
-    let context = appState.thumbnailContext
-    return interactiveGridChrome(
-      ScrollView {
-      LazyVGrid(columns: yearsGridColumns, spacing: 8) {
-        ForEach(appState.visibleLibraryYearSections) { section in
-          if let item = section.representativeItem ?? section.items.first {
-            Button {
-              // Switch to months view
-              appState.timelineViewMode = .months
-              // Bonus: scroll to that year? (Optional stretch goal)
-            } label: {
-              AssetThumbnailView(
-                item: item,
-                context: context,
-                store: thumbnailStore
-              )
-              .aspectRatio(1.0, contentMode: .fill)
-              .frame(minWidth: 0, maxWidth: .infinity)
-              .clipped()
-              .overlay(alignment: .topLeading) {
-                Text(section.title)
-                  .font(.system(size: 48, weight: .bold))
-                  .foregroundStyle(.white)
-                  .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
-                  .padding([.top, .leading], 12)
-              }
-              .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-              .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+    interactiveGridChrome(
+      CuratedYearsView(
+        sections: appState.visibleLibraryYearSections,
+        context: appState.thumbnailContext,
+        store: thumbnailStore,
+        onSelectYear: { year in
+          // Photos zooms from a year card into Months at that year.
+          pendingZoomScrollTargetID = "year-\(year.id)"
+          withAnimation(ImmichMotion.Curves.photosStandard) {
+            appState.timelineViewMode = .months
           }
         }
-      }
-      .padding(.horizontal, 8)
-      .padding(.vertical, 8)
-    },
+      ),
+      clearSelection: { appState.selectedItemID = nil }
+    )
+  }
+
+  // MARK: - Months (Photos curated library)
+
+  private func monthsCards(scrollProxy: ScrollViewProxy) -> some View {
+    let daySections = appState.visibleLibraryDaySections
+    return interactiveGridChrome(
+      CuratedMonthsView(
+        sections: appState.visibleLibrarySections,
+        context: appState.thumbnailContext,
+        store: thumbnailStore,
+        onSelectMonth: { month in
+          // A month card zooms into Days at that month.
+          let monthPrefix = String(month.id.prefix(7))
+          pendingZoomScrollTargetID = daySections.first { $0.id.hasPrefix(monthPrefix) }?.id
+          withAnimation(ImmichMotion.Curves.photosStandard) {
+            appState.timelineViewMode = .days
+          }
+        },
+        onSectionAppear: { section in
+          appState.loadMoreTimelineIfNeeded(after: section.id)
+        }
+      ),
+      clearSelection: { appState.selectedItemID = nil }
+    )
+  }
+
+  private func recentDaysMosaic() -> some View {
+    let context = appState.thumbnailContext
+    let sections = appState.visibleRecentDaySections
+    return interactiveGridChrome(
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 16) {
+          ForEach(sections) { section in
+            VStack(alignment: .leading, spacing: 8) {
+              HStack(alignment: .firstTextBaseline) {
+                Text(section.title)
+                  .font(.title2.weight(.bold))
+                  .foregroundStyle(.primary)
+                Spacer()
+                Text("\(section.itemCount)")
+                  .font(.subheadline)
+                  .foregroundStyle(.secondary)
+              }
+              .padding(.horizontal, 8)
+
+              monthsMosaicSection(items: section.items, context: context)
+            }
+            .id(section.id)
+          }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+      },
       clearSelection: { appState.selectedItemID = nil }
     )
     .animation(ImmichMotion.Curves.heroCollapse, value: appState.photoGridScaleIndex)
   }
 
-  // MARK: - Months Mosaic
+  // MARK: - Days (Photos curated library)
 
-  private func monthsMosaic(scrollProxy: ScrollViewProxy) -> some View {
+  /// Photos' Days zoom level: edge-to-edge day mosaics with 2 pt gaps, square corners, 5 pt
+  /// between days, and the date/place header drawn inline over the photos.
+  private func daysMosaic(scrollProxy: ScrollViewProxy) -> some View {
     let context = appState.thumbnailContext
-    let sections = appState.visibleLibrarySections
+    let sections = appState.visibleLibraryDaySections
     return interactiveGridChrome(
       ScrollView {
-      LazyVStack(alignment: .leading, spacing: 16) {
+      LazyVStack(alignment: .leading, spacing: CuratedLibrary.spacingBetweenDays) {
         ForEach(sections) { section in
-          VStack(alignment: .leading, spacing: 8) {
-            Text(section.title)
-              .font(.title2.weight(.bold))
-              .foregroundStyle(.primary)
-              .padding(.horizontal, 8)
-
-            monthsMosaicSection(items: section.items, context: context)
-          }
+          monthsMosaicSection(
+            items: section.items,
+            context: context,
+            spacing: CuratedLibrary.daysInteritemSpacing,
+            cornerRadius: CuratedLibrary.daysCornerRadius,
+            showsDayNumber: false
+          )
+          .overlay(alignment: .topLeading) { dayInlineHeader(section) }
+          .id(section.id)
           .onAppear {
-            appState.loadMoreTimelineIfNeeded(after: section.id)
+            appState.loadMoreTimelineIfNeeded(after: String(section.id.prefix(7)) + "-01")
           }
         }
 
@@ -159,31 +192,56 @@ struct LibraryGridView: View {
           .padding(.vertical, 16)
         }
       }
-      .padding(.horizontal, 8)
-      .padding(.vertical, 8)
     },
       clearSelection: { appState.selectedItemID = nil }
     )
     .animation(ImmichMotion.Curves.heroCollapse, value: appState.photoGridScaleIndex)
   }
 
+  /// Photos' inline Days header: date title and place subtitle over a top gradient.
+  private func dayInlineHeader(_ section: AppState.LibrarySection) -> some View {
+    VStack(alignment: .leading, spacing: 1) {
+      Text(section.title)
+        .font(.system(size: 17, weight: .bold))
+      if let place = CuratedLibrary.placeSummary(for: section.items) {
+        Text(place)
+          .font(.system(size: 12, weight: .semibold))
+          .opacity(0.85)
+      }
+    }
+    .foregroundStyle(.white)
+    .shadow(color: .black.opacity(0.4), radius: 3, y: 1)
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(
+      LinearGradient(colors: [.black.opacity(0.45), .black.opacity(0)], startPoint: .top, endPoint: .bottom)
+    )
+    .allowsHitTesting(false)
+  }
+
   @ViewBuilder
-  private func monthsMosaicSection(items: [AppState.PhotoItem], context: AppState.ThumbnailContext?) -> some View {
-    let spacing: CGFloat = 8
+  private func monthsMosaicSection(
+    items: [AppState.PhotoItem],
+    context: AppState.ThumbnailContext?,
+    spacing: CGFloat = 8,
+    cornerRadius: CGFloat = 12,
+    showsDayNumber: Bool = true
+  ) -> some View {
     VStack(spacing: spacing) {
       if items.count >= 3 {
         HStack(spacing: spacing) {
-          mosaicCell(item: items[0], context: context)
+          mosaicCell(item: items[0], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
             .aspectRatio(0.8, contentMode: .fill)
             .frame(minWidth: 0, maxWidth: .infinity)
             .layoutPriority(1)
           
           VStack(spacing: spacing) {
-            mosaicCell(item: items[1], context: context)
+            mosaicCell(item: items[1], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
               .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
               .clipped()
             
-            mosaicCell(item: items[2], context: context)
+            mosaicCell(item: items[2], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
               .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
               .clipped()
           }
@@ -191,15 +249,15 @@ struct LibraryGridView: View {
         }
       } else if items.count == 2 {
         HStack(spacing: spacing) {
-          mosaicCell(item: items[0], context: context)
+          mosaicCell(item: items[0], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
             .frame(maxWidth: .infinity)
             .aspectRatio(1.0, contentMode: .fill)
-          mosaicCell(item: items[1], context: context)
+          mosaicCell(item: items[1], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
             .frame(maxWidth: .infinity)
             .aspectRatio(1.0, contentMode: .fill)
         }
       } else if items.count == 1 {
-        mosaicCell(item: items[0], context: context)
+        mosaicCell(item: items[0], context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
           .frame(maxWidth: .infinity)
           .aspectRatio(1.5, contentMode: .fill)
       }
@@ -208,7 +266,7 @@ struct LibraryGridView: View {
       if items.count > 3 {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: 4), spacing: spacing) {
           ForEach(items.dropFirst(3)) { item in
-            mosaicCell(item: item, context: context)
+            mosaicCell(item: item, context: context, cornerRadius: cornerRadius, showsDayNumber: showsDayNumber)
               .aspectRatio(1.0, contentMode: .fill)
               .clipped()
           }
@@ -217,7 +275,12 @@ struct LibraryGridView: View {
     }
   }
 
-  private func mosaicCell(item: AppState.PhotoItem, context: AppState.ThumbnailContext?) -> some View {
+  private func mosaicCell(
+    item: AppState.PhotoItem,
+    context: AppState.ThumbnailContext?,
+    cornerRadius: CGFloat = 12,
+    showsDayNumber: Bool = true
+  ) -> some View {
     Button {
       appState.selectedItemID = item.id
       onOpenAsset(
@@ -232,13 +295,15 @@ struct LibraryGridView: View {
         store: thumbnailStore
       )
       .overlay(alignment: .topLeading) {
-        Text("\(item.dayOfMonth)")
-          .font(.system(size: 22, weight: .bold))
-          .foregroundStyle(.white)
-          .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
-          .padding([.top, .leading], 8)
+        if showsDayNumber {
+          Text("\(item.dayOfMonth)")
+            .font(.system(size: 22, weight: .bold))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
+            .padding([.top, .leading], 8)
+        }
       }
-      .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+      .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
       .contentShape(Rectangle())
       .background {
         GeometryReader { proxy in
@@ -267,10 +332,14 @@ struct LibraryGridView: View {
           } else {
             emptyView
           }
+        } else if appState.sidebarSelection == .recentDays && !appState.hasActiveSearchQueryOrFilters {
+          recentDaysMosaic()
         } else if isLibraryTimeline && appState.timelineViewMode == .years {
           yearsGrid(scrollProxy: proxy)
         } else if isLibraryTimeline && appState.timelineViewMode == .months {
-          monthsMosaic(scrollProxy: proxy)
+          monthsCards(scrollProxy: proxy)
+        } else if isLibraryTimeline && appState.timelineViewMode == .days {
+          daysMosaic(scrollProxy: proxy)
         } else {
           flatGrid(scrollProxy: proxy)
         }
@@ -283,6 +352,15 @@ struct LibraryGridView: View {
       }
       .onChange(of: appState.timelineViewMode) { previousMode, newMode in
         guard isLibraryTimeline else { return }
+        if let targetID = pendingZoomScrollTargetID {
+          pendingZoomScrollTargetID = nil
+          DispatchQueue.main.async {
+            withAnimation(ImmichMotion.Curves.structuralMedium) {
+              proxy.scrollTo(targetID, anchor: .top)
+            }
+          }
+          return
+        }
         guard previousMode != .allPhotos, newMode == .allPhotos else { return }
         pendingTimelineScrollToTop = true
         DispatchQueue.main.async {
@@ -314,7 +392,9 @@ struct LibraryGridView: View {
     let isLibrary = appState.sidebarSelection == .library || appState.sidebarSelection == nil
     if isLibrary && !appState.hasActiveSearchQueryOrFilters {
       if appState.timelineViewMode == .months {
-        return appState.visibleLibrarySections.flatMap(\.items)
+        return appState.visibleLibrarySections.compactMap { CuratedLibrary.keyItem(in: $0.items) }
+      } else if appState.timelineViewMode == .days {
+        return appState.visibleLibraryDaySections.flatMap(\.items)
       } else if appState.timelineViewMode == .years {
         return appState.visibleLibraryYearSections.compactMap { $0.representativeItem ?? $0.items.first }
       }
@@ -895,6 +975,10 @@ struct PhotoGridCell: View {
     }
   }
 
+  @AppStorage(GridMetadataPreference.favoriteKey) private var showsFavoriteBadge = true
+  @AppStorage(GridMetadataPreference.locationKey) private var showsLocationBadge = false
+  @AppStorage(GridMetadataPreference.ratingKey) private var showsRatingBadge = false
+
   private var contentLayer: some View {
     AssetThumbnailView(
       item: item,
@@ -916,10 +1000,21 @@ struct PhotoGridCell: View {
     }
     .overlay(alignment: .bottomLeading) {
       HStack(spacing: 3) {
-        if item.isFavorite {
+        if showsFavoriteBadge, item.isFavorite {
           Image(systemName: "heart.fill")
             .foregroundStyle(.white)
             .accessibilityHidden(true)
+        }
+        // Photos' IPXLocationBadge ("Location Set"), shown via View ▸ Metadata ▸ Location.
+        if showsLocationBadge, item.latitude != nil, item.longitude != nil {
+          Image(systemName: "location.fill")
+            .help("Location Set")
+            .accessibilityLabel(Text("location set"))
+        }
+        if showsRatingBadge, let rating = item.rating, rating > 0 {
+          Text(String(repeating: "★", count: rating))
+            .font(.caption2)
+            .accessibilityLabel(Text("\(rating) star rating"))
         }
         if item.isVideo {
           Image(systemName: "video.fill")

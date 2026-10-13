@@ -212,10 +212,13 @@ swift build \
   --package-path "$PROJECT_DIR" \
   --product "$APP_NAME"
 
-EXECUTABLE_PATH="$(
-  find "${PROJECT_DIR}/.build" -type f -path "*/${BUILD_CONFIGURATION}/${APP_NAME}" -perm -u+x -print -quit
+BIN_PATH="$(
+  swift build --show-bin-path \
+    -c "$BUILD_CONFIGURATION" \
+    --package-path "$PROJECT_DIR" \
+    --product "$APP_NAME"
 )"
-
+EXECUTABLE_PATH="${BIN_PATH}/${APP_NAME}"
 if [[ ! -x "$EXECUTABLE_PATH" ]]; then
   echo "Expected executable not found at ${EXECUTABLE_PATH}" >&2
   exit 1

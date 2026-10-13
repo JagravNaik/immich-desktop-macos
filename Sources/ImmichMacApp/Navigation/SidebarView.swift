@@ -8,6 +8,7 @@ enum SidebarDestination: Hashable {
   case library
   case collections
   case map
+  case recentDays
 
   // Pinned
   case pinnedAlbum(id: String)
@@ -31,6 +32,8 @@ enum SidebarDestination: Hashable {
   // Utilities
   case imports
   case recentlyDeleted
+  case hidden
+  case duplicates
   case favorites
 
   // Memories
@@ -39,6 +42,7 @@ enum SidebarDestination: Hashable {
   var label: String {
     switch self {
     case .library: "Library"
+    case .recentDays: "Recent Days"
     case .collections: "Collections"
     case .map: "Map"
     case .pinnedAlbum: "Pinned Album"
@@ -53,6 +57,8 @@ enum SidebarDestination: Hashable {
     case .screenshots: "Screenshots"
     case .imports: "Imports"
     case .recentlyDeleted: "Recently Deleted"
+    case .hidden: "Hidden"
+    case .duplicates: "Duplicates"
     case .favorites: "Favorites"
     case .memory: "Memory"
     }
@@ -61,6 +67,7 @@ enum SidebarDestination: Hashable {
   var iconName: String {
     switch self {
     case .library: "photo.on.rectangle.angled"
+    case .recentDays: "calendar"
     case .collections: "square.grid.2x2"
     case .map: "map"
     case .pinnedAlbum: "pin.fill"
@@ -75,6 +82,8 @@ enum SidebarDestination: Hashable {
     case .screenshots: "camera.viewfinder"
     case .imports: "square.and.arrow.down"
     case .recentlyDeleted: "trash"
+    case .hidden: "eye.slash"
+    case .duplicates: "square.on.square"
     case .favorites: "heart"
     case .memory: "memories"
     }
@@ -86,6 +95,8 @@ enum SidebarDestination: Hashable {
 struct SidebarSectionState {
   var isPinnedExpanded = true
   var isAlbumsExpanded = true
+  var isPeopleExpanded = true
+  var isMemoriesExpanded = true
   var isMediaTypesExpanded = true
   var isUtilitiesExpanded = true
 }
@@ -110,6 +121,14 @@ struct SidebarView: View {
       // Albums
       albumsSection
 
+      // People and memories
+      if !appState.people.isEmpty {
+        peopleSection
+      }
+      if !appState.memories.isEmpty {
+        memoriesSection
+      }
+
       // Media Types
       mediaTypesSection
 
@@ -132,6 +151,10 @@ struct SidebarView: View {
       Label("Library", systemImage: "photo.on.rectangle.angled")
         .tag(SidebarDestination.library)
         .fontWeight(selection == .library ? .semibold : .regular)
+
+      Label("Recent Days", systemImage: "calendar")
+        .tag(SidebarDestination.recentDays)
+        .fontWeight(selection == .recentDays ? .semibold : .regular)
 
       Label("Collections", systemImage: "square.grid.2x2")
         .tag(SidebarDestination.collections)
@@ -173,6 +196,42 @@ struct SidebarView: View {
     }
   }
 
+  // MARK: - People and Memories
+
+  private var peopleSection: some View {
+    Section(isExpanded: $sectionState.isPeopleExpanded) {
+      Label("All People", systemImage: "person.2")
+        .tag(SidebarDestination.allPeople)
+
+      ForEach(appState.people.filter { !$0.isHidden }.prefix(8)) { person in
+        Label(person.name.isEmpty ? "Unknown" : person.name, systemImage: "person.crop.circle")
+          .badge(person.assetCount)
+          .tag(SidebarDestination.person(id: person.id))
+      }
+    } header: {
+      sectionHeader("People & Pets", isExpanded: $sectionState.isPeopleExpanded)
+    }
+  }
+
+  private var memoriesSection: some View {
+    Section(isExpanded: $sectionState.isMemoriesExpanded) {
+      Label("All Memories", systemImage: "memories")
+        .tag(SidebarDestination.allMemories)
+
+      ForEach(appState.memories.prefix(6)) { memory in
+        Label {
+          Text(memory.title)
+            .lineLimit(1)
+        } icon: {
+          Image(systemName: "memories")
+        }
+        .tag(SidebarDestination.memory(id: memory.id))
+      }
+    } header: {
+      sectionHeader("Memories", isExpanded: $sectionState.isMemoriesExpanded)
+    }
+  }
+
   // MARK: - Media Types Section
 
   private var mediaTypesSection: some View {
@@ -202,6 +261,13 @@ struct SidebarView: View {
 
       Label("Imports", systemImage: "square.and.arrow.down")
         .tag(SidebarDestination.imports)
+
+      Label("Duplicates", systemImage: "square.on.square")
+        .tag(SidebarDestination.duplicates)
+
+      // Photos shows Hidden in Utilities (View ▸ Show Hidden Photo Album).
+      Label("Hidden", systemImage: "eye.slash")
+        .tag(SidebarDestination.hidden)
 
       Label {
         Text("Recently Deleted")

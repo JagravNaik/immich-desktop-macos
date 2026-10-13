@@ -183,6 +183,29 @@ final class ThumbnailStore: ObservableObject {
     telemetryLogTask?.cancel()
   }
 
+  /// Assets whose edits changed this session; their images skip the HTTP cache from now on.
+  private var editedAssetIDs: Set<String> = []
+  /// Bumped per asset on invalidation so views keyed on it reload.
+  @Published private(set) var assetRevisions: [String: Int] = [:]
+
+  func revision(for item: AppState.PhotoItem) -> Int {
+    if case .remoteAsset(let assetID) = item.source { return assetRevisions[assetID, default: 0] }
+    return 0
+  }
+
+  /// Drops every cached size of an asset after its Immich edits change.
+  func invalidate(assetID: String, context: AppState.ThumbnailContext?) {
+    editedAssetIDs.insert(assetID)
+    for size in [ThumbnailSize.thumbnail, .preview, .original] {
+      let key = "remote::\(context?.baseURL.absoluteString ?? "")::\(assetID)::\(size.rawValue)"
+      if let image = cache.object(forKey: key as NSString) {
+        unregisterCachedImage(image)
+      }
+      cache.removeObject(forKey: key as NSString)
+    }
+    assetRevisions[assetID, default: 0] += 1
+  }
+
   /// Synchronous cache-only lookup — returns nil if not cached, never triggers a network fetch.
   func cachedImage(
     for item: AppState.PhotoItem,
@@ -213,6 +236,10 @@ final class ThumbnailStore: ObservableObject {
     if existingTask != nil {
       telemetry.inFlightJoins += 1
     }
+    let bypassHTTPCache: Bool = {
+      if case .remoteAsset(let assetID) = item.source { return editedAssetIDs.contains(assetID) }
+      return false
+    }()
     let task = existingTask ?? {
       telemetry.inFlightStarts += 1
       let limiter = loadClass == .interactive ? interactiveLoadLimiter : backgroundLoadLimiter
@@ -233,7 +260,8 @@ final class ThumbnailStore: ObservableObject {
             return await Self.loadRemoteImage(
               assetID: assetID,
               context: context,
-              size: size
+              size: size,
+              bypassHTTPCache: bypassHTTPCache
             )
           }
         }
@@ -466,7 +494,8 @@ final class ThumbnailStore: ObservableObject {
   private static func loadRemoteImage(
     assetID: String,
     context: AppState.ThumbnailContext,
-    size: ThumbnailSize
+    size: ThumbnailSize,
+    bypassHTTPCache: Bool = false
   ) async -> ImageLoadResult {
     let url: URL?
     if size == .original {
@@ -477,6 +506,9 @@ final class ThumbnailStore: ObservableObject {
     guard let url else { return .empty }
 
     var request = URLRequest(url: url)
+    if bypassHTTPCache {
+      request.cachePolicy = .reloadIgnoringLocalCacheData
+    }
     context.apply(to: &request)
 
     do {
@@ -589,7 +621,11 @@ final class ThumbnailStore: ObservableObject {
         .appending(path: "thumbnail"),
       resolvingAgainstBaseURL: false
     )
-    components?.queryItems = [URLQueryItem(name: "size", value: size.rawValue)]
+    // `edited=true` shows Immich's non-destructive crop/rotate/mirror edits, as Photos does.
+    components?.queryItems = [
+      URLQueryItem(name: "size", value: size.rawValue),
+      URLQueryItem(name: "edited", value: "true"),
+    ]
     return components?.url
   }
 
@@ -601,7 +637,7 @@ final class ThumbnailStore: ObservableObject {
         .appending(path: "original"),
       resolvingAgainstBaseURL: false
     )
-    components?.queryItems = []
+    components?.queryItems = [URLQueryItem(name: "edited", value: "true")]
     return components?.url
   }
 
@@ -626,7 +662,7 @@ final class ThumbnailStore: ObservableObject {
 struct AssetThumbnailView: View {
   let item: AppState.PhotoItem
   let context: AppState.ThumbnailContext?
-  let store: ThumbnailStore
+  @ObservedObject var store: ThumbnailStore
 
   @State private var image: NSImage?
   @State private var imageOpacity: Double = 0
@@ -674,7 +710,7 @@ struct AssetThumbnailView: View {
     case .localFile(let fileURL):
       return "local::\(fileURL.path)"
     case .remoteAsset(let assetID):
-      return "remote::\(assetID)::\(context?.baseURL.absoluteString ?? "")"
+      return "remote::\(assetID)::\(context?.baseURL.absoluteString ?? "")::\(store.revision(for: item))"
     }
   }
 }
