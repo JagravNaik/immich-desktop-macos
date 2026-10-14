@@ -83,6 +83,7 @@ Useful bundle options:
 ./scripts/build-app.sh --debug
 ./scripts/build-app.sh --release
 ./scripts/build-app.sh --open
+./scripts/build-app.sh --release --universal   # one binary for Apple silicon and Intel
 ./scripts/build-app.sh --output /tmp/immich-macos
 ```
 

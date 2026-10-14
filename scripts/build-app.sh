@@ -10,7 +10,7 @@ OPEN_AFTER_BUILD=0
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-"-"}"
 
 usage() {
-  echo "Usage: $0 [--debug|--release] [--open] [--output <directory>]" >&2
+  echo "Usage: $0 [--debug|--release] [--universal] [--open] [--output <directory>]" >&2
   echo "Environment: CODESIGN_IDENTITY=\"Apple Development: Your Name (TEAMID)\"" >&2
 }
 
@@ -39,6 +39,10 @@ while (($# > 0)); do
       ;;
     --release)
       BUILD_CONFIGURATION="release"
+      ;;
+    --universal)
+      # Build one binary for both Apple silicon and Intel Macs.
+      ARCHS="arm64 x86_64"
       ;;
     --open)
       OPEN_AFTER_BUILD=1
@@ -162,6 +166,11 @@ resolve_version() {
 
 normalize_short_version() {
   local raw_version="${1#v}"
+  # `git describe --always` falls back to a bare commit hash when no tag is reachable
+  # (for example in a shallow CI checkout); that is not a version.
+  if [[ "$raw_version" =~ ^[0-9a-f]{7,40}$ ]] && [[ ! "$raw_version" =~ ^[0-9]+$ ]]; then
+    raw_version="0.0.0"
+  fi
   raw_version="${raw_version%%+*}"
   raw_version="$(printf '%s' "$raw_version" | sed -E 's/-[0-9]+-g[0-9a-f]+$//; s/[^0-9.].*$//; s/^\.//; s/\.$//')"
   if [[ -z "$raw_version" ]]; then
@@ -207,16 +216,23 @@ BUNDLE_VERSION="$(normalize_bundle_version "$RAW_VERSION")"
 
 mkdir -p "$OUTPUT_ROOT"
 
+ARCH_FLAGS=()
+for arch in ${ARCHS:-}; do
+  ARCH_FLAGS+=(--arch "$arch")
+done
+
 swift build \
   -c "$BUILD_CONFIGURATION" \
   --package-path "$PROJECT_DIR" \
-  --product "$APP_NAME"
+  --product "$APP_NAME" \
+  ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
 
 BIN_PATH="$(
   swift build --show-bin-path \
     -c "$BUILD_CONFIGURATION" \
     --package-path "$PROJECT_DIR" \
-    --product "$APP_NAME"
+    --product "$APP_NAME" \
+    ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
 )"
 EXECUTABLE_PATH="${BIN_PATH}/${APP_NAME}"
 if [[ ! -x "$EXECUTABLE_PATH" ]]; then
